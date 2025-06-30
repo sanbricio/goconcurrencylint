@@ -16,12 +16,17 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
+// Analyzer is the main entry point for the goconcurrentlint linter.
+// It detects common mistakes in the use of sync.Mutex and sync.WaitGroup:
+// - Locks without unlocks
+// - Add without Done
 var Analyzer = &analysis.Analyzer{
 	Name: "goconcurrentlint",
 	Doc:  "Detects common mistakes in the use of sync.Mutex and sync.WaitGroup: locks without unlock and Add without Done.",
 	Run:  run,
 }
 
+// isMutex returns true if the given type is sync.Mutex or *sync.Mutex.
 func isMutex(typ types.Type) bool {
 	if ptr, ok := typ.(*types.Pointer); ok {
 		typ = ptr.Elem()
@@ -33,6 +38,7 @@ func isMutex(typ types.Type) bool {
 	return named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "sync" && named.Obj().Name() == "Mutex"
 }
 
+// isWaitGroup returns true if the given type is sync.WaitGroup or *sync.WaitGroup.
 func isWaitGroup(typ types.Type) bool {
 	if ptr, ok := typ.(*types.Pointer); ok {
 		typ = ptr.Elem()
@@ -44,6 +50,7 @@ func isWaitGroup(typ types.Type) bool {
 	return named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "sync" && named.Obj().Name() == "WaitGroup"
 }
 
+// getVarName returns the variable name from an ast.Expr, or "?" if not an identifier.
 func getVarName(expr ast.Expr) string {
 	if id, ok := expr.(*ast.Ident); ok {
 		return id.Name
@@ -51,6 +58,7 @@ func getVarName(expr ast.Expr) string {
 	return "?"
 }
 
+// sameExpr returns true if two expressions refer to the same variable and type.
 func sameExpr(pass *analysis.Pass, a, b ast.Expr) bool {
 	ta := pass.TypesInfo.Types[a]
 	tb := pass.TypesInfo.Types[b]
@@ -62,18 +70,16 @@ func sameExpr(pass *analysis.Pass, a, b ast.Expr) bool {
 	return ta.Type == tb.Type
 }
 
-// hasUnlockInNode busca unlock en cualquier nodo AST, incluyendo funciones anónimas
-func hasUnlockInNode(node ast.Node, muName string) bool {
+// hasCallInNode checks if a call to methodName on varName exists anywhere in the AST node.
+func hasCallInNode(node ast.Node, varName, methodName string) bool {
 	found := false
 	ast.Inspect(node, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-
-		// Direct unlock call
 		if call, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Unlock" && getVarName(sel.X) == muName {
+				if sel.Sel.Name == methodName && getVarName(sel.X) == varName {
 					found = true
 					return false
 				}
@@ -84,75 +90,17 @@ func hasUnlockInNode(node ast.Node, muName string) bool {
 	return found
 }
 
-func hasDeferUnlock(fn *ast.FuncDecl, muName string) bool {
-	found := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-
-		deferStmt, ok := n.(*ast.DeferStmt)
-		if !ok {
-			return true
-		}
-
-		// Case 1: defer mu.Unlock()
-		if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-			if ident, ok := call.X.(*ast.Ident); ok {
-				if call.Sel.Name == "Unlock" && ident.Name == muName {
-					found = true
-					return false
-				}
-			}
-		}
-
-		// Case 2: defer func() { ... mu.Unlock() ... }()
-		if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
-			if hasUnlockInNode(callExpr.Body, muName) {
-				found = true
-				return false
-			}
-		}
-
-		return true
-	})
-	return found
-}
-
-// hasDoneLiteInNode busca Done en cualquier nodo AST, incluyendo funciones anónimas
-func hasDoneInNode(node ast.Node, wgName string) bool {
-	found := false
-	ast.Inspect(node, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-
-		// Direct Done call
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Done" && getVarName(sel.X) == wgName {
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return found
-}
-
+// hasDeferDone checks if a function defers wg.Done() or an equivalent call inside a deferred function literal.
 func hasDeferDone(fn *ast.FuncDecl, wgName string) bool {
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-
 		deferStmt, ok := n.(*ast.DeferStmt)
 		if !ok {
 			return true
 		}
-
 		// Case 1: defer wg.Done()
 		if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
 			if ident, ok := call.X.(*ast.Ident); ok {
@@ -162,227 +110,44 @@ func hasDeferDone(fn *ast.FuncDecl, wgName string) bool {
 				}
 			}
 		}
-
 		// Case 2: defer func() { ... wg.Done() ... }()
 		if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
-			if hasDoneInNode(callExpr.Body, wgName) {
+			if hasCallInNode(callExpr.Body, wgName, "Done") {
 				found = true
 				return false
 			}
 		}
-
 		return true
 	})
 	return found
 }
 
-// Busca unlock o defer unlock después de un if en el bloque superior
-func unlockAfterIf(block *ast.BlockStmt, afterPos token.Pos, muName string) bool {
-	for _, stmt := range block.List {
-		if stmt.Pos() <= afterPos {
-			continue
+// isAfterUnreachableCode returns true if the given position is after a panic or return statement in the block.
+func isAfterUnreachableCode(body *ast.BlockStmt, pos token.Pos) bool {
+	for _, stmt := range body.List {
+		if stmt.End() >= pos {
+			break
 		}
-		// Direct unlock
-		exprStmt, ok := stmt.(*ast.ExprStmt)
-		if ok {
-			call, ok := exprStmt.X.(*ast.CallExpr)
-			if ok {
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if ok && sel.Sel.Name == "Unlock" && getVarName(sel.X) == muName {
-					return true
+		if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
+			if call, ok := exprStmt.X.(*ast.CallExpr); ok {
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					if ident.Name == "panic" {
+						return true
+					}
 				}
 			}
 		}
-		// Defer unlock
-		deferStmt, ok := stmt.(*ast.DeferStmt)
-		if ok {
-			// Direct defer mu.Unlock()
-			if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-				if call.Sel.Name == "Unlock" && getVarName(call.X) == muName {
-					return true
-				}
-			}
-			// defer func() { ... mu.Unlock() ... }()
-			if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
-				if hasUnlockInNode(callExpr.Body, muName) {
-					return true
-				}
-			}
+		if _, ok := stmt.(*ast.ReturnStmt); ok {
+			return true
 		}
 	}
 	return false
 }
 
-// Analiza if sin else, reporta lock si no unlockea ni en la rama ni fuera
-func checkLocksInIfNoElse(pass *analysis.Pass, fn *ast.FuncDecl, reportedLocks map[token.Pos]bool) {
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		ifStmt, ok := n.(*ast.IfStmt)
-		if !ok || ifStmt.Else != nil {
-			return true // Solo if sin else
-		}
-		for i, stmt := range ifStmt.Body.List {
-			exprStmt, ok := stmt.(*ast.ExprStmt)
-			if !ok {
-				continue
-			}
-			call, ok := exprStmt.X.(*ast.CallExpr)
-			if !ok {
-				continue
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				continue
-			}
-			typ := pass.TypesInfo.TypeOf(sel.X)
-			if isMutex(typ) && sel.Sel.Name == "Lock" {
-				muName := getVarName(sel.X)
-				lockPos := stmt.Pos()
-				foundUnlock := false
-				// Busca unlock en el mismo bloque después del lock
-				for _, afterStmt := range ifStmt.Body.List[i+1:] {
-					// Direct unlock
-					afterExpr, ok := afterStmt.(*ast.ExprStmt)
-					if ok {
-						afterCall, ok := afterExpr.X.(*ast.CallExpr)
-						if ok {
-							afterSel, ok := afterCall.Fun.(*ast.SelectorExpr)
-							if ok && afterSel.Sel.Name == "Unlock" && getVarName(afterSel.X) == muName {
-								foundUnlock = true
-								break
-							}
-						}
-					}
-					// Defer unlock
-					deferStmt, ok := afterStmt.(*ast.DeferStmt)
-					if ok {
-						// Direct defer mu.Unlock()
-						if deferCall, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-							if deferCall.Sel.Name == "Unlock" && getVarName(deferCall.X) == muName {
-								foundUnlock = true
-								break
-							}
-						}
-						// defer func() { ... mu.Unlock() ... }()
-						if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
-							if hasUnlockInNode(callExpr.Body, muName) {
-								foundUnlock = true
-								break
-							}
-						}
-					}
-				}
-				// Unlock global después del if o defer en la función
-				if !foundUnlock && !unlockAfterIf(fn.Body, ifStmt.End(), muName) && !hasDeferUnlock(fn, muName) {
-					if !reportedLocks[lockPos] {
-						pass.Reportf(lockPos, "mutex '%s' is locked but not unlocked", muName)
-						reportedLocks[lockPos] = true
-					}
-				}
-			}
-		}
-		return true
-	})
-}
-
-// Analiza if/else: ambas ramas deben unlockear el mismo mutex si lo lockean
-func checkLocksInIfElse(pass *analysis.Pass, fn *ast.FuncDecl, reportedLocks map[token.Pos]bool) {
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		ifStmt, ok := n.(*ast.IfStmt)
-		if !ok || ifStmt.Else == nil {
-			return true // Solo if con else
-		}
-		locksInThen := findLocksInBlock(pass, ifStmt.Body)
-		locksInElse := findLocksInBlock(pass, ifStmt.Else.(*ast.BlockStmt))
-		// Si hay lock en alguna rama, debe unlockearse en esa rama
-		for _, lockThen := range locksInThen {
-			if !hasUnlockInBlock(ifStmt.Body, lockThen.varName) {
-				if !reportedLocks[lockThen.pos] {
-					pass.Reportf(lockThen.pos, "mutex '%s' is locked but not unlocked", lockThen.varName)
-					reportedLocks[lockThen.pos] = true
-				}
-			}
-		}
-		for _, lockElse := range locksInElse {
-			if !hasUnlockInBlock(ifStmt.Else.(*ast.BlockStmt), lockElse.varName) {
-				if !reportedLocks[lockElse.pos] {
-					pass.Reportf(lockElse.pos, "mutex '%s' is locked but not unlocked", lockElse.varName)
-					reportedLocks[lockElse.pos] = true
-				}
-			}
-		}
-		return true
-	})
-}
-
-type lockInfo struct {
-	varName string
-	pos     token.Pos
-}
-
-// Encuentra los locks en un bloque
-func findLocksInBlock(pass *analysis.Pass, block *ast.BlockStmt) []lockInfo {
-	var locks []lockInfo
-	for _, stmt := range block.List {
-		exprStmt, ok := stmt.(*ast.ExprStmt)
-		if !ok {
-			continue
-		}
-		call, ok := exprStmt.X.(*ast.CallExpr)
-		if !ok {
-			continue
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			continue
-		}
-		typ := pass.TypesInfo.TypeOf(sel.X)
-		if isMutex(typ) && sel.Sel.Name == "Lock" {
-			locks = append(locks, lockInfo{varName: getVarName(sel.X), pos: stmt.Pos()})
-		}
-	}
-	return locks
-}
-
-// ¿Hay unlock (o defer unlock) en ese bloque para ese nombre?
-func hasUnlockInBlock(block *ast.BlockStmt, name string) bool {
-	for _, stmt := range block.List {
-		// Direct unlock
-		exprStmt, ok := stmt.(*ast.ExprStmt)
-		if ok {
-			call, ok := exprStmt.X.(*ast.CallExpr)
-			if ok {
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if ok && sel.Sel.Name == "Unlock" && getVarName(sel.X) == name {
-					return true
-				}
-			}
-		}
-		// Defer unlock
-		deferStmt, ok := stmt.(*ast.DeferStmt)
-		if ok {
-			// Direct defer mu.Unlock()
-			if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-				if call.Sel.Name == "Unlock" && getVarName(call.X) == name {
-					return true
-				}
-			}
-			// defer func() { ... mu.Unlock() ... }()
-			if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
-				if hasUnlockInNode(callExpr.Body, name) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-// Check for unlock without corresponding lock
+// checkUnlockWithoutLock reports unlocks (direct or deferred) for a mutex that is never locked.
 func checkUnlockWithoutLock(pass *analysis.Pass, fn *ast.FuncDecl) {
-	// Check each mutex individually
 	mutexNames := make(map[string]bool)
-
-	// First, collect all mutex names used in the function
+	// Collect all mutex variable names used in the function
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
@@ -402,13 +167,37 @@ func checkUnlockWithoutLock(pass *analysis.Pass, fn *ast.FuncDecl) {
 		}
 		return true
 	})
-
-	// For each mutex, check the lock/unlock pattern
 	for muName := range mutexNames {
 		var deferUnlockPos token.Pos
 		foundReachableLock := false
-
-		// Check for defer unlock first
+		var lockCount int
+		// Count all Lock calls for this mutex
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Lock" && getVarName(sel.X) == muName {
+						lockCount++
+					}
+				}
+			}
+			return true
+		})
+		// Report direct unlocks without prior lock
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if exprStmt, ok := n.(*ast.ExprStmt); ok {
+				if call, ok := exprStmt.X.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+						if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Unlock" && getVarName(sel.X) == muName {
+							if lockCount == 0 {
+								pass.Reportf(exprStmt.Pos(), "mutex '%s' is unlocked but not locked", muName)
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+		// Check for defer unlocks
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if deferStmt, ok := n.(*ast.DeferStmt); ok {
 				if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
@@ -416,31 +205,21 @@ func checkUnlockWithoutLock(pass *analysis.Pass, fn *ast.FuncDecl) {
 						deferUnlockPos = deferStmt.Pos()
 					}
 				}
-				// Also check defer func() { mu.Unlock() }
 				if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
-					ast.Inspect(callExpr.Body, func(inner ast.Node) bool {
-						if call, ok := inner.(*ast.CallExpr); ok {
-							if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-								if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Unlock" && getVarName(sel.X) == muName {
-									deferUnlockPos = deferStmt.Pos()
-								}
-							}
-						}
-						return true
-					})
+					if hasCallInNode(callExpr.Body, muName, "Unlock") {
+						deferUnlockPos = deferStmt.Pos()
+					}
 				}
 			}
 			return true
 		})
-
-		// Check for locks and if they're reachable
+		// Check for reachable locks if defer unlock exists
 		if deferUnlockPos != 0 {
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				if exprStmt, ok := n.(*ast.ExprStmt); ok {
 					if call, ok := exprStmt.X.(*ast.CallExpr); ok {
 						if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 							if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Lock" && getVarName(sel.X) == muName {
-								// Check if this lock is reachable (not after panic, return, etc.)
 								if !isAfterUnreachableCode(fn.Body, exprStmt.Pos()) {
 									foundReachableLock = true
 								}
@@ -450,8 +229,6 @@ func checkUnlockWithoutLock(pass *analysis.Pass, fn *ast.FuncDecl) {
 				}
 				return true
 			})
-
-			// If there's a defer unlock but no reachable lock, report error
 			if !foundReachableLock {
 				pass.Reportf(deferUnlockPos, "mutex '%s' has defer unlock but no corresponding lock", muName)
 			}
@@ -459,33 +236,64 @@ func checkUnlockWithoutLock(pass *analysis.Pass, fn *ast.FuncDecl) {
 	}
 }
 
-// Check if a position is after unreachable code (panic, return, etc.)
-func isAfterUnreachableCode(body *ast.BlockStmt, pos token.Pos) bool {
-	for _, stmt := range body.List {
-		// If we've reached the position we're checking, stop
-		if stmt.End() >= pos {
-			break
+// checkUnlocksWithoutLocksInBlock analyzes a block and reports unlocks without locks for each mutex.
+func checkUnlocksWithoutLocksInBlock(pass *analysis.Pass, block *ast.BlockStmt) {
+	mutexLocks := make(map[string]int)
+	ast.Inspect(block, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Lock" {
+					muName := getVarName(sel.X)
+					mutexLocks[muName]++
+				}
+			}
 		}
-
-		// Check for panic calls
-		if exprStmt, ok := stmt.(*ast.ExprStmt); ok {
+		return true
+	})
+	ast.Inspect(block, func(n ast.Node) bool {
+		if exprStmt, ok := n.(*ast.ExprStmt); ok {
 			if call, ok := exprStmt.X.(*ast.CallExpr); ok {
-				if ident, ok := call.Fun.(*ast.Ident); ok {
-					if ident.Name == "panic" {
-						return true
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Unlock" {
+						muName := getVarName(sel.X)
+						if mutexLocks[muName] == 0 {
+							pass.Reportf(exprStmt.Pos(), "mutex '%s' is unlocked but not locked", muName)
+						}
 					}
 				}
 			}
 		}
-
-		// Check for return statements
-		if _, ok := stmt.(*ast.ReturnStmt); ok {
-			return true
+		if deferStmt, ok := n.(*ast.DeferStmt); ok {
+			if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
+				if isMutex(pass.TypesInfo.TypeOf(call.X)) && call.Sel.Name == "Unlock" {
+					muName := getVarName(call.X)
+					if mutexLocks[muName] == 0 {
+						pass.Reportf(deferStmt.Pos(), "mutex '%s' is unlocked but not locked", muName)
+					}
+				}
+			}
+			if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
+				ast.Inspect(callExpr.Body, func(inner ast.Node) bool {
+					if call, ok := inner.(*ast.CallExpr); ok {
+						if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+							if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Unlock" {
+								muName := getVarName(sel.X)
+								if mutexLocks[muName] == 0 {
+									pass.Reportf(deferStmt.Pos(), "mutex '%s' is unlocked but not locked", muName)
+								}
+							}
+						}
+					}
+					return true
+				})
+			}
 		}
-	}
-	return false
+		return true
+	})
 }
 
+// run is the main analysis function for the linter.
+// It checks for common concurrency mistakes in each function declaration.
 func run(pass *analysis.Pass) (interface{}, error) {
 	for _, file := range pass.Files {
 		for _, decl := range file.Decls {
@@ -495,10 +303,8 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			}
 			var mutexLocks, mutexUnlocks []ast.Expr
 			var wgAdds, wgDones []ast.Expr
-
 			reportedLocks := map[token.Pos]bool{}
-
-			// Recoge todos los Lock, Unlock, Add, Done
+			// Collect all Lock, Unlock, Add, Done calls
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -508,8 +314,6 @@ func run(pass *analysis.Pass) (interface{}, error) {
 				if !ok {
 					return true
 				}
-				// Aquí deberías recolectar los Lock, Unlock, Add, Done en los slices correspondientes
-				// Por ejemplo:
 				if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Lock" {
 					mutexLocks = append(mutexLocks, sel.X)
 				}
@@ -524,15 +328,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 				}
 				return true
 			})
-
-			// Check for unlock without lock first
+			// Check for unlock without lock
 			checkUnlockWithoutLock(pass, fn)
-
-			// MUTEX: Analiza Lock/Unlock general con balance
-			// Cuenta locks y unlocks para verificar balance
+			// MUTEX: Analyze Lock/Unlock balance
 			mutexBalance := make(map[string][]token.Pos) // mutex name -> lock positions
-
-			// Primero, cuenta todos los locks
+			// Count all locks
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				exprStmt, ok := n.(*ast.ExprStmt)
 				if !ok {
@@ -546,19 +346,16 @@ func run(pass *analysis.Pass) (interface{}, error) {
 				if !ok {
 					return true
 				}
-				typ := pass.TypesInfo.TypeOf(sel.X)
-				if isMutex(typ) && sel.Sel.Name == "Lock" {
+				if isMutex(pass.TypesInfo.TypeOf(sel.X)) && sel.Sel.Name == "Lock" {
 					muName := getVarName(sel.X)
 					mutexBalance[muName] = append(mutexBalance[muName], exprStmt.Pos())
 				}
 				return true
 			})
-
-			// Luego, cuenta todos los unlocks (directos y defer)
+			// Count all unlocks (direct and defer)
 			for muName, lockPositions := range mutexBalance {
 				unlockCount := 0
-
-				// Cuenta unlocks directos
+				// Direct unlocks
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					exprStmt, ok := n.(*ast.ExprStmt)
 					if !ok {
@@ -577,38 +374,32 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					}
 					return true
 				})
-
-				// Cuenta defer unlocks
+				// Defer unlocks
 				deferUnlockCount := 0
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					deferStmt, ok := n.(*ast.DeferStmt)
 					if !ok {
 						return true
 					}
-
 					// Direct defer mu.Unlock()
 					if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
 						if call.Sel.Name == "Unlock" && getVarName(call.X) == muName {
 							deferUnlockCount++
 						}
 					}
-
 					// defer func() { ... mu.Unlock() ... }()
 					if callExpr, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok {
-						if hasUnlockInNode(callExpr.Body, muName) {
+						if hasCallInNode(callExpr.Body, muName, "Unlock") {
 							deferUnlockCount++
 						}
 					}
 					return true
 				})
-
 				totalUnlocks := unlockCount + deferUnlockCount
 				totalLocks := len(lockPositions)
-
-				// Si hay más locks que unlocks, reporta los locks excedentes
+				// If there are more locks than unlocks, report the excess locks
 				if totalLocks > totalUnlocks {
 					unbalancedLocks := totalLocks - totalUnlocks
-					// Reporta los primeros locks sin unlock correspondiente
 					for i := 0; i < unbalancedLocks; i++ {
 						if i < len(lockPositions) && !reportedLocks[lockPositions[i]] {
 							pass.Reportf(lockPositions[i], "mutex '%s' is locked but not unlocked", muName)
@@ -617,13 +408,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					}
 				}
 			}
-
-			// WAITGROUP: Analiza Add/Done general
+			// WAITGROUP: Analyze Add/Done
 			for _, addVar := range wgAdds {
 				wgName := getVarName(addVar)
 				addPos := addVar.Pos()
 				hasDone := false
-
 				for _, doneVar := range wgDones {
 					if sameExpr(pass, addVar, doneVar) {
 						hasDone = true
@@ -637,10 +426,16 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					pass.Reportf(addPos, "waitgroup '%s' has Add without corresponding Done", wgName)
 				}
 			}
-
-			// MUTEX: Check special cases
-			checkLocksInIfNoElse(pass, fn, reportedLocks)
-			checkLocksInIfElse(pass, fn, reportedLocks)
+			// MUTEX: Check special cases in if/else branches
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if ifStmt, ok := n.(*ast.IfStmt); ok && ifStmt.Else != nil {
+					checkUnlocksWithoutLocksInBlock(pass, ifStmt.Body)
+					if elseBlock, ok := ifStmt.Else.(*ast.BlockStmt); ok {
+						checkUnlocksWithoutLocksInBlock(pass, elseBlock)
+					}
+				}
+				return true
+			})
 		}
 	}
 	return nil, nil

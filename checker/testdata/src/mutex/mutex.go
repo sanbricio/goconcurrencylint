@@ -101,10 +101,22 @@ func conditionalLockMissingLock() {
 	var mu sync.Mutex
 	cond := true
 	if cond {
-		mu.Unlock() // want "mutex 'mu' is locked but not unlocked"
+		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
 	}
 	// Unlock might be skipped
 }
+
+func conditionalOneBranchMissingLock() {
+	var mu sync.Mutex
+	cond := true
+	if cond {
+		mu.Lock()
+		defer mu.Unlock() 
+	} else {
+		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+	}
+}
+
 
 func conditionalOneBranchMissingUnlock() {
 	var mu sync.Mutex
@@ -131,6 +143,15 @@ func goroutineDeadlock() {
 	ch := make(chan struct{})
 	go func() {
 		mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+		<-ch      // This will block forever, so unlock never happens
+	}()
+}
+
+func goroutineDeadlockWithoutLock() {
+	var mu sync.Mutex
+	ch := make(chan struct{})
+	go func() {
+		defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
 		<-ch      // This will block forever, so unlock never happens
 	}()
 }
