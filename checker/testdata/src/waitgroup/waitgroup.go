@@ -23,7 +23,7 @@ func goodWaitGroup1() {
 func badWaitGroup2() {
 	var wg sync.WaitGroup
 	wg.Add(2) // want "waitgroup 'wg' has Add without corresponding Done"
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	wg.Done()
 	wg.Wait()
 }
