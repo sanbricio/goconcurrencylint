@@ -2,23 +2,26 @@ package mutex
 
 import "sync"
 
-// ========== POSITIVE CASES (Correct usage) ==========
+// ========== CORRECT USAGE (Good cases) ==========
 
-// Level 1: Basic correct usage
-func basicLockUnlock() {
+// ---------- MUTEX ----------
+
+// Basic lock and unlock
+func GoodBasicLockUnlock() {
 	var mu sync.Mutex
 	mu.Lock()
 	mu.Unlock()
 }
 
-func basicDeferUnlock() {
+// Lock and unlock using defer
+func GoodDeferUnlock() {
 	var mu sync.Mutex
 	mu.Lock()
 	defer mu.Unlock()
 }
 
-// Level 2: Multiple operations
-func multipleLockUnlock() {
+// Multiple lock/unlock pairs
+func GoodMultipleLockUnlock() {
 	var mu sync.Mutex
 	mu.Lock()
 	mu.Unlock()
@@ -26,8 +29,8 @@ func multipleLockUnlock() {
 	mu.Unlock()
 }
 
-// Level 3: Conditional branches
-func conditionalLockBothBranches() {
+// Conditional: both branches lock and unlock
+func GoodConditionalBothBranches() {
 	var mu sync.Mutex
 	cond := true
 	if cond {
@@ -39,8 +42,8 @@ func conditionalLockBothBranches() {
 	}
 }
 
-// Level 4: Goroutines
-func goroutineLockUnlock() {
+// Lock/unlock in a goroutine
+func GoodGoroutineLockUnlock() {
 	var mu sync.Mutex
 	go func() {
 		mu.Lock()
@@ -48,8 +51,8 @@ func goroutineLockUnlock() {
 	}()
 }
 
-// Level 5: Error handling with recover
-func recoverWithUnlock() {
+// Lock/unlock with panic recovery
+func GoodRecoverWithUnlock() {
 	var mu sync.Mutex
 	mu.Lock()
 	defer func() {
@@ -60,65 +63,135 @@ func recoverWithUnlock() {
 	panic("fail")
 }
 
-// ========== NEGATIVE CASES (Incorrect usage) ==========
+// ---------- RW MUTEX ----------
 
-// Level 1: Basic errors
-func simpleLockWithoutUnlock() {
-	var mu sync.Mutex
-	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+// Basic RLock and RUnlock
+func GoodBasicRLockRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
 }
 
-func simpleUnlockWithoutLock() {
-	var mu sync.Mutex
-	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
-}
-
-func unlockWithoutPriorLock() {
-	var mu sync.Mutex
-	// Some other operations...
-	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
-}
-
-// Level 2: Imbalanced operations
-func imbalancedLockUnlock() {
-	var mu sync.Mutex
-	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+// Basic Lock and Unlock (write)
+func GoodBasicRWLockUnlock() {
+	var mu sync.RWMutex
 	mu.Lock()
 	mu.Unlock()
 }
 
-// Level 3: Conditional branch errors
-func conditionalLockMissingUnlock() {
+// RLock/RUnlock and Lock/Unlock in sequence
+func GoodRWMultipleOperations() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
+	mu.Lock()
+	mu.Unlock()
+}
+
+// Defer unlock after write lock
+func GoodRWDeferUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	defer mu.Unlock()
+}
+
+// Defer runlock after read lock
+func GoodRWDeferRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	defer mu.RUnlock()
+}
+
+// Both branches use lock/unlock or rlock/runlock
+func GoodRWConditionalBothBranches() {
+	var mu sync.RWMutex
+	cond := true
+	if cond {
+		mu.Lock()
+		defer mu.Unlock()
+	} else {
+		mu.RLock()
+		defer mu.RUnlock()
+	}
+}
+
+// Goroutine: Lock/Unlock and RLock/RUnlock
+func GoodRWGoroutineLockUnlock() {
+	var mu sync.RWMutex
+	go func() {
+		mu.Lock()
+		defer mu.Unlock()
+	}()
+	go func() {
+		mu.RLock()
+		defer mu.RUnlock()
+	}()
+}
+
+// ========== INCORRECT USAGE (Bad cases) ==========
+
+// ---------- MUTEX ----------
+
+// Lock without unlock
+func BadLockWithoutUnlock() {
+	var mu sync.Mutex
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+}
+
+// Unlock without lock
+func BadUnlockWithoutLock() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Unlock()
+}
+
+// Defer unlock without prior lock
+func BadDeferUnlockWithoutLock() {
+	var mu sync.Mutex
+	defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
+	mu.Lock()
+}
+
+// Imbalanced lock/unlock (more locks than unlocks)
+func BadImbalancedLockUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	mu.Unlock()
+}
+
+// Conditional: one branch missing unlock
+func BadConditionalMissingUnlock() {
 	var mu sync.Mutex
 	cond := true
 	if cond {
 		mu.Lock() // want "mutex 'mu' is locked but not unlocked"
 	}
-	// Unlock might be skipped
 }
 
-func conditionalLockMissingLock() {
+// Conditional: one branch missing lock
+func BadConditionalMissingLock() {
 	var mu sync.Mutex
 	cond := true
 	if cond {
 		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
 	}
-	// Unlock might be skipped
 }
 
-func conditionalOneBranchMissingLock() {
+// Conditional: one branch with lock/unlock, other only unlock
+func BadConditionalOneBranchMissingLock() {
 	var mu sync.Mutex
 	cond := true
 	if cond {
 		mu.Lock()
-		defer mu.Unlock() 
+		defer mu.Unlock()
 	} else {
 		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
 	}
 }
 
-
-func conditionalOneBranchMissingUnlock() {
+// Conditional: one branch with only lock
+func BadConditionalOneBranchMissingUnlock() {
 	var mu sync.Mutex
 	cond := true
 	if cond {
@@ -129,29 +202,147 @@ func conditionalOneBranchMissingUnlock() {
 	}
 }
 
-// Level 4: Complex control flow errors
-func deferUnlockWithoutLock() {
+// Double unlock (unlock called twice)
+func BadDoubleUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Unlock()
+	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+}
+
+// Defer unlock after panic before lock
+func BadDeferUnlockAfterPanic() {
 	var mu sync.Mutex
 	defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
-	panic("fail before lock")
+	panic("panic before lock")
 	mu.Lock()
 }
 
-// Level 5: Goroutine-related errors
-func goroutineDeadlock() {
+// Goroutine deadlock (lock, but unlock never called)
+func BadGoroutineDeadlock() {
 	var mu sync.Mutex
 	ch := make(chan struct{})
 	go func() {
 		mu.Lock() // want "mutex 'mu' is locked but not unlocked"
-		<-ch      // This will block forever, so unlock never happens
+		<-ch      // deadlock, never unlocks
 	}()
 }
 
-func goroutineDeadlockWithoutLock() {
+// Goroutine defer unlock without lock
+func BadGoroutineDeferUnlockWithoutLock() {
 	var mu sync.Mutex
 	ch := make(chan struct{})
 	go func() {
 		defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
-		<-ch      // This will block forever, so unlock never happens
+		<-ch
 	}()
+}
+
+// ---------- RW MUTEX ----------
+
+// RLock without RUnlock
+func BadRLockWithoutRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+}
+
+// RUnlock without RLock
+func BadRUnlockWithoutRLock() {
+	var mu sync.RWMutex
+	mu.RUnlock() // want "rwmutex 'mu' is runlocked but not rlocked"
+}
+
+// Lock without Unlock (write lock)
+func BadRWLockWithoutUnlock() {
+	var mu sync.RWMutex
+	mu.Lock() // want "rwmutex 'mu' is locked but not unlocked"
+}
+
+// Unlock without Lock (write lock)
+func BadRWUnlockWithoutLock() {
+	var mu sync.RWMutex
+	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
+}
+
+// Defer runlock without prior rlock
+func BadRWDeferRUnlockWithoutRLock() {
+	var mu sync.RWMutex
+	defer mu.RUnlock() // want "rwmutex 'mu' has defer runlock but no corresponding rlock"
+	mu.RLock()
+}
+
+// Defer unlock without prior lock
+func BadRWDeferUnlockWithoutLock() {
+	var mu sync.RWMutex
+	defer mu.Unlock() // want "rwmutex 'mu' has defer unlock but no corresponding lock"
+	mu.Lock()
+}
+
+// Imbalanced: two rlocks, one runlock
+func BadRWImbalancedRLockRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	mu.RUnlock()
+}
+
+// Imbalanced: lock and rlock, only unlock
+func BadRWImbalancedMixed() {
+	var mu sync.RWMutex
+	mu.Lock()
+	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	mu.Unlock()
+}
+
+// Conditional: one branch with rlock, other missing runlock
+func BadRWConditionalMissingRUnlock() {
+	var mu sync.RWMutex
+	cond := true
+	if cond {
+		mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	}
+}
+
+// Conditional: one branch with rlock/runlock, other only runlock
+func BadRWConditionalOneBranchMissingRLock() {
+	var mu sync.RWMutex
+	cond := true
+	if cond {
+		mu.RLock()
+		defer mu.RUnlock()
+	} else {
+		mu.RUnlock() // want "rwmutex 'mu' is runlocked but not rlocked"
+	}
+}
+
+// Goroutine: rlock without runlock
+func BadRWGoroutineRLockWithoutRUnlock() {
+	var mu sync.RWMutex
+	go func() {
+		mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	}()
+}
+
+// Goroutine: lock without unlock
+func BadRWGoroutineLockWithoutUnlock() {
+	var mu sync.RWMutex
+	go func() {
+		mu.Lock() // want "rwmutex 'mu' is locked but not unlocked"
+	}()
+}
+
+// Double unlocks (runlock twice)
+func BadRWDoubleRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
+	mu.RUnlock() // want "rwmutex 'mu' is runlocked but not rlocked"
+}
+
+// Double unlocks (unlock twice)
+func BadRWDoubleUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	mu.Unlock()
+	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
 }
