@@ -2,15 +2,12 @@ package waitgroup
 
 import "sync"
 
-// Incorrect: Add without Done
-func badWaitGroup1() {
-	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
-	wg.Wait()
-}
+// ========== CORRECT USAGE (Good cases) ==========
 
-// Correct: Add with Done inside goroutine
-func goodWaitGroup1() {
+// ---------- WAITGROUP ----------
+
+// Add and Done inside a goroutine
+func GoodBasicAddDone() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -19,17 +16,8 @@ func goodWaitGroup1() {
 	wg.Wait()
 }
 
-// Incorrect: Multiple Add, only one Done
-func badWaitGroup2() {
-	var wg sync.WaitGroup
-	wg.Add(2) // want "waitgroup 'wg' has Add without corresponding Done"
-	wg.Add(1)
-	wg.Done()
-	wg.Wait()
-}
-
-// Correct: Add and Done inside loop
-func goodWaitGroup2() {
+// Add and Done inside a loop (typical worker pattern)
+func GoodLoopAddDone() {
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
@@ -40,8 +28,60 @@ func goodWaitGroup2() {
 	wg.Wait()
 }
 
-// Incorrect: Add inside loop, missing Done in one path
-func badWaitGroup3() {
+// Add and Done in separate functions
+func GoodFuncAddDone() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go doWork(&wg)
+	wg.Wait()
+}
+func doWork(wg *sync.WaitGroup) {
+	defer wg.Done()
+}
+
+// No Add, no Done (legal, Wait returns immediately)
+func GoodNoAddNoDone() {
+	var wg sync.WaitGroup
+	wg.Wait() // returns immediately
+}
+
+// Add/Done with panic recovery
+func GoodAddDoneWithPanicRecovery() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				wg.Done()
+			}
+		}()
+		panic("fail")
+	}()
+	wg.Wait()
+}
+
+// ========== INCORRECT USAGE (Bad cases) ==========
+
+// ---------- WAITGROUP ----------
+
+// Add without Done (counter never decremented)
+func BadAddWithoutDone() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Wait()
+}
+
+// Multiple Add, but only one Done (the rest remain pending)
+func BadMultipleAddOneDone() {
+	var wg sync.WaitGroup
+	wg.Add(2) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
+	wg.Done()
+	wg.Wait()
+}
+
+// Add inside a loop but Done may be missing in some paths
+func BadLoopAddMissingDone() {
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
 		wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
@@ -54,48 +94,14 @@ func badWaitGroup3() {
 	wg.Wait()
 }
 
-// Correct: Add/Done in separate functions
-func goodWaitGroup3() {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go doWork(&wg)
-	wg.Wait()
-}
-
-func doWork(wg *sync.WaitGroup) {
-	defer wg.Done()
-}
-
-// Correct: No Add, no Done (legal)
-func goodWaitGroup4() {
-	var wg sync.WaitGroup
-	wg.Wait() // returns immediately
-}
-
-// Incorrect: Add/Done in different goroutines, but one Add never matched
-func badWaitGroupWeird() {
+// Add in a goroutine that never calls Done (e.g., due to deadlock or channel never sent)
+func BadAddNeverDone() {
 	var wg sync.WaitGroup
 	ch := make(chan struct{})
 	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
 	go func() {
-		<-ch // never sends, so Done never called
+		<-ch // never sends, so Done is never called
 		wg.Done()
-	}()
-	// No send to ch, so Done is never reached
-	wg.Wait()
-}
-
-// Correct: Add/Done with panic recovery
-func goodWaitGroupPanic() {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				wg.Done()
-			}
-		}()
-		panic("fail")
 	}()
 	wg.Wait()
 }
