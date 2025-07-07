@@ -39,6 +39,16 @@ func doWork(wg *sync.WaitGroup) {
 	defer wg.Done()
 }
 
+// Add and Wait with a gouroutine doing Done()
+func GoodAddBeforeWait() {
+    var wg sync.WaitGroup
+    wg.Add(1) // Add ANTES de iniciar la goroutine
+    go func() {
+        defer wg.Done() // Solo Done dentro de la goroutine
+    }()
+    wg.Wait()
+}
+
 // No Add, no Done (legal, Wait returns immediately)
 func GoodNoAddNoDone() {
 	var wg sync.WaitGroup
@@ -60,6 +70,23 @@ func GoodAddDoneWithPanicRecovery() {
 	wg.Wait()
 }
 
+// Add and Done with a channel to signal completion
+func GoodWaitNoAddNoDone() {
+	var wg sync.WaitGroup
+	wg.Wait() // legal, returns immediately
+}
+
+type MyStruct struct {
+	wg sync.WaitGroup
+}
+
+// Add and Done in a method of a struct
+func (m *MyStruct) DoWork() {
+	m.wg.Add(1)
+	go func() { defer m.wg.Done() }()
+	m.wg.Wait()
+}
+
 // ========== INCORRECT USAGE (Bad cases) ==========
 
 // ---------- WAITGROUP ----------
@@ -78,6 +105,24 @@ func BadMultipleAddOneDone() {
 	wg.Add(1)
 	wg.Done()
 	wg.Wait()
+}
+// Add without Done in a goroutine that never runs
+func BadExtraDone() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	wg.Done()
+	wg.Done() // want "waitgroup 'wg' has Done without corresponding Add"
+	wg.Wait()
+}
+
+// Add after Wait (illegal, Wait should be called after all Adds)
+func BadAddAfterWait() {
+	var wg sync.WaitGroup
+	wg.Wait()
+	go func() {
+		wg.Add(1) // want "waitgroup 'wg' Add called after Wait"
+		wg.Done()
+	}()
 }
 
 // Add inside a loop but Done may be missing in some paths
@@ -104,4 +149,10 @@ func BadAddNeverDone() {
 		wg.Done()
 	}()
 	wg.Wait()
+}
+
+// Add without Done in a goroutine that never runs
+func EdgeCaseNoAddNoDoneNoGoroutine() {
+	var wg sync.WaitGroup
+	wg.Wait() // legal, returns immediately
 }

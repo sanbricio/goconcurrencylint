@@ -11,10 +11,10 @@ package checker
 import (
 	"go/ast"
 	"go/token"
-	"go/types"
+	"slices"
 	"sort"
-	"strconv"
 
+	"github.com/sanbricio/concurrency-linter/checker/common"
 	"github.com/sanbricio/concurrency-linter/checker/report"
 	"golang.org/x/tools/go/analysis"
 )
@@ -27,53 +27,6 @@ var Analyzer = &analysis.Analyzer{
 	Name: "goconcurrentlint",
 	Doc:  "Detects common mistakes in the use of sync.Mutex and sync.WaitGroup: locks without unlock and Add without Done.",
 	Run:  run,
-}
-
-func isMutex(typ types.Type) bool {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "sync" && named.Obj().Name() == "Mutex"
-}
-
-func isRWMutex(typ types.Type) bool {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "sync" && named.Obj().Name() == "RWMutex"
-}
-
-// isWaitGroup returns true if the given type is sync.WaitGroup or *sync.WaitGroup.
-func isWaitGroup(typ types.Type) bool {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "sync" && named.Obj().Name() == "WaitGroup"
-}
-
-// getVarName returns the variable name from an ast.Expr, or "?" if not an identifier.
-func getVarName(expr ast.Expr) string {
-	if id, ok := expr.(*ast.Ident); ok {
-		return id.Name
-	}
-	return "?"
-}
-
-// getAddValue extracts the numeric value from Add() calls, returns 1 as default
-func getAddValue(call *ast.CallExpr) int {
-	if len(call.Args) == 0 {
-		return 1
-	}
-	if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.INT {
-		if val, err := strconv.Atoi(lit.Value); err == nil {
-			return val
-		}
-	}
-	// For non-literal arguments, assume 1 for simplicity
-	return 1
 }
 
 type mutexStats struct {
@@ -93,6 +46,8 @@ type addCall struct {
 
 type waitGroupStats struct {
 	addCalls     []addCall
+	doneCalls    []token.Pos
+	waitCalls    []token.Pos
 	doneCount    int
 	hasDeferDone bool
 	totalAdd     int
@@ -115,7 +70,7 @@ func analyzeBlock(errorCollector *report.ErrorCollector, block *ast.BlockStmt, m
 		case *ast.ExprStmt:
 			if call, ok := s.X.(*ast.CallExpr); ok {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					varName := getVarName(sel.X)
+					varName := common.GetVarName(sel.X)
 					if muNames[varName] {
 						switch sel.Sel.Name {
 						case "Lock":
@@ -164,7 +119,7 @@ func analyzeBlock(errorCollector *report.ErrorCollector, block *ast.BlockStmt, m
 			}
 		case *ast.DeferStmt:
 			if call, ok := s.Call.Fun.(*ast.SelectorExpr); ok {
-				varName := getVarName(call.X)
+				varName := common.GetVarName(call.X)
 				if muNames[varName] && call.Sel.Name == "Unlock" {
 					if stats[varName].lock == 0 {
 						errorCollector.AddError(s.Pos(), "mutex '"+varName+"' has defer unlock but no corresponding lock")
@@ -213,7 +168,7 @@ func analyzeBlock(errorCollector *report.ErrorCollector, block *ast.BlockStmt, m
 					ast.Inspect(fnlit.Body, func(n ast.Node) bool {
 						if call, ok := n.(*ast.CallExpr); ok {
 							if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-								if sel.Sel.Name == "Unlock" && getVarName(sel.X) == muName {
+								if sel.Sel.Name == "Unlock" && common.GetVarName(sel.X) == muName {
 									unlockedInside = true
 									return false
 								}
@@ -241,10 +196,10 @@ func analyzeBlock(errorCollector *report.ErrorCollector, block *ast.BlockStmt, m
 					ast.Inspect(fnlit.Body, func(n ast.Node) bool {
 						if call, ok := n.(*ast.CallExpr); ok {
 							if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-								if sel.Sel.Name == "Unlock" && getVarName(sel.X) == muName {
+								if sel.Sel.Name == "Unlock" && common.GetVarName(sel.X) == muName {
 									unlockedInside = true
 								}
-								if sel.Sel.Name == "RUnlock" && getVarName(sel.X) == muName {
+								if sel.Sel.Name == "RUnlock" && common.GetVarName(sel.X) == muName {
 									runlockedInside = true
 								}
 							}
@@ -386,8 +341,9 @@ func analyzeWaitGroupUsage(errorCollector *report.ErrorCollector, fn *ast.FuncDe
 	stats := map[string]*waitGroupStats{}
 	for wg := range wgNames {
 		stats[wg] = &waitGroupStats{
-			addCalls: []addCall{},
-			// doneCount, hasDeferDone, totalAdd: default 0/false
+			addCalls:  []addCall{},
+			doneCalls: []token.Pos{},
+			waitCalls: []token.Pos{},
 		}
 	}
 
@@ -407,7 +363,7 @@ func analyzeWaitGroupUsage(errorCollector *report.ErrorCollector, fn *ast.FuncDe
 					if call, ok := n.(*ast.CallExpr); ok {
 						if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 							if sel.Sel.Name == "Done" {
-								wgName := getVarName(sel.X)
+								wgName := common.GetVarName(sel.X)
 								if wgNames[wgName] {
 									stats[wgName].hasDeferDone = true
 								}
@@ -422,14 +378,22 @@ func analyzeWaitGroupUsage(errorCollector *report.ErrorCollector, fn *ast.FuncDe
 	})
 
 	alreadyReported := map[token.Pos]bool{}
-	// Traverse AST with stack to track for loop context
+
+	// Traverse AST with stack to track for loop context (MANTENER LÓGICA ORIGINAL)
 	var visit func(n ast.Node, forStack []*ast.ForStmt)
 	visit = func(n ast.Node, forStack []*ast.ForStmt) {
 		switch node := n.(type) {
 		case *ast.ForStmt:
-			reportedAdd := map[string]bool{} // wgName -> bool, to avoid multiple reports per loop
+			reportedAdd := map[string]bool{}
 			for _, stmt := range node.Body.List {
 				visitWithReportMap(stmt, append(forStack, node), reportedAdd, wgNames, stats, alreadyReported, errorCollector)
+			}
+		case *ast.GoStmt:
+			reportedAdd := map[string]bool{}
+			if fnLit, ok := node.Call.Fun.(*ast.FuncLit); ok {
+				for _, stmt := range fnLit.Body.List {
+					visitWithReportMap(stmt, forStack, reportedAdd, wgNames, stats, alreadyReported, errorCollector)
+				}
 			}
 		case *ast.BlockStmt:
 			for _, stmt := range node.List {
@@ -443,18 +407,21 @@ func analyzeWaitGroupUsage(errorCollector *report.ErrorCollector, fn *ast.FuncDe
 		case *ast.ExprStmt:
 			if call, ok := node.X.(*ast.CallExpr); ok {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					wgName := getVarName(sel.X)
+					wgName := common.GetVarName(sel.X)
 					if wgNames[wgName] && sel.Sel.Name == "Add" {
-						addValue := getAddValue(call)
+						addValue := common.GetAddValue(call)
 						stats[wgName].addCalls = append(stats[wgName].addCalls, addCall{
 							pos:   call.Pos(),
 							value: addValue,
 						})
 						stats[wgName].totalAdd += addValue
-						// No reportedAdd here, only in for-loop context
 					}
 					if wgNames[wgName] && sel.Sel.Name == "Done" {
 						stats[wgName].doneCount++
+						stats[wgName].doneCalls = append(stats[wgName].doneCalls, call.Pos())
+					}
+					if wgNames[wgName] && sel.Sel.Name == "Wait" {
+						stats[wgName].waitCalls = append(stats[wgName].waitCalls, call.Pos())
 					}
 				}
 			}
@@ -462,7 +429,136 @@ func analyzeWaitGroupUsage(errorCollector *report.ErrorCollector, fn *ast.FuncDe
 	}
 	visit(fn.Body, nil)
 
+	// NUEVA LÓGICA: Detectar Add después de Wait específicamente
+	// Buscar patrones donde Wait está en el flujo principal y Add está en goroutines
+	for wgName, st := range stats {
+		for _, waitPos := range st.waitCalls {
+			// Buscar goroutines que contengan Add y que estén después de Wait
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if goStmt, ok := n.(*ast.GoStmt); ok {
+					// Si la goroutine está después de Wait en el código fuente
+					if goStmt.Pos() > waitPos {
+						// Buscar Add dentro de esta goroutine
+						if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
+							ast.Inspect(fnLit.Body, func(inner ast.Node) bool {
+								if call, ok := inner.(*ast.CallExpr); ok {
+									if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+										if sel.Sel.Name == "Add" && common.GetVarName(sel.X) == wgName {
+											errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Add called after Wait")
+										}
+									}
+								}
+								return true
+							})
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	// LÓGICA ORIGINAL: Verificar Add vs Wait en el mismo flujo
+	for wgName, st := range stats {
+		for _, add := range st.addCalls {
+			for _, wait := range st.waitCalls {
+				// Solo reportar si Add está después de Wait en el mismo flujo (no en goroutines)
+				if add.pos > wait {
+					// Verificar que Add no esté dentro de una goroutine
+					isInGoroutine := false
+					ast.Inspect(fn.Body, func(n ast.Node) bool {
+						if goStmt, ok := n.(*ast.GoStmt); ok {
+							if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
+								ast.Inspect(fnLit.Body, func(inner ast.Node) bool {
+									if call, ok := inner.(*ast.CallExpr); ok {
+										if call.Pos() == add.pos {
+											isInGoroutine = true
+											return false
+										}
+									}
+									return true
+								})
+							}
+						}
+						return !isInGoroutine
+					})
+
+					if !isInGoroutine {
+						errorCollector.AddError(add.pos, "waitgroup '"+wgName+"' Add called after Wait")
+					}
+				}
+			}
+		}
+	}
+
+	for wgName := range wgNames {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			goStmt, ok := n.(*ast.GoStmt)
+			if !ok {
+				return true
+			}
+
+			callsDone, blocked := goroutineCallsDoneOrBlocks(goStmt, wgName, fn)
+
+			if blocked && !callsDone {
+				errorCollector.AddError(goStmt.Pos(), "waitgroup '"+wgName+"' has Add without corresponding Done (goroutine blocks indefinitely before calling Done)")
+			}
+
+			return true
+		})
+	}
+
 	return stats
+}
+
+func channelHasSender(fn *ast.FuncDecl, chanName string) bool {
+	hasSender := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if send, ok := n.(*ast.SendStmt); ok {
+			if ident, ok := send.Chan.(*ast.Ident); ok && ident.Name == chanName {
+				hasSender = true
+				return false
+			}
+		}
+		return true
+	})
+	return hasSender
+}
+
+func goroutineCallsDoneOrBlocks(goStmt *ast.GoStmt, wgName string, fn *ast.FuncDecl) (callsDone bool, blocked bool) {
+	fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+	if !ok {
+		return false, false
+	}
+
+	callsDone = false
+	blocked = false
+
+	ast.Inspect(fnLit.Body, func(n ast.Node) bool {
+		switch stmt := n.(type) {
+		case *ast.ExprStmt:
+			if call, ok := stmt.X.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
+					callsDone = true
+					return false
+				}
+			}
+			if unary, ok := stmt.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+				if chanIdent, ok := unary.X.(*ast.Ident); ok {
+					if !channelHasSender(fn, chanIdent.Name) {
+						blocked = true
+						return false
+					}
+				}
+			}
+		case *ast.SelectStmt:
+			blocked = true
+			return false
+		}
+		return true
+	})
+
+	return callsDone, blocked
 }
 
 // Helper for for-loops to avoid multiple diagnostics per loop
@@ -484,18 +580,22 @@ func visitWithReportMap(n ast.Node, forStack []*ast.ForStmt, reportedAdd map[str
 	case *ast.ExprStmt:
 		if call, ok := node.X.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				wgName := getVarName(sel.X)
+				wgName := common.GetVarName(sel.X)
 				if wgNames[wgName] && sel.Sel.Name == "Add" {
-					addValue := getAddValue(call)
+					addValue := common.GetAddValue(call)
 					stats[wgName].addCalls = append(stats[wgName].addCalls, addCall{
 						pos:   call.Pos(),
 						value: addValue,
 					})
 					stats[wgName].totalAdd += addValue
-					// No reportedAdd here, only in for-loop context
 				}
 				if wgNames[wgName] && sel.Sel.Name == "Done" {
 					stats[wgName].doneCount++
+					stats[wgName].doneCalls = append(stats[wgName].doneCalls, call.Pos())
+				}
+
+				if wgNames[wgName] && sel.Sel.Name == "Wait" {
+					stats[wgName].waitCalls = append(stats[wgName].waitCalls, call.Pos())
 				}
 			}
 		}
@@ -509,6 +609,7 @@ func checkWaitGroupBalance(errorCollector *report.ErrorCollector, wgStats map[st
 			totalExpectedDone++
 		}
 
+		// Verificar Add sin Done correspondiente
 		if stats.totalAdd > totalExpectedDone {
 			sort.Slice(stats.addCalls, func(i, j int) bool {
 				return stats.addCalls[i].pos < stats.addCalls[j].pos
@@ -519,6 +620,33 @@ func checkWaitGroupBalance(errorCollector *report.ErrorCollector, wgStats map[st
 					remainingDone -= addCall.value
 				} else {
 					errorCollector.AddError(addCall.pos, "waitgroup '"+wgName+"' has Add without corresponding Done")
+				}
+			}
+		}
+
+		// NUEVO: Verificar Done sin Add correspondiente
+		if totalExpectedDone > stats.totalAdd {
+			// Ordenar las llamadas Done por posición
+			slices.Sort(stats.doneCalls)
+
+			// Determinar cuántas Done están de más
+			excessDone := totalExpectedDone - stats.totalAdd
+
+			// Reportar las últimas Done que están de más
+			if excessDone > 0 && len(stats.doneCalls) > 0 {
+				// Si hay defer Done, no reportar esa posición
+				startIndex := len(stats.doneCalls) - excessDone
+				if stats.hasDeferDone {
+					// Si hay defer Done, ajustar para no reportar una Done normal de más
+					if excessDone > 1 {
+						startIndex = len(stats.doneCalls) - (excessDone - 1)
+					}
+				}
+
+				for i := startIndex; i < len(stats.doneCalls); i++ {
+					if i >= 0 {
+						errorCollector.AddError(stats.doneCalls[i], "waitgroup '"+wgName+"' has Done without corresponding Add")
+					}
 				}
 			}
 		}
@@ -579,13 +707,13 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					if typ == nil {
 						continue
 					}
-					if isMutex(typ) {
+					if common.IsMutex(typ) {
 						muNames[name.Name] = true
 					}
-					if isRWMutex(typ) {
+					if common.IsRWMutex(typ) {
 						rwNames[name.Name] = true
 					}
-					if isWaitGroup(typ) {
+					if common.IsWaitGroup(typ) {
 						wgNames[name.Name] = true
 					}
 				}
