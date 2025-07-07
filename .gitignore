@@ -1,0 +1,51 @@
+# Build output
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Temporary and log files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# IDE/editor configuration files
+.vscode/
+.idea/
+*.code-workspace
+
+# Coverage and test profiles
+coverage.out
+profile.cov
+
+# Analysis tool outputs
+*.lint
+*.report
+
+# Cache files
+*.cache
+.cache/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Binary output directories
+/bin/
+/build/
+/dist/
+
+# Test results
+*.coverprofile
+*.testresult
+
+# Local environment files
+.env
+.env.*
