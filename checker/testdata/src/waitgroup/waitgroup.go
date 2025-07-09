@@ -160,11 +160,72 @@ func BadAddDonePrematureReturn() {
 		return // forgot to call Done!
 		wg.Done()
 	}()
-	wg.Wait() 
+	wg.Wait()
 }
 
-// Add without Done in a goroutine that never runs
+// Add without Done in a goroutine that panics
+func BadPanicWithoutRecover() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		panic("error") // Done is never called
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// Add without Done in a goroutine with a conditional return
+func BadDeferWithConditionalReturn() {
+	var wg sync.WaitGroup
+	wg.Add(2) // want "waitgroup 'wg' has Add without corresponding Done"
+
+	go func() {
+		defer wg.Done()
+	}()
+
+	go func() {
+		if true {
+			return
+		}
+		defer wg.Done()
+	}()
+
+	wg.Wait()
+}
+
+// Edge case where Wait is called without any Adds
 func EdgeCaseNoAddNoDoneNoGoroutine() {
 	var wg sync.WaitGroup
 	wg.Wait() // legal, returns immediately
+}
+
+// Edge case where Wait is called multiple times
+func EdgeCaseMultipleWaits() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+	wg.Wait()
+}
+
+// Edge case where Add and Done are called in different goroutines
+// This is valid, but can be confusing if not documented properly
+func EdgeCaseComplexButValid() {
+	var wg sync.WaitGroup
+	ch := make(chan bool)
+
+	wg.Add(1)
+
+	go func() {
+		<-ch
+		wg.Done()
+	}()
+
+	go func() {
+		ch <- true
+	}()
+
+	wg.Wait()
 }
