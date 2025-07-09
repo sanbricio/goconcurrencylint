@@ -10,6 +10,7 @@ package checker
 
 import (
 	"go/ast"
+	"go/types"
 
 	"github.com/sanbricio/concurrency-linter/checker/common"
 	"github.com/sanbricio/concurrency-linter/checker/report"
@@ -26,86 +27,107 @@ var Analyzer = &analysis.Analyzer{
 	Run:  run,
 }
 
+// syncPrimitive holds information about sync primitives found in a function
+type syncPrimitive struct {
+	mutexes    map[string]bool
+	rwMutexes  map[string]bool
+	waitGroups map[string]bool
+}
+
 func run(pass *analysis.Pass) (interface{}, error) {
 	errorCollector := &report.ErrorCollector{}
 
 	for _, file := range pass.Files {
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-
-			muNames := map[string]bool{}
-			rwNames := map[string]bool{}
-			wgNames := map[string]bool{}
-
-			// Find all mutex and waitgroup declarations
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				vs, ok := n.(*ast.ValueSpec)
-				if !ok {
-					return true
-				}
-				for _, name := range vs.Names {
-					typ := pass.TypesInfo.TypeOf(vs.Type)
-					if typ == nil && len(vs.Values) > 0 {
-						typ = pass.TypesInfo.TypeOf(vs.Values[0])
-					}
-					if typ == nil {
-						continue
-					}
-					if common.IsMutex(typ) {
-						muNames[name.Name] = true
-					}
-					if common.IsRWMutex(typ) {
-						rwNames[name.Name] = true
-					}
-					if common.IsWaitGroup(typ) {
-						wgNames[name.Name] = true
-					}
-				}
-				return true
-			})
-
-			// Analyze mutex usage
-			errs := &deferErrorCollector{
-				badDeferUnlock:  map[string]bool{},
-				badDeferRUnlock: map[string]bool{},
-			}
-			blockStats := AnalyzeMutexBlock(errorCollector, fn.Body, muNames, rwNames, errs)
-			for mu, st := range blockStats {
-				if errs.badDeferUnlock[mu] {
-					continue
-				}
-				if errs.badDeferRUnlock[mu] {
-					continue
-				}
-				for _, pos := range st.lockPos {
-					if rwNames[mu] {
-						errorCollector.AddError(pos, "rwmutex '"+mu+"' is locked but not unlocked")
-					} else {
-						errorCollector.AddError(pos, "mutex '"+mu+"' is locked but not unlocked")
-					}
-				}
-				for _, pos := range st.rlockPos {
-					errorCollector.AddError(pos, "rwmutex '"+mu+"' is rlocked but not runlocked")
-				}
-			}
-
-			// Analyze WaitGroup usage
-			wgStats := AnalyzeWaitGroupUsage(errorCollector, fn, wgNames)
-
-			for wgName, stats := range wgStats {
-				if isWaitGroupPassedToOtherFunctions(fn, wgName) {
-					if stats.doneCount == 0 && !stats.hasDeferDone && len(stats.addCalls) > 0 {
-						continue
-					}
-				}
-				checkWaitGroupBalance(errorCollector, map[string]*waitGroupStats{wgName: stats})
-			}
-		}
+		analyzeFunctions(file, pass, errorCollector)
 	}
 
 	errorCollector.ReportAll(pass)
 	return nil, nil
+}
+
+// analyzeFunctions processes all function declarations in a file
+func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+
+		primitives := findSyncPrimitives(fn, pass)
+
+		if hasMutexes(primitives) {
+			analyzeMutexUsage(fn, primitives, errorCollector)
+		}
+
+		if hasWaitGroups(primitives) {
+			analyzeWaitGroupUsage(fn, primitives, errorCollector)
+		}
+	}
+}
+
+// findSyncPrimitives identifies all sync primitives declared in a function
+func findSyncPrimitives(fn *ast.FuncDecl, pass *analysis.Pass) *syncPrimitive {
+	primitives := &syncPrimitive{
+		mutexes:    make(map[string]bool),
+		rwMutexes:  make(map[string]bool),
+		waitGroups: make(map[string]bool),
+	}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+
+		for _, name := range vs.Names {
+			typ := getVariableType(vs, pass)
+			if typ == nil {
+				continue
+			}
+
+			varName := name.Name
+			switch {
+			case common.IsMutex(typ):
+				primitives.mutexes[varName] = true
+			case common.IsRWMutex(typ):
+				primitives.rwMutexes[varName] = true
+			case common.IsWaitGroup(typ):
+				primitives.waitGroups[varName] = true
+			}
+		}
+		return true
+	})
+
+	return primitives
+}
+
+// getVariableType extracts the type information for a variable specification
+func getVariableType(vs *ast.ValueSpec, pass *analysis.Pass) types.Type {
+	typ := pass.TypesInfo.TypeOf(vs.Type)
+	if typ == nil && len(vs.Values) > 0 {
+		typ = pass.TypesInfo.TypeOf(vs.Values[0])
+	}
+	return typ
+}
+
+// hasMutexes checks if any mutex or rwmutex primitives were found
+func hasMutexes(primitives *syncPrimitive) bool {
+	return len(primitives.mutexes) > 0 || len(primitives.rwMutexes) > 0
+}
+
+// hasWaitGroups checks if any waitgroup primitives were found
+func hasWaitGroups(primitives *syncPrimitive) bool {
+	return len(primitives.waitGroups) > 0
+}
+
+// analyzeMutexUsage handles mutex and rwmutex analysis
+func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector) {
+	analyzer := NewMutexAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector)
+	analyzer.AnalyzeFunction(fn)
+}
+
+// analyzeWaitGroupUsage handles waitgroup analysis
+func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector) {
+	analyzer := NewWaitGroupAnalyzer(primitives.waitGroups, errorCollector)
+	analyzer.AnalyzeFunction(fn)
 }
