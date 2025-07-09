@@ -235,6 +235,7 @@ func (wga *WaitGroupAnalyzer) traverseWithReportMap(n ast.Node, forStack []*ast.
 func (wga *WaitGroupAnalyzer) validateWaitGroupUsage(stats map[string]*waitGroupStats) {
 	wga.checkAddAfterWait(stats)
 	wga.checkBlockingGoroutines()
+	wga.checkLoopAddDoneBalance()
 	wga.checkWaitGroupBalance(stats)
 }
 
@@ -402,6 +403,98 @@ func (wga *WaitGroupAnalyzer) channelHasSender(chanName string) bool {
 		return true
 	})
 	return hasSender
+}
+
+// checkLoopAddDoneBalance checks for Add/Done balance issues in loops
+func (wga *WaitGroupAnalyzer) checkLoopAddDoneBalance() {
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if forStmt, ok := n.(*ast.ForStmt); ok {
+			wga.analyzeLoopBalance(forStmt)
+		}
+		return true
+	})
+}
+
+// analyzeLoopBalance analyzes Add/Done balance within a single loop
+func (wga *WaitGroupAnalyzer) analyzeLoopBalance(forStmt *ast.ForStmt) {
+	// Count Add calls and conditional Done calls in the loop
+	loopStats := make(map[string]*loopAnalysis)
+
+	ast.Inspect(forStmt.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.ExprStmt:
+			if call, ok := node.X.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					wgName := common.GetVarName(sel.X)
+					if wga.waitGroupNames[wgName] {
+						if loopStats[wgName] == nil {
+							loopStats[wgName] = &loopAnalysis{}
+						}
+
+						switch sel.Sel.Name {
+						case "Add":
+							loopStats[wgName].addCalls = append(loopStats[wgName].addCalls, call.Pos())
+						case "Done":
+							// Check if Done is inside a conditional
+							if wga.isInConditional(call, forStmt.Body) {
+								loopStats[wgName].conditionalDones++
+							} else {
+								loopStats[wgName].unconditionalDones++
+							}
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	// Check for imbalance
+	for wgName, stats := range loopStats {
+		if len(stats.addCalls) > 0 {
+			// If there are Add calls but Done calls are conditional or missing
+			if stats.unconditionalDones == 0 && stats.conditionalDones > 0 {
+				// This means Done might not be called for all iterations
+				for _, addPos := range stats.addCalls {
+					wga.errorCollector.AddError(addPos,
+						"waitgroup '"+wgName+"' has Add without corresponding Done")
+				}
+			}
+		}
+	}
+}
+
+// loopAnalysis tracks Add/Done calls within a loop
+type loopAnalysis struct {
+	addCalls           []token.Pos
+	unconditionalDones int
+	conditionalDones   int
+}
+
+// isInConditional checks if a node is inside an if statement
+func (wga *WaitGroupAnalyzer) isInConditional(target ast.Node, scope ast.Node) bool {
+	inConditional := false
+
+	ast.Inspect(scope, func(n ast.Node) bool {
+		if n == target {
+			return false // Stop when we find the target
+		}
+
+		if ifStmt, ok := n.(*ast.IfStmt); ok {
+			// Check if target is inside this if statement
+			ast.Inspect(ifStmt, func(inner ast.Node) bool {
+				if inner == target {
+					inConditional = true
+					return false
+				}
+				return true
+			})
+		}
+
+		return !inConditional
+	})
+
+	return inConditional
 }
 
 // checkWaitGroupBalance validates that Add and Done calls are properly balanced
