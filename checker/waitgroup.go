@@ -140,18 +140,16 @@ func (wga *WaitGroupAnalyzer) traverseWithContext(n ast.Node, forStack []*ast.Fo
 
 // handleForStatement processes for loop statements
 func (wga *WaitGroupAnalyzer) handleForStatement(stmt *ast.ForStmt, forStack []*ast.ForStmt, stats map[string]*waitGroupStats, alreadyReported map[token.Pos]bool) {
-	reportedAdd := make(map[string]bool)
 	for _, nestedStmt := range stmt.Body.List {
-		wga.traverseWithReportMap(nestedStmt, append(forStack, stmt), reportedAdd, stats, alreadyReported)
+		wga.traverseWithReportMap(nestedStmt, append(forStack, stmt), stats, alreadyReported)
 	}
 }
 
 // handleGoStatement processes goroutine statements
 func (wga *WaitGroupAnalyzer) handleGoStatement(stmt *ast.GoStmt, forStack []*ast.ForStmt, stats map[string]*waitGroupStats, alreadyReported map[token.Pos]bool) {
-	reportedAdd := make(map[string]bool)
 	if fnLit, ok := stmt.Call.Fun.(*ast.FuncLit); ok {
 		for _, nestedStmt := range fnLit.Body.List {
-			wga.traverseWithReportMap(nestedStmt, forStack, reportedAdd, stats, alreadyReported)
+			wga.traverseWithReportMap(nestedStmt, forStack, stats, alreadyReported)
 		}
 	}
 }
@@ -220,7 +218,7 @@ func (wga *WaitGroupAnalyzer) handleWaitCall(call *ast.CallExpr, wgName string, 
 }
 
 // traverseWithReportMap is a helper for avoiding multiple diagnostics per loop
-func (wga *WaitGroupAnalyzer) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, reportedAdd map[string]bool, stats map[string]*waitGroupStats, alreadyReported map[token.Pos]bool) {
+func (wga *WaitGroupAnalyzer) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, stats map[string]*waitGroupStats, alreadyReported map[token.Pos]bool) {
 	switch node := n.(type) {
 	case *ast.ForStmt:
 		wga.handleForStatement(node, forStack, stats, alreadyReported)
@@ -236,7 +234,7 @@ func (wga *WaitGroupAnalyzer) traverseWithReportMap(n ast.Node, forStack []*ast.
 // validateWaitGroupUsage performs validation checks on collected statistics
 func (wga *WaitGroupAnalyzer) validateWaitGroupUsage(stats map[string]*waitGroupStats) {
 	wga.checkAddAfterWait(stats)
-	wga.checkBlockingGoroutines(stats)
+	wga.checkBlockingGoroutines()
 	wga.checkWaitGroupBalance(stats)
 }
 
@@ -312,7 +310,7 @@ func (wga *WaitGroupAnalyzer) isInGoroutine(pos token.Pos) bool {
 }
 
 // checkBlockingGoroutines checks for Add without Done in goroutines that block indefinitely
-func (wga *WaitGroupAnalyzer) checkBlockingGoroutines(stats map[string]*waitGroupStats) {
+func (wga *WaitGroupAnalyzer) checkBlockingGoroutines() {
 	for wgName := range wga.waitGroupNames {
 		ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 			goStmt, ok := n.(*ast.GoStmt)
