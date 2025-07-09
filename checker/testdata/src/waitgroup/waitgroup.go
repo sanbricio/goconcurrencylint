@@ -41,12 +41,12 @@ func doWork(wg *sync.WaitGroup) {
 
 // Add and Wait with a gouroutine doing Done()
 func GoodAddBeforeWait() {
-    var wg sync.WaitGroup
-    wg.Add(1) // Add ANTES de iniciar la goroutine
-    go func() {
-        defer wg.Done() // Solo Done dentro de la goroutine
-    }()
-    wg.Wait()
+	var wg sync.WaitGroup
+	wg.Add(1) // Add ANTES de iniciar la goroutine
+	go func() {
+		defer wg.Done() // Solo Done dentro de la goroutine
+	}()
+	wg.Wait()
 }
 
 // No Add, no Done (legal, Wait returns immediately)
@@ -106,6 +106,7 @@ func BadMultipleAddOneDone() {
 	wg.Done()
 	wg.Wait()
 }
+
 // Add without Done in a goroutine that never runs
 func BadExtraDone() {
 	var wg sync.WaitGroup
@@ -149,6 +150,17 @@ func BadAddNeverDone() {
 		wg.Done()
 	}()
 	wg.Wait()
+}
+
+// Add without Done in a goroutine that returns prematurely
+func BadAddDonePrematureReturn() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		return // forgot to call Done!
+		wg.Done()
+	}()
+	wg.Wait() 
 }
 
 // Add without Done in a goroutine that never runs
