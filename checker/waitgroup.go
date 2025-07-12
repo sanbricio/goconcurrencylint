@@ -7,7 +7,8 @@ import (
 	"sort"
 
 	"github.com/sanbricio/concurrency-linter/checker/common"
-	"github.com/sanbricio/concurrency-linter/checker/report"
+	commnetfilter "github.com/sanbricio/concurrency-linter/checker/common/comment-filter"
+	"github.com/sanbricio/concurrency-linter/checker/common/report"
 )
 
 // WaitGroupAnalyzer handles the analysis of WaitGroup usage
@@ -15,6 +16,7 @@ type WaitGroupAnalyzer struct {
 	waitGroupNames map[string]bool
 	errorCollector *report.ErrorCollector
 	function       *ast.FuncDecl
+	commentFilter  *commnetfilter.CommentFilter
 }
 
 // addCall represents an Add() call with its position and value
@@ -34,10 +36,11 @@ type waitGroupStats struct {
 }
 
 // NewWaitGroupAnalyzer creates a new WaitGroup analyzer
-func NewWaitGroupAnalyzer(waitGroupNames map[string]bool, errorCollector *report.ErrorCollector) *WaitGroupAnalyzer {
+func NewWaitGroupAnalyzer(waitGroupNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter) *WaitGroupAnalyzer {
 	return &WaitGroupAnalyzer{
 		waitGroupNames: waitGroupNames,
 		errorCollector: errorCollector,
+		commentFilter:  cf,
 	}
 }
 
@@ -82,6 +85,11 @@ func (wga *WaitGroupAnalyzer) findDeferDoneCalls(stats map[string]*waitGroupStat
 			return true
 		}
 
+		// Skip if defer statement is in comment
+		if wga.commentFilter.ShouldSkipCall(deferStmt.Call) {
+			return true
+		}
+
 		// Handle direct defer calls
 		if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
 			if ident, ok := call.X.(*ast.Ident); ok && call.Sel.Name == "Done" {
@@ -105,6 +113,11 @@ func (wga *WaitGroupAnalyzer) findDeferDoneCalls(stats map[string]*waitGroupStat
 func (wga *WaitGroupAnalyzer) findDoneInFunctionLiteral(body *ast.BlockStmt, stats map[string]*waitGroupStats) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
+			// Skip if call is in comment
+			if wga.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" {
 				wgName := common.GetVarName(sel.X)
 				if wga.waitGroupNames[wgName] {
@@ -140,6 +153,11 @@ func (wga *WaitGroupAnalyzer) traverseWithContext(n ast.Node, forStack []*ast.Fo
 
 // handleForStatement processes for loop statements
 func (wga *WaitGroupAnalyzer) handleForStatement(stmt *ast.ForStmt, forStack []*ast.ForStmt, stats map[string]*waitGroupStats, alreadyReported map[token.Pos]bool) {
+	// Skip if the entire for statement is in a comment
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
 	for _, nestedStmt := range stmt.Body.List {
 		wga.traverseWithReportMap(nestedStmt, append(forStack, stmt), stats, alreadyReported)
 	}
@@ -147,6 +165,11 @@ func (wga *WaitGroupAnalyzer) handleForStatement(stmt *ast.ForStmt, forStack []*
 
 // handleGoStatement processes goroutine statements
 func (wga *WaitGroupAnalyzer) handleGoStatement(stmt *ast.GoStmt, forStack []*ast.ForStmt, stats map[string]*waitGroupStats, alreadyReported map[token.Pos]bool) {
+	// Skip if the entire go statement is in a comment
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
 	if fnLit, ok := stmt.Call.Fun.(*ast.FuncLit); ok {
 		for _, nestedStmt := range fnLit.Body.List {
 			wga.traverseWithReportMap(nestedStmt, forStack, stats, alreadyReported)
@@ -163,6 +186,11 @@ func (wga *WaitGroupAnalyzer) handleBlockStatement(stmt *ast.BlockStmt, forStack
 
 // handleIfStatement processes if statements
 func (wga *WaitGroupAnalyzer) handleIfStatement(stmt *ast.IfStmt, forStack []*ast.ForStmt, stats map[string]*waitGroupStats, alreadyReported map[token.Pos]bool) {
+	// Skip if the entire if statement is in a comment
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
 	wga.traverseWithContext(stmt.Body, forStack, stats, alreadyReported)
 	if stmt.Else != nil {
 		wga.traverseWithContext(stmt.Else, forStack, stats, alreadyReported)
@@ -171,6 +199,11 @@ func (wga *WaitGroupAnalyzer) handleIfStatement(stmt *ast.IfStmt, forStack []*as
 
 // handleExpressionStatement processes expression statements (Add, Done, Wait calls)
 func (wga *WaitGroupAnalyzer) handleExpressionStatement(stmt *ast.ExprStmt, stats map[string]*waitGroupStats) {
+	// Skip if the entire expression statement is in a comment
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
 	call, ok := stmt.X.(*ast.CallExpr)
 	if !ok {
 		return
@@ -198,6 +231,12 @@ func (wga *WaitGroupAnalyzer) handleExpressionStatement(stmt *ast.ExprStmt, stat
 
 // handleAddCall processes Add() calls
 func (wga *WaitGroupAnalyzer) handleAddCall(call *ast.CallExpr, wgName string, stats map[string]*waitGroupStats) {
+
+	// Skip if in comment
+	if wga.commentFilter.ShouldSkipCall(call) {
+		return
+	}
+
 	addValue := common.GetAddValue(call)
 	stats[wgName].addCalls = append(stats[wgName].addCalls, addCall{
 		pos:   call.Pos(),
@@ -208,12 +247,22 @@ func (wga *WaitGroupAnalyzer) handleAddCall(call *ast.CallExpr, wgName string, s
 
 // handleDoneCall processes Done() calls
 func (wga *WaitGroupAnalyzer) handleDoneCall(call *ast.CallExpr, wgName string, stats map[string]*waitGroupStats) {
+	// Skip if in comment
+	if wga.commentFilter.ShouldSkipCall(call) {
+		return
+	}
+
 	stats[wgName].doneCount++
 	stats[wgName].doneCalls = append(stats[wgName].doneCalls, call.Pos())
 }
 
 // handleWaitCall processes Wait() calls
 func (wga *WaitGroupAnalyzer) handleWaitCall(call *ast.CallExpr, wgName string, stats map[string]*waitGroupStats) {
+	// Skip if in comment
+	if wga.commentFilter.ShouldSkipCall(call) {
+		return
+	}
+
 	stats[wgName].waitCalls = append(stats[wgName].waitCalls, call.Pos())
 }
 
@@ -267,6 +316,11 @@ func (wga *WaitGroupAnalyzer) checkAddInGoroutine(goStmt *ast.GoStmt, wgName str
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
 		ast.Inspect(fnLit.Body, func(inner ast.Node) bool {
 			if call, ok := inner.(*ast.CallExpr); ok {
+				// Skip if call is in comment
+				if wga.commentFilter.ShouldSkipCall(call) {
+					return true
+				}
+
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 					if sel.Sel.Name == "Add" && common.GetVarName(sel.X) == wgName {
 						wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Add called after Wait")
@@ -322,7 +376,6 @@ func (wga *WaitGroupAnalyzer) checkBlockingGoroutines() {
 
 			callsDone, blocked := wga.goroutineCallsDoneOrBlocks(goStmt, wgName)
 
-			// FIXED: Report error if there's an Add call but Done is never reached due to blocking
 			if blocked && !callsDone {
 				// Check if this goroutine is related to any Add calls
 				if wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
@@ -367,6 +420,11 @@ func (wga *WaitGroupAnalyzer) goroutineCallsDoneOrBlocks(goStmt *ast.GoStmt, wgN
 		case *ast.ExprStmt:
 			// Check for Done call
 			if call, ok := stmt.X.(*ast.CallExpr); ok {
+				// Skip if call is in comment
+				if wga.commentFilter.ShouldSkipCall(call) {
+					return true
+				}
+
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
 					callsDone = true
 					return false
@@ -506,19 +564,19 @@ func (wga *WaitGroupAnalyzer) checkUnreachableDone() {
 			if !ok {
 				return true
 			}
-			
+
 			// Check if this goroutine has unreachable Done calls
 			if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
 				if wga.hasUnreachableDone(fnLit.Body, wgName) {
 					// Find the Add call related to this goroutine
 					addPos := wga.findRelatedAddCall(goStmt, wgName)
 					if addPos != token.NoPos {
-						wga.errorCollector.AddError(addPos, 
+						wga.errorCollector.AddError(addPos,
 							"waitgroup '"+wgName+"' has Add without corresponding Done")
 					}
 				}
 			}
-			
+
 			return true
 		})
 	}
@@ -536,7 +594,7 @@ func (wga *WaitGroupAnalyzer) hasUnreachableDone(body *ast.BlockStmt, wgName str
 				}
 			}
 		}
-		
+
 		// Recursively check nested blocks
 		switch s := stmt.(type) {
 		case *ast.IfStmt:
@@ -560,7 +618,7 @@ func (wga *WaitGroupAnalyzer) hasUnreachableDone(body *ast.BlockStmt, wgName str
 			}
 		}
 	}
-	
+
 	return false
 }
 
@@ -604,12 +662,12 @@ func (wga *WaitGroupAnalyzer) containsDoneCall(stmt ast.Stmt, wgName string) boo
 func (wga *WaitGroupAnalyzer) findRelatedAddCall(goStmt *ast.GoStmt, wgName string) token.Pos {
 	// Look for Add calls that appear before this goroutine
 	var lastAddPos token.Pos
-	
+
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		if n == goStmt {
 			return false // Stop when we reach the goroutine
 		}
-		
+
 		if call, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				if sel.Sel.Name == "Add" && common.GetVarName(sel.X) == wgName {
@@ -617,13 +675,12 @@ func (wga *WaitGroupAnalyzer) findRelatedAddCall(goStmt *ast.GoStmt, wgName stri
 				}
 			}
 		}
-		
+
 		return true
 	})
-	
+
 	return lastAddPos
 }
-
 
 // checkWaitGroupBalance validates that Add and Done calls are properly balanced
 func (wga *WaitGroupAnalyzer) checkWaitGroupBalance(stats map[string]*waitGroupStats) {
@@ -640,7 +697,6 @@ func (wga *WaitGroupAnalyzer) checkWaitGroupBalance(stats map[string]*waitGroupS
 
 // validateBalance performs the actual balance validation for a WaitGroup
 func (wga *WaitGroupAnalyzer) validateBalance(wgName string, stats *waitGroupStats) {
-	// FIXED: Count effective Done calls considering blocked goroutines
 	effectiveDoneCount := wga.getEffectiveDoneCount(wgName, stats)
 
 	totalExpectedDone := effectiveDoneCount

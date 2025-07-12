@@ -5,7 +5,8 @@ import (
 	"go/token"
 
 	"github.com/sanbricio/concurrency-linter/checker/common"
-	"github.com/sanbricio/concurrency-linter/checker/report"
+	commnetfilter "github.com/sanbricio/concurrency-linter/checker/common/comment-filter"
+	"github.com/sanbricio/concurrency-linter/checker/common/report"
 )
 
 // MutexAnalyzer handles the analysis of mutex and rwmutex usage
@@ -15,6 +16,7 @@ type MutexAnalyzer struct {
 	errorCollector *report.ErrorCollector
 	stats          map[string]*mutexStats
 	deferErrors    *deferErrorCollector
+	commentFilter  *commnetfilter.CommentFilter
 }
 
 // mutexStats tracks the state of a mutex within a block
@@ -30,11 +32,12 @@ type deferErrorCollector struct {
 }
 
 // NewMutexAnalyzer creates a new mutex analyzer
-func NewMutexAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *report.ErrorCollector) *MutexAnalyzer {
+func NewMutexAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter) *MutexAnalyzer {
 	return &MutexAnalyzer{
 		mutexNames:     mutexNames,
 		rwMutexNames:   rwMutexNames,
 		errorCollector: errorCollector,
+		commentFilter:  cf,
 		deferErrors: &deferErrorCollector{
 			badDeferUnlock:  make(map[string]bool),
 			badDeferRUnlock: make(map[string]bool),
@@ -67,6 +70,10 @@ func (ma *MutexAnalyzer) analyzeBlock(block *ast.BlockStmt) map[string]*mutexSta
 	blockStats := ma.copyStats(ma.stats)
 
 	for _, stmt := range block.List {
+		// Skip statements that are entirely within comments
+		if ma.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
 		ma.analyzeStatement(stmt, blockStats)
 	}
 
@@ -86,6 +93,14 @@ func (ma *MutexAnalyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*mutex
 		ma.analyzeGoStatement(s)
 	case *ast.ForStmt:
 		ma.analyzeForStatement(s, stats)
+	case *ast.RangeStmt:
+		ma.analyzeRangeStatement(s, stats)
+	case *ast.SwitchStmt:
+		ma.analyzeSwitchStatement(s)
+	case *ast.TypeSwitchStmt:
+		ma.analyzeTypeSwitchStatement(s)
+	case *ast.SelectStmt:
+		ma.analyzeSelectStatement(s)
 	case *ast.BlockStmt:
 		nestedStats := ma.analyzeBlock(s)
 		ma.mergeStats(stats, nestedStats)
@@ -96,6 +111,11 @@ func (ma *MutexAnalyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*mutex
 func (ma *MutexAnalyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[string]*mutexStats) {
 	call, ok := stmt.X.(*ast.CallExpr)
 	if !ok {
+		return
+	}
+
+	// Skip if the entire call is in a comment
+	if ma.commentFilter.ShouldSkipCall(call) {
 		return
 	}
 
@@ -159,6 +179,11 @@ func (ma *MutexAnalyzer) handleRWMutexCall(varName, methodName string, pos token
 
 // analyzeDeferStatement handles defer statements
 func (ma *MutexAnalyzer) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*mutexStats) {
+	// Skip if the entire defer statement is in a comment
+	if ma.commentFilter.ShouldSkipCall(stmt.Call) {
+		return
+	}
+
 	// Handle direct defer calls
 	if call, ok := stmt.Call.Fun.(*ast.SelectorExpr); ok {
 		ma.handleDeferCall(call, stmt.Pos(), stats)
@@ -240,6 +265,11 @@ func (ma *MutexAnalyzer) containsUnlock(block *ast.BlockStmt, mutexName string) 
 	found := false
 	ast.Inspect(block, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
+			// Skip if the call is in a comment
+			if ma.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				if sel.Sel.Name == "Unlock" && common.GetVarName(sel.X) == mutexName {
 					found = true
@@ -257,6 +287,11 @@ func (ma *MutexAnalyzer) containsRUnlock(block *ast.BlockStmt, mutexName string)
 	found := false
 	ast.Inspect(block, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
+			// Skip if the call is in a comment
+			if ma.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				if sel.Sel.Name == "RUnlock" && common.GetVarName(sel.X) == mutexName {
 					found = true
@@ -269,8 +304,63 @@ func (ma *MutexAnalyzer) containsRUnlock(block *ast.BlockStmt, mutexName string)
 	return found
 }
 
+// analyzeRangeStatement handles range statements
+func (ma *MutexAnalyzer) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*mutexStats) {
+	rangeStats := ma.analyzeBlock(stmt.Body)
+	ma.mergeStats(stats, rangeStats)
+}
+
+// analyzeSwitchStatement handles switch statements
+func (ma *MutexAnalyzer) analyzeSwitchStatement(stmt *ast.SwitchStmt) {
+	for _, caseStmt := range stmt.Body.List {
+		if cc, ok := caseStmt.(*ast.CaseClause); ok {
+			caseStats := ma.analyzeStatements(cc.Body)
+			ma.reportUnmatchedLocksInBranch(caseStats, "case")
+		}
+	}
+}
+
+// analyzeTypeSwitchStatement handles type switch statements
+func (ma *MutexAnalyzer) analyzeTypeSwitchStatement(stmt *ast.TypeSwitchStmt) {
+	for _, caseStmt := range stmt.Body.List {
+		if cc, ok := caseStmt.(*ast.CaseClause); ok {
+			caseStats := ma.analyzeStatements(cc.Body)
+			ma.reportUnmatchedLocksInBranch(caseStats, "case")
+		}
+	}
+}
+
+// analyzeSelectStatement handles select statements
+func (ma *MutexAnalyzer) analyzeSelectStatement(stmt *ast.SelectStmt) {
+	for _, commClause := range stmt.Body.List {
+		if cc, ok := commClause.(*ast.CommClause); ok {
+			commStats := ma.analyzeStatements(cc.Body)
+			ma.reportUnmatchedLocksInBranch(commStats, "select")
+		}
+	}
+}
+
+// analyzeStatements is a helper to analyze a list of statements
+func (ma *MutexAnalyzer) analyzeStatements(stmts []ast.Stmt) map[string]*mutexStats {
+	blockStats := ma.copyStats(ma.stats)
+
+	for _, stmt := range stmts {
+		if ma.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		ma.analyzeStatement(stmt, blockStats)
+	}
+
+	return blockStats
+}
+
 // analyzeIfStatement handles if statements with proper branch analysis
 func (ma *MutexAnalyzer) analyzeIfStatement(stmt *ast.IfStmt) {
+	// Skip if the entire if statement is in a comment
+	if ma.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
 	thenStats := ma.analyzeBlock(stmt.Body)
 	ma.reportUnmatchedLocksInBranch(thenStats, "if")
 
@@ -296,6 +386,11 @@ func (ma *MutexAnalyzer) analyzeElseBranch(elseNode ast.Stmt) map[string]*mutexS
 
 // analyzeGoStatement handles goroutine statements
 func (ma *MutexAnalyzer) analyzeGoStatement(stmt *ast.GoStmt) {
+	// Skip if the entire go statement is in a comment
+	if ma.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
 	if fnLit, ok := stmt.Call.Fun.(*ast.FuncLit); ok {
 		goStats := ma.analyzeBlock(fnLit.Body)
 		ma.reportUnmatchedLocksInBranch(goStats, "goroutine")
@@ -304,6 +399,11 @@ func (ma *MutexAnalyzer) analyzeGoStatement(stmt *ast.GoStmt) {
 
 // analyzeForStatement handles for loop statements
 func (ma *MutexAnalyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*mutexStats) {
+	// Skip if the entire for statement is in a comment
+	if ma.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
 	forStats := ma.analyzeBlock(stmt.Body)
 	ma.mergeStats(stats, forStats)
 }
@@ -311,16 +411,16 @@ func (ma *MutexAnalyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string
 // reportUnmatchedLocksInBranch reports unmatched locks in conditional branches
 func (ma *MutexAnalyzer) reportUnmatchedLocksInBranch(stats map[string]*mutexStats, branchType string) {
 	for mutexName := range ma.mutexNames {
-		ma.reportUnmatchedMutexLocks(mutexName, stats[mutexName], false)
+		ma.reportUnmatchedMutexLocksWithContext(mutexName, stats[mutexName], false, branchType)
 	}
 
 	for rwMutexName := range ma.rwMutexNames {
-		ma.reportUnmatchedMutexLocks(rwMutexName, stats[rwMutexName], true)
+		ma.reportUnmatchedMutexLocksWithContext(rwMutexName, stats[rwMutexName], true, branchType)
 	}
 }
 
-// reportUnmatchedMutexLocks reports unmatched locks for a specific mutex
-func (ma *MutexAnalyzer) reportUnmatchedMutexLocks(mutexName string, stats *mutexStats, isRWMutex bool) {
+// reportUnmatchedMutexLocksWithContext reports unmatched locks for a specific mutex with context
+func (ma *MutexAnalyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats *mutexStats, isRWMutex bool, branchType string) {
 	if stats == nil {
 		return
 	}
@@ -330,15 +430,33 @@ func (ma *MutexAnalyzer) reportUnmatchedMutexLocks(mutexName string, stats *mute
 		mutexType = "rwmutex"
 	}
 
+	// Create context-aware messages
+	var lockMessage, rlockMessage string
+	if branchType == "" {
+		// For function-level reporting (no context)
+		lockMessage = mutexType + " '" + mutexName + "' is locked but not unlocked"
+		rlockMessage = "rwmutex '" + mutexName + "' is rlocked but not runlocked"
+	} else {
+		// For branch-level reporting (with context)
+		lockMessage = mutexType + " '" + mutexName + "' is locked but not unlocked in " + branchType
+		rlockMessage = "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
+	}
+
 	for _, pos := range stats.lockPos {
-		ma.errorCollector.AddError(pos, mutexType+" '"+mutexName+"' is locked but not unlocked")
+		ma.errorCollector.AddError(pos, lockMessage)
 	}
 
 	if isRWMutex {
 		for _, pos := range stats.rlockPos {
-			ma.errorCollector.AddError(pos, "rwmutex '"+mutexName+"' is rlocked but not runlocked")
+			ma.errorCollector.AddError(pos, rlockMessage)
 		}
 	}
+}
+
+// reportUnmatchedMutexLocks reports unmatched locks for a specific mutex
+func (ma *MutexAnalyzer) reportUnmatchedMutexLocks(mutexName string, stats *mutexStats, isRWMutex bool) {
+	// Call the context-aware version with empty context for function-level reporting
+	ma.reportUnmatchedMutexLocksWithContext(mutexName, stats, isRWMutex, "")
 }
 
 // reportUnmatchedLocks reports any remaining unmatched locks at function level

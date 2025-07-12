@@ -19,6 +19,7 @@
 
 # Coverage and test profiles
 coverage.out
+coverage.html
 profile.cov
 
 # Analysis tool outputs

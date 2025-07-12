@@ -87,6 +87,24 @@ func (m *MyStruct) DoWork() {
 	m.wg.Wait()
 }
 
+// Multiple WaitGroups, each with their own Add and Done
+func GoodMultipleWaitGroups() {
+	var wg1, wg2 sync.WaitGroup
+
+	wg1.Add(1)
+	go func() {
+		defer wg1.Done()
+	}()
+
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+	}()
+
+	wg1.Wait()
+	wg2.Wait()
+}
+
 // ========== INCORRECT USAGE (Bad cases) ==========
 
 // ---------- WAITGROUP ----------
@@ -229,3 +247,32 @@ func EdgeCaseComplexButValid() {
 
 	wg.Wait()
 }
+
+// Test that commented code is properly ignored by the linter.
+// The following commented code should NOT trigger any linter warnings.
+
+/*
+func CommentedGoodReuseWaitGroup() {
+	var wg sync.WaitGroup
+
+	// First usage
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+
+	// Second usage
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+*/
+
+// func CommentedBadWaitGroupUsage() {
+//     var wg sync.WaitGroup
+//     wg.Add(1) // This should be ignored
+//     wg.Wait()
+// }

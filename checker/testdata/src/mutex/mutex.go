@@ -165,7 +165,7 @@ func BadConditionalMissingUnlock() {
 	var mu sync.Mutex
 	cond := true
 	if cond {
-		mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in if"
 	}
 }
 
@@ -223,7 +223,7 @@ func BadGoroutineDeadlock() {
 	var mu sync.Mutex
 	ch := make(chan struct{})
 	go func() {
-		mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in goroutine"
 		<-ch      // deadlock, never unlocks
 	}()
 }
@@ -299,7 +299,7 @@ func BadRWConditionalMissingRUnlock() {
 	var mu sync.RWMutex
 	cond := true
 	if cond {
-		mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+		mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked in if"
 	}
 }
 
@@ -319,7 +319,7 @@ func BadRWConditionalOneBranchMissingRLock() {
 func BadRWGoroutineRLockWithoutRUnlock() {
 	var mu sync.RWMutex
 	go func() {
-		mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+		mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked in goroutine"
 	}()
 }
 
@@ -346,3 +346,18 @@ func BadRWDoubleUnlock() {
 	mu.Unlock()
 	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
 }
+
+// Test that commented code is properly ignored by the linter.
+// The following commented code should NOT trigger any linter warnings.
+
+/*
+func CommentedBadMutexUsage() {
+    var mu sync.Mutex
+    mu.Lock() // This should be ignored
+}
+*/
+
+// func AnotherCommentedFunction() {
+//     var mu sync.Mutex
+//     mu.Lock() // This should also be ignored
+// }
