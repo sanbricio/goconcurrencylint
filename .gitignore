@@ -5,6 +5,7 @@
 *.dylib
 *.test
 *.out
+goconcurrencylint
 
 # Temporary and log files
 *.log
