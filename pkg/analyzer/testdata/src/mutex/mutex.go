@@ -405,6 +405,74 @@ func NestedStructShortDeclaration() {
 	mu.Lock()          // want "mutex 'mu' is locked but not unlocked"
 }
 
+// switch statement with mutex
+func EdgeCaseSwitchStatement() {
+	var mu sync.Mutex
+	x := 1
+
+	switch x {
+	case 1:
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in case"
+	case 2:
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+// type switch with mutex
+func EdgeCaseTypeSwitchStatement() {
+	var mu sync.Mutex
+	var x interface{} = 1
+
+	switch x.(type) {
+	case int:
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in case"
+	case string:
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+// select statement with mutex
+func EdgeCaseSelectStatement() {
+	var mu sync.Mutex
+	ch := make(chan int)
+
+	select {
+	case <-ch:
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in select"
+	default:
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+// nested blocks with mutex
+func EdgeCaseNestedBlocks() {
+	var mu sync.Mutex
+
+	{
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+		{
+			// nested block
+		}
+	}
+}
+
+// else-if with mutex
+func EdgeCaseElseIf() {
+	var mu sync.Mutex
+	cond1 := true
+	cond2 := false
+
+	if cond1 {
+		mu.Lock()
+		mu.Unlock()
+	} else if cond2 {
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in if"
+	}
+}
+
 // Test that commented code is properly ignored by the linter.
 // The following commented code should NOT trigger any linter warnings.
 

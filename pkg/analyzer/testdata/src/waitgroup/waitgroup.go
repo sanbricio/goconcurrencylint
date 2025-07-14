@@ -263,6 +263,15 @@ func EdgeCaseComplexButValid() {
 	wg.Wait()
 }
 
+// Edge case where Add is called after Wait, but in a different flow
+func EdgeCaseAddAfterWaitMainFlow() {
+	var wg sync.WaitGroup
+
+	wg.Wait() 
+	wg.Add(1) // want "waitgroup 'wg' Add called after Wait"
+	wg.Done()
+}
+
 // Test that commented code is properly ignored by the linter.
 // The following commented code should NOT trigger any linter warnings.
 
