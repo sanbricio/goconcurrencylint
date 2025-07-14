@@ -31,7 +31,7 @@
 ## Installation
 
 ```bash
-go install github.com/YOUR_USER/goconcurrencylint/cmd/goconcurrencylint@latest
+go install github.com/sanbricio/goconcurrencylint/cmd/goconcurrencylint@latest
 ```
 
 Or use it as part of [golangci-lint](https://golangci-lint.run/) (once officially integrated).
