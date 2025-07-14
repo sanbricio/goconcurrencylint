@@ -23,9 +23,10 @@ import (
 // - Locks without unlocks
 // - Add without Done
 var Analyzer = &analysis.Analyzer{
-	Name: "goconcurrentlint",
-	Doc:  "Detects common mistakes in the use of sync.Mutex and sync.WaitGroup: locks without unlock and Add without Done.",
-	Run:  run,
+	Name:     "goconcurrentlint",
+	Doc:      "Detects common mistakes in the use of sync.Mutex and sync.WaitGroup: locks without unlock and Add without Done.",
+	Run:      run,
+	Requires: []*analysis.Analyzer{},
 }
 
 // syncPrimitive holds information about sync primitives found in a function
