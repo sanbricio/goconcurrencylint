@@ -16,6 +16,16 @@ func GoodBasicAddDone() {
 	wg.Wait()
 }
 
+// Correct WaitGroup usage with short declaration
+func GoodWaitGroupShortDecl() {
+	wg := sync.WaitGroup{} // short declaration
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
 // Add and Done inside a loop (typical worker pattern)
 func GoodLoopAddDone() {
 	var wg sync.WaitGroup
@@ -107,12 +117,17 @@ func GoodMultipleWaitGroups() {
 
 // ========== INCORRECT USAGE (Bad cases) ==========
 
-// ---------- WAITGROUP ----------
-
 // Add without Done (counter never decremented)
 func BadAddWithoutDone() {
 	var wg sync.WaitGroup
 	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Wait()
+}
+
+// Bad Waitgroup with short declaration
+func BadWaitGroupShortDecl() {
+	wg := sync.WaitGroup{} // short declaration
+	wg.Add(1)              // want "waitgroup 'wg' has Add without corresponding Done"
 	wg.Wait()
 }
 

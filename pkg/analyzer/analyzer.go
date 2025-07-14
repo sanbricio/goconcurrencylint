@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -71,25 +72,37 @@ func findSyncPrimitives(fn *ast.FuncDecl, pass *analysis.Pass) *syncPrimitive {
 	}
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		vs, ok := n.(*ast.ValueSpec)
-		if !ok {
-			return true
-		}
-
-		for _, name := range vs.Names {
-			typ := getVariableType(vs, pass)
-			if typ == nil {
-				continue
+		switch node := n.(type) {
+		case *ast.ValueSpec:
+			// Handle var declarations
+			for _, name := range node.Names {
+				typ := getVariableType(node, pass)
+				if typ == nil {
+					continue
+				}
+				classifyAndAddPrimitive(name.Name, typ, primitives)
 			}
 
-			varName := name.Name
-			switch {
-			case common.IsMutex(typ):
-				primitives.mutexes[varName] = true
-			case common.IsRWMutex(typ):
-				primitives.rwMutexes[varName] = true
-			case common.IsWaitGroup(typ):
-				primitives.waitGroups[varName] = true
+		case *ast.AssignStmt:
+			// Handle short variable declarations
+			if node.Tok == token.DEFINE {
+				for i, lhs := range node.Lhs {
+					if ident, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
+						if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
+							classifyAndAddPrimitive(ident.Name, typ, primitives)
+						}
+					}
+				}
+			}
+			// Handle regular assignments
+			if node.Tok == token.ASSIGN {
+				for i, lhs := range node.Lhs {
+					if ident, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
+						if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
+							classifyAndAddPrimitive(ident.Name, typ, primitives)
+						}
+					}
+				}
 			}
 		}
 		return true
@@ -98,13 +111,44 @@ func findSyncPrimitives(fn *ast.FuncDecl, pass *analysis.Pass) *syncPrimitive {
 	return primitives
 }
 
+// classifyAndAddPrimitive classifies a type and adds it to the appropriate primitive map
+func classifyAndAddPrimitive(varName string, typ types.Type, primitives *syncPrimitive) {
+	switch {
+	case common.IsMutex(typ):
+		primitives.mutexes[varName] = true
+	case common.IsRWMutex(typ):
+		primitives.rwMutexes[varName] = true
+	case common.IsWaitGroup(typ):
+		primitives.waitGroups[varName] = true
+	}
+}
+
 // getVariableType extracts the type information for a variable specification
 func getVariableType(vs *ast.ValueSpec, pass *analysis.Pass) types.Type {
-	typ := pass.TypesInfo.TypeOf(vs.Type)
-	if typ == nil && len(vs.Values) > 0 {
-		typ = pass.TypesInfo.TypeOf(vs.Values[0])
+	// First try to get type from explicit type annotation
+	if vs.Type != nil {
+		typ := pass.TypesInfo.TypeOf(vs.Type)
+		if typ != nil {
+			return typ
+		}
 	}
-	return typ
+
+	// If no explicit type, try to infer from the first value
+	if len(vs.Values) > 0 {
+		typ := pass.TypesInfo.TypeOf(vs.Values[0])
+		if typ != nil {
+			return typ
+		}
+	}
+
+	// Last resort: try to get type info from the first name
+	if len(vs.Names) > 0 {
+		if obj := pass.TypesInfo.ObjectOf(vs.Names[0]); obj != nil {
+			return obj.Type()
+		}
+	}
+
+	return nil
 }
 
 // hasMutexes checks if any mutex or rwmutex primitives were found

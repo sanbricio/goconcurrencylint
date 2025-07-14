@@ -13,6 +13,13 @@ func GoodBasicLockUnlock() {
 	mu.Unlock()
 }
 
+// Correct usage with short declaration
+func GoodLockUnlockShortDecl() {
+	mu := sync.Mutex{} // short declaration
+	mu.Lock()
+	mu.Unlock()
+}
+
 // Lock and unlock using defer
 func GoodDeferUnlock() {
 	var mu sync.Mutex
@@ -138,11 +145,19 @@ func BadLockWithoutUnlock() {
 	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
 }
 
-// Unlock without lock
-func BadUnlockWithoutLock() {
+// Double lock (lock called twice) without unlock
+func BadDoubleLock() {
+	mu := sync.Mutex{}
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+}
+
+// Double lock with direct assignment
+func BadDoubleLockDirectAssign() {
 	var mu sync.Mutex
-	mu.Lock()
-	mu.Unlock()
+	mu = sync.Mutex{} // direct assignment
+	mu.Lock()         // want "mutex 'mu' is locked but not unlocked"
+	mu.Lock()         // want "mutex 'mu' is locked but not unlocked"
 }
 
 // Defer unlock without prior lock
@@ -238,12 +253,33 @@ func BadGoroutineDeferUnlockWithoutLock() {
 	}()
 }
 
+// Mix of var and short declarations
+func MixedDeclarationTypes() {
+	var mu1 sync.Mutex
+	mu2 := sync.Mutex{}
+
+	mu1.Lock() // want "mutex 'mu1' is locked but not unlocked"
+	mu2.Lock() // want "mutex 'mu2' is locked but not unlocked"
+}
+
 // ---------- RW MUTEX ----------
 
 // RLock without RUnlock
 func BadRLockWithoutRUnlock() {
 	var mu sync.RWMutex
 	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+}
+
+// RWMutex with short declaration
+func BadRWLockShortDecl() {
+	rwmu := sync.RWMutex{}
+	rwmu.Lock() // want "rwmutex 'rwmu' is locked but not unlocked"
+}
+
+// RLock without RUnlock with short declaration
+func BadRLockShortDecl() {
+	rwmu := sync.RWMutex{}
+	rwmu.RLock() // want "rwmutex 'rwmu' is rlocked but not runlocked"
 }
 
 // RUnlock without RLock
@@ -345,6 +381,28 @@ func BadRWDoubleUnlock() {
 	mu.Lock()
 	mu.Unlock()
 	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
+}
+
+// ========== EDGE CASES ==========
+
+// Short declaration with pointer
+func PointerShortDeclaration() {
+	mu := &sync.Mutex{} // short declaration with pointer
+	mu.Lock()           // want "mutex 'mu' is locked but not unlocked"
+}
+
+// Short declaration in nested context
+func NestedStructShortDeclaration() {
+	type MyStruct struct {
+		mu sync.Mutex
+	}
+
+	s := MyStruct{} // This should not be detected as a mutex
+	_ = s
+
+	// But this should be detected
+	mu := sync.Mutex{} // short declaration
+	mu.Lock()          // want "mutex 'mu' is locked but not unlocked"
 }
 
 // Test that commented code is properly ignored by the linter.
