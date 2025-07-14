@@ -115,6 +115,48 @@ func GoodMultipleWaitGroups() {
 	wg2.Wait()
 }
 
+// WaitGroup passed to goroutine directly
+func GoodWaitGroupPassedToGoroutine() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go handleShutdown(&wg, nil) // Passed as pointer
+	wg.Wait()
+}
+
+// WaitGroup passed as value
+func GoodWaitGroupPassedAsValue() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go processWork(wg) // Passed as value, not pointer
+	wg.Wait()
+}
+
+// WaitGroup method passed as function
+func GoodWaitGroupMethodPassed() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go runWithCallback(wg.Done) // Done method passed as callback
+	wg.Wait()
+}
+
+// Multiple WaitGroups, one passed to function
+func GoodMixedWaitGroupUsage() {
+	var wg1, wg2 sync.WaitGroup
+
+	// wg1 is handled locally
+	wg1.Add(1)
+	go func() {
+		defer wg1.Done()
+	}()
+
+	// wg2 is passed to another function
+	wg2.Add(1)
+	go handleExternalWork(&wg2)
+
+	wg1.Wait()
+	wg2.Wait()
+}
+
 // ========== INCORRECT USAGE (Bad cases) ==========
 
 // Add without Done (counter never decremented)
@@ -267,7 +309,7 @@ func EdgeCaseComplexButValid() {
 func EdgeCaseAddAfterWaitMainFlow() {
 	var wg sync.WaitGroup
 
-	wg.Wait() 
+	wg.Wait()
 	wg.Add(1) // want "waitgroup 'wg' Add called after Wait"
 	wg.Done()
 }
@@ -300,3 +342,29 @@ func CommentedGoodReuseWaitGroup() {
 //     wg.Add(1) // This should be ignored
 //     wg.Wait()
 // }
+
+// Helper functions for the test cases above
+func handleWork(wg *sync.WaitGroup) {
+	defer wg.Done()
+	// do work
+}
+
+func handleShutdown(wg *sync.WaitGroup, servers interface{}) {
+	defer wg.Done()
+	// shutdown logic
+}
+
+func processWork(wg sync.WaitGroup) {
+	defer wg.Done()
+	// process work
+}
+
+func runWithCallback(done func()) {
+	defer done()
+	// run with callback
+}
+
+func handleExternalWork(wg *sync.WaitGroup) {
+	defer wg.Done()
+	// external work
+}

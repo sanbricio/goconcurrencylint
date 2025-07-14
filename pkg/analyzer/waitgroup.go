@@ -825,5 +825,25 @@ func (wga *WaitGroupAnalyzer) isWaitGroupArgument(arg ast.Expr, wgName string) b
 		return true
 	}
 
+	// This handles cases like: go runWithCallback(wg.Done)
+	if sel, ok := arg.(*ast.SelectorExpr); ok {
+		if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == wgName {
+			// Check if it's a WaitGroup method (Add, Done, Wait)
+			methodName := sel.Sel.Name
+			if methodName == "Done" || methodName == "Add" || methodName == "Wait" {
+				return true
+			}
+		}
+	}
+
+	// Check for method calls on WaitGroup (like wg.Add(1), wg.Done() passed as function result)
+	if call, ok := arg.(*ast.CallExpr); ok {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == wgName {
+				return true
+			}
+		}
+	}
+
 	return false
 }
