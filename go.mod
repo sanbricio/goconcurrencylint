@@ -1,4 +1,4 @@
-module github.com/sanbricio/concurrency-linter
+module github.com/sanbricio/goconcurrencylint
 
 go 1.23.0
 

@@ -1,12 +1,12 @@
-package checker
+package analyzer
 
 import (
 	"go/ast"
 	"go/token"
 
-	"github.com/sanbricio/concurrency-linter/checker/common"
-	commnetfilter "github.com/sanbricio/concurrency-linter/checker/common/comment-filter"
-	"github.com/sanbricio/concurrency-linter/checker/common/report"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
 )
 
 // MutexAnalyzer handles the analysis of mutex and rwmutex usage

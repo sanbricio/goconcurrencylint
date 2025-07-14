@@ -1,4 +1,4 @@
-package checker
+package analyzer
 
 import (
 	"testing"

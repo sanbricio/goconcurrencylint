@@ -1,4 +1,4 @@
-# goconcurrentlint
+# goconcurrencylint
 
 [![Go Version](https://img.shields.io/badge/Go-1.23+-blue)](https://golang.org/doc/go1.23)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -6,7 +6,7 @@
 
 ## Overview
 
-**goconcurrentlint** is a static analysis linter for Go that detects common mistakes and dangerous patterns in the use of `sync.Mutex`, `sync.RWMutex`, and `sync.WaitGroup`. It helps you prevent concurrency bugs such as forgotten unlocks or missing Done calls in WaitGroups.
+**goconcurrencylint** is a static analysis linter for Go that detects common mistakes and dangerous patterns in the use of `sync.Mutex`, `sync.RWMutex`, and `sync.WaitGroup`. It helps you prevent concurrency bugs such as forgotten unlocks or missing Done calls in WaitGroups.
 
 - 🚦 **Detects**: locks without unlocks, unlocks without locks, WaitGroup adds without corresponding Done, and more.
 - 🛠️ **Based on `go/analysis`**: fully compatible with `golangci-lint` and modern Go tooling.
@@ -31,7 +31,7 @@
 ## Installation
 
 ```bash
-go install github.com/YOUR_USER/goconcurrentlint/cmd/goconcurrentlint@latest
+go install github.com/YOUR_USER/goconcurrencylint/cmd/goconcurrencylint@latest
 ```
 
 Or use it as part of [golangci-lint](https://golangci-lint.run/) (once officially integrated).
@@ -41,7 +41,7 @@ Or use it as part of [golangci-lint](https://golangci-lint.run/) (once officiall
 Analyze your project:
 
 ```bash
-goconcurrentlint ./...
+goconcurrencylint ./...
 ```
 
 **Example output:**
@@ -170,12 +170,12 @@ waitgroup.go:13:6: waitgroup 'wg' has Add without corresponding Done
 
 ## Integration with golangci-lint
 
-Enable `goconcurrentlint` in your `.golangci.yml`:
+Enable `goconcurrencylint` in your `.golangci.yml`:
 
 ```yaml
 linters:
   enable:
-    - goconcurrentlint
+    - goconcurrencylint
 ```
 
 ## Contributing
