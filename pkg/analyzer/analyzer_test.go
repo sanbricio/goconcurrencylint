@@ -39,6 +39,26 @@ func TestGetVariableTypeNilCases(t *testing.T) {
 	assert.Nil(t, result, "Should return nil when no type info available")
 }
 
+func TestGetVariableTypeWithValuesButNoTypeInfo(t *testing.T) {
+	unknownExpr := &ast.BasicLit{Value: "123"}
+
+	vs := &ast.ValueSpec{
+		Names:  []*ast.Ident{{Name: "test"}},
+		Type:   nil,
+		Values: []ast.Expr{unknownExpr},
+	}
+
+	pass := &analysis.Pass{
+		TypesInfo: &types.Info{
+			Types: make(map[ast.Expr]types.TypeAndValue),
+			Defs:  make(map[*ast.Ident]types.Object),
+		},
+	}
+
+	result := getVariableType(vs, pass)
+	assert.Nil(t, result, "Should return nil when TypeOf returns nil for value")
+}
+
 func TestNoPrimitivesDetected(t *testing.T) {
 	src := `package main
 
