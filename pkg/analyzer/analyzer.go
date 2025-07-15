@@ -8,6 +8,7 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/mutex"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/waitgroup"
 	"golang.org/x/tools/go/analysis"
 )
@@ -164,7 +165,7 @@ func hasWaitGroups(primitives *syncPrimitive) bool {
 
 // analyzeMutexUsage handles mutex and rwmutex analysis
 func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter) {
-	analyzer := NewMutexAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf)
+	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf)
 	analyzer.AnalyzeFunction(fn)
 }
 
