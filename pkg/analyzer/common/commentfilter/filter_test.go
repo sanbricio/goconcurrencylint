@@ -533,10 +533,11 @@ func main() {
 
 	for line, inComment := range results {
 		t.Logf("Line %d: inComment=%v", line, inComment)
-		if line == 4 {
+		switch line {
+		case 4:
 			// mu.Lock() is between comments, so should not be in comment
 			assert.False(t, inComment, "mu.Lock() should not be in comment")
-		} else if line == 5 {
+		case 5:
 			assert.False(t, inComment, "mu.Unlock() should not be in comment")
 		}
 	}

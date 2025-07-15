@@ -52,9 +52,9 @@ func doWork(wg *sync.WaitGroup) {
 // Add and Wait with a gouroutine doing Done()
 func GoodAddBeforeWait() {
 	var wg sync.WaitGroup
-	wg.Add(1) // Add ANTES de iniciar la goroutine
+	wg.Add(1)
 	go func() {
-		defer wg.Done() // Solo Done dentro de la goroutine
+		defer wg.Done()
 	}()
 	wg.Wait()
 }
@@ -157,6 +157,25 @@ func GoodMixedWaitGroupUsage() {
 	wg2.Wait()
 }
 
+// Multiple goroutines with defer Done (should NOT trigger error)
+func GoodMultipleGoroutinesWithDeferDone() {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	var errOrderConsumer, errReturnConsumer any
+	go func() {
+		defer wg.Done()
+		errOrderConsumer = doSomething()
+	}()
+	go func() {
+		defer wg.Done()
+		errReturnConsumer = doSomething()
+	}()
+	wg.Wait()
+
+	_ = errOrderConsumer
+	_ = errReturnConsumer
+}
+
 // ========== INCORRECT USAGE (Bad cases) ==========
 
 // Add without Done (counter never decremented)
@@ -248,6 +267,7 @@ func BadPanicWithoutRecover() {
 	}()
 	wg.Wait()
 }
+
 
 // Add without Done in a goroutine with a conditional return
 func BadDeferWithConditionalReturn() {
@@ -367,4 +387,8 @@ func runWithCallback(done func()) {
 func handleExternalWork(wg *sync.WaitGroup) {
 	defer wg.Done()
 	// external work
+}
+
+func doSomething() any {
+	return nil
 }
