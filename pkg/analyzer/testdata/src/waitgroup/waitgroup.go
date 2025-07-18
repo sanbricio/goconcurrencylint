@@ -176,6 +176,24 @@ func GoodMultipleGoroutinesWithDeferDone() {
 	_ = errReturnConsumer
 }
 
+func GoodReuseWaitGroup() {
+	var wg sync.WaitGroup
+
+	// First usage
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+
+	// Second usage
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
 // ========== INCORRECT USAGE (Bad cases) ==========
 
 // Add without Done (counter never decremented)
@@ -267,7 +285,6 @@ func BadPanicWithoutRecover() {
 	}()
 	wg.Wait()
 }
-
 
 // Add without Done in a goroutine with a conditional return
 func BadDeferWithConditionalReturn() {

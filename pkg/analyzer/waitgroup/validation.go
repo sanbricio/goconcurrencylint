@@ -143,12 +143,39 @@ func (wga *Analyzer) checkAddInGoroutine(goStmt *ast.GoStmt, wgName string) {
 	}
 }
 
-// checkAddAfterWaitInMainFlow checks for Add after Wait in the main execution flow
+// checkAddAfterWaitInMainFlow detects Add calls in the main execution flow that occur after Wait
+// without a proper Add->Done cycle before the Wait. This catches cases where Wait() is called
+// first (without prior operations) and then Add() is called, which is incorrect usage.
 func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
-	for _, add := range st.addCalls {
-		for _, wait := range st.waitCalls {
-			if add.pos > wait && !wga.isInGoroutine(add.pos) {
-				wga.errorCollector.AddError(add.pos, "waitgroup '"+wgName+"' Add called after Wait")
+	for _, wait := range st.waitCalls {
+		// Check if this Wait has any Add or Done operations before it in main flow
+		hasOperationsBefore := false
+
+		// Check for Add calls before this Wait (main flow only)
+		for _, add := range st.addCalls {
+			if add.pos < wait && !wga.isInGoroutine(add.pos) {
+				hasOperationsBefore = true
+				break
+			}
+		}
+
+		// Check for Done calls before this Wait (main flow only)
+		if !hasOperationsBefore {
+			for _, done := range st.doneCalls {
+				if done < wait && !wga.isInGoroutine(done) {
+					hasOperationsBefore = true
+					break
+				}
+			}
+		}
+
+		// If this is an "empty" Wait (no operations before it), flag subsequent Add calls
+		if !hasOperationsBefore {
+			for _, add := range st.addCalls {
+				// Only report Add calls in main flow after this empty Wait
+				if add.pos > wait && !wga.isInGoroutine(add.pos) {
+					wga.errorCollector.AddError(add.pos, "waitgroup '"+wgName+"' Add called after Wait")
+				}
 			}
 		}
 	}
