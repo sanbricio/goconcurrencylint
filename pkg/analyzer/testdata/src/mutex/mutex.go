@@ -2,9 +2,9 @@ package mutex
 
 import "sync"
 
-// ========== CORRECT USAGE (Good cases) ==========
+// ========== MUTEX TESTS ==========
 
-// ---------- MUTEX ----------
+// ---------- Basic Lock/Unlock ----------
 
 // Basic lock and unlock
 func GoodBasicLockUnlock() {
@@ -20,13 +20,6 @@ func GoodLockUnlockShortDecl() {
 	mu.Unlock()
 }
 
-// Lock and unlock using defer
-func GoodDeferUnlock() {
-	var mu sync.Mutex
-	mu.Lock()
-	defer mu.Unlock()
-}
-
 // Multiple lock/unlock pairs
 func GoodMultipleLockUnlock() {
 	var mu sync.Mutex
@@ -35,109 +28,6 @@ func GoodMultipleLockUnlock() {
 	mu.Lock()
 	mu.Unlock()
 }
-
-// Conditional: both branches lock and unlock
-func GoodConditionalBothBranches() {
-	var mu sync.Mutex
-	cond := true
-	if cond {
-		mu.Lock()
-		defer mu.Unlock()
-	} else {
-		mu.Lock()
-		defer mu.Unlock()
-	}
-}
-
-// Lock/unlock in a goroutine
-func GoodGoroutineLockUnlock() {
-	var mu sync.Mutex
-	go func() {
-		mu.Lock()
-		defer mu.Unlock()
-	}()
-}
-
-// Lock/unlock with panic recovery
-func GoodRecoverWithUnlock() {
-	var mu sync.Mutex
-	mu.Lock()
-	defer func() {
-		if r := recover(); r != nil {
-			mu.Unlock()
-		}
-	}()
-	panic("fail")
-}
-
-// ---------- RW MUTEX ----------
-
-// Basic RLock and RUnlock
-func GoodBasicRLockRUnlock() {
-	var mu sync.RWMutex
-	mu.RLock()
-	mu.RUnlock()
-}
-
-// Basic Lock and Unlock (write)
-func GoodBasicRWLockUnlock() {
-	var mu sync.RWMutex
-	mu.Lock()
-	mu.Unlock()
-}
-
-// RLock/RUnlock and Lock/Unlock in sequence
-func GoodRWMultipleOperations() {
-	var mu sync.RWMutex
-	mu.RLock()
-	mu.RUnlock()
-	mu.Lock()
-	mu.Unlock()
-}
-
-// Defer unlock after write lock
-func GoodRWDeferUnlock() {
-	var mu sync.RWMutex
-	mu.Lock()
-	defer mu.Unlock()
-}
-
-// Defer runlock after read lock
-func GoodRWDeferRUnlock() {
-	var mu sync.RWMutex
-	mu.RLock()
-	defer mu.RUnlock()
-}
-
-// Both branches use lock/unlock or rlock/runlock
-func GoodRWConditionalBothBranches() {
-	var mu sync.RWMutex
-	cond := true
-	if cond {
-		mu.Lock()
-		defer mu.Unlock()
-	} else {
-		mu.RLock()
-		defer mu.RUnlock()
-	}
-}
-
-// Goroutine: Lock/Unlock and RLock/RUnlock
-func GoodRWGoroutineLockUnlock() {
-	var mu sync.RWMutex
-	go func() {
-		mu.Lock()
-		defer mu.Unlock()
-	}()
-	go func() {
-		mu.RLock()
-		defer mu.RUnlock()
-	}()
-}
-
-// ========== INCORRECT USAGE (Bad cases) ==========
-
-// ---------- MUTEX ----------
 
 // Lock without unlock
 func BadLockWithoutUnlock() {
@@ -160,6 +50,43 @@ func BadDoubleLockDirectAssign() {
 	mu.Lock()         // want "mutex 'mu' is locked but not unlocked"
 }
 
+// Imbalanced lock/unlock (more locks than unlocks)
+func BadImbalancedLockUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	mu.Unlock()
+}
+
+// Double unlock (unlock called twice)
+func BadDoubleUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Unlock()
+	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+}
+
+// ---------- Defer Patterns ----------
+
+// Lock and unlock using defer
+func GoodDeferUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	defer mu.Unlock()
+}
+
+// Lock/unlock with panic recovery
+func GoodRecoverWithUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	defer func() {
+		if r := recover(); r != nil {
+			mu.Unlock()
+		}
+	}()
+	panic("fail")
+}
+
 // Defer unlock without prior lock
 func BadDeferUnlockWithoutLock() {
 	var mu sync.Mutex
@@ -167,12 +94,27 @@ func BadDeferUnlockWithoutLock() {
 	mu.Lock()
 }
 
-// Imbalanced lock/unlock (more locks than unlocks)
-func BadImbalancedLockUnlock() {
+// Defer unlock after panic before lock
+func BadDeferUnlockAfterPanic() {
 	var mu sync.Mutex
+	defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
+	panic("panic before lock")
 	mu.Lock()
-	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
-	mu.Unlock()
+}
+
+// ---------- Conditional Logic ----------
+
+// Conditional: both branches lock and unlock
+func GoodConditionalBothBranches() {
+	var mu sync.Mutex
+	cond := true
+	if cond {
+		mu.Lock()
+		defer mu.Unlock()
+	} else {
+		mu.Lock()
+		defer mu.Unlock()
+	}
 }
 
 // Conditional: one branch missing unlock
@@ -217,20 +159,29 @@ func BadConditionalOneBranchMissingUnlock() {
 	}
 }
 
-// Double unlock (unlock called twice)
-func BadDoubleUnlock() {
+// else-if with mutex
+func EdgeCaseElseIf() {
 	var mu sync.Mutex
-	mu.Lock()
-	mu.Unlock()
-	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+	cond1 := true
+	cond2 := false
+
+	if cond1 {
+		mu.Lock()
+		mu.Unlock()
+	} else if cond2 {
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in if"
+	}
 }
 
-// Defer unlock after panic before lock
-func BadDeferUnlockAfterPanic() {
+// ---------- Goroutine Patterns ----------
+
+// Lock/unlock in a goroutine
+func GoodGoroutineLockUnlock() {
 	var mu sync.Mutex
-	defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
-	panic("panic before lock")
-	mu.Lock()
+	go func() {
+		mu.Lock()
+		defer mu.Unlock()
+	}()
 }
 
 // Goroutine deadlock (lock, but unlock never called)
@@ -253,16 +204,32 @@ func BadGoroutineDeferUnlockWithoutLock() {
 	}()
 }
 
-// Mix of var and short declarations
-func MixedDeclarationTypes() {
-	var mu1 sync.Mutex
-	mu2 := sync.Mutex{}
+// ========== RWMUTEX TESTS ==========
 
-	mu1.Lock() // want "mutex 'mu1' is locked but not unlocked"
-	mu2.Lock() // want "mutex 'mu2' is locked but not unlocked"
+// ---------- Basic Read/Write Operations ----------
+
+// Basic RLock and RUnlock
+func GoodBasicRLockRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
 }
 
-// ---------- RW MUTEX ----------
+// Basic Lock and Unlock (write)
+func GoodBasicRWLockUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	mu.Unlock()
+}
+
+// RLock/RUnlock and Lock/Unlock in sequence
+func GoodRWMultipleOperations() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
+	mu.Lock()
+	mu.Unlock()
+}
 
 // RLock without RUnlock
 func BadRLockWithoutRUnlock() {
@@ -300,6 +267,22 @@ func BadRWUnlockWithoutLock() {
 	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
 }
 
+// ---------- RWMutex Defer Patterns ----------
+
+// Defer unlock after write lock
+func GoodRWDeferUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	defer mu.Unlock()
+}
+
+// Defer runlock after read lock
+func GoodRWDeferRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	defer mu.RUnlock()
+}
+
 // Defer runlock without prior rlock
 func BadRWDeferRUnlockWithoutRLock() {
 	var mu sync.RWMutex
@@ -314,20 +297,19 @@ func BadRWDeferUnlockWithoutLock() {
 	mu.Lock()
 }
 
-// Imbalanced: two rlocks, one runlock
-func BadRWImbalancedRLockRUnlock() {
-	var mu sync.RWMutex
-	mu.RLock()
-	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
-	mu.RUnlock()
-}
+// ---------- RWMutex Conditional Logic ----------
 
-// Imbalanced: lock and rlock, only unlock
-func BadRWImbalancedMixed() {
+// Both branches use lock/unlock or rlock/runlock
+func GoodRWConditionalBothBranches() {
 	var mu sync.RWMutex
-	mu.Lock()
-	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
-	mu.Unlock()
+	cond := true
+	if cond {
+		mu.Lock()
+		defer mu.Unlock()
+	} else {
+		mu.RLock()
+		defer mu.RUnlock()
+	}
 }
 
 // Conditional: one branch with rlock, other missing runlock
@@ -351,6 +333,21 @@ func BadRWConditionalOneBranchMissingRLock() {
 	}
 }
 
+// ---------- RWMutex Goroutine Patterns ----------
+
+// Goroutine: Lock/Unlock and RLock/RUnlock
+func GoodRWGoroutineLockUnlock() {
+	var mu sync.RWMutex
+	go func() {
+		mu.Lock()
+		defer mu.Unlock()
+	}()
+	go func() {
+		mu.RLock()
+		defer mu.RUnlock()
+	}()
+}
+
 // Goroutine: rlock without runlock
 func BadRWGoroutineRLockWithoutRUnlock() {
 	var mu sync.RWMutex
@@ -365,6 +362,24 @@ func BadRWGoroutineLockWithoutUnlock() {
 	go func() {
 		mu.Lock() // want "rwmutex 'mu' is locked but not unlocked"
 	}()
+}
+
+// ---------- RWMutex Balance Issues ----------
+
+// Imbalanced: two rlocks, one runlock
+func BadRWImbalancedRLockRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	mu.RUnlock()
+}
+
+// Imbalanced: lock and rlock, only unlock
+func BadRWImbalancedMixed() {
+	var mu sync.RWMutex
+	mu.Lock()
+	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	mu.Unlock()
 }
 
 // Double unlocks (runlock twice)
@@ -383,7 +398,46 @@ func BadRWDoubleUnlock() {
 	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
 }
 
+// ========== MIXED SCENARIOS ==========
+
+// Mix of var and short declarations
+func MixedDeclarationTypes() {
+	var mu1 sync.Mutex
+	mu2 := sync.Mutex{}
+
+	mu1.Lock() // want "mutex 'mu1' is locked but not unlocked"
+	mu2.Lock() // want "mutex 'mu2' is locked but not unlocked"
+}
+
+// Different mutex types in same function
+func MixedMutexTypes() {
+	var mu sync.Mutex
+	var rwmu sync.RWMutex
+
+	// Good usage
+	mu.Lock()
+	defer mu.Unlock()
+
+	rwmu.RLock()
+	defer rwmu.RUnlock()
+}
+
+// Nested mutex usage
+func MixedNestedMutexUsage() {
+	var mu1, mu2 sync.Mutex
+
+	mu1.Lock()
+	defer mu1.Unlock()
+
+	func() {
+		mu2.Lock()
+		defer mu2.Unlock()
+	}()
+}
+
 // ========== EDGE CASES ==========
+
+// ---------- Declaration Edge Cases ----------
 
 // Short declaration with pointer
 func PointerShortDeclaration() {
@@ -404,6 +458,8 @@ func NestedStructShortDeclaration() {
 	mu := sync.Mutex{} // short declaration
 	mu.Lock()          // want "mutex 'mu' is locked but not unlocked"
 }
+
+// ---------- Control Flow Edge Cases ----------
 
 // switch statement with mutex
 func EdgeCaseSwitchStatement() {
@@ -459,19 +515,7 @@ func EdgeCaseNestedBlocks() {
 	}
 }
 
-// else-if with mutex
-func EdgeCaseElseIf() {
-	var mu sync.Mutex
-	cond1 := true
-	cond2 := false
-
-	if cond1 {
-		mu.Lock()
-		mu.Unlock()
-	} else if cond2 {
-		mu.Lock() // want "mutex 'mu' is locked but not unlocked in if"
-	}
-}
+// ========== COMMENT FILTERING TESTS ==========
 
 // Test that commented code is properly ignored by the linter.
 // The following commented code should NOT trigger any linter warnings.
