@@ -169,6 +169,34 @@ func GoodMultipleGoroutinesWithDeferDone() {
 	_ = errReturnConsumer
 }
 
+func GoodSwitchWithDefault() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		x := 1
+		switch x {
+		case 2:
+			// some work
+		default:
+			wg.Done() // This always executes
+		}
+	}()
+	wg.Wait()
+}
+
+func GoodUnconditionalDone() {
+	var wg sync.WaitGroup
+	condition := false
+	wg.Add(1)
+	go func() {
+		if condition {
+			// some work
+		}
+		wg.Done() // This is outside the if, so it's unconditional
+	}()
+	wg.Wait()
+}
+
 // Add in a goroutine that never calls Done (e.g., due to deadlock or channel never sent)
 func BadAddNeverDone() {
 	var wg sync.WaitGroup
@@ -219,6 +247,62 @@ func BadDeferWithConditionalReturn() {
 		defer wg.Done()
 	}()
 
+	wg.Wait()
+}
+
+// Add without Done in a goroutine with conditional Done
+func BadConditionalDone() {
+	var wg sync.WaitGroup
+	condition := false
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		if condition { // condition is false, so Done is never called
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+// Also test with a more complex conditional
+func BadConditionalDoneComplex() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		x := 1
+		if x > 5 { // This is always false
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+// Test with switch statement
+func BadConditionalDoneSwitch() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		x := 1
+		switch x {
+		case 2: // x is 1, so this case won't match
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+func BadSwitchNoDefault() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		x := 1
+		switch x {
+		case 2:
+			wg.Done()
+		case 3:
+			wg.Done()
+			// No default, and x=1 doesn't match any case
+		}
+	}()
 	wg.Wait()
 }
 

@@ -190,11 +190,26 @@ func (wga *Analyzer) checkBlockingGoroutines() {
 				return true
 			}
 
-			callsDone, blocked := wga.goroutineCallsDoneOrBlocks(goStmt, wgName)
+			// Skip if the goroutine is not related to this WaitGroup
+			if !wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
+				return true
+			}
 
-			if blocked && !callsDone {
-				if wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
-					wga.errorCollector.AddError(goStmt.Pos(), "waitgroup '"+wgName+"' has Add without corresponding Done (goroutine blocks indefinitely before calling Done)")
+			// NEW: Use the new analysis method
+			fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+			if !ok {
+				return true
+			}
+
+			doneInfo := wga.analyzeDoneCalls(fnLit.Body, wgName)
+
+			// Report error if no guaranteed Done
+			if !doneInfo.hasGuaranteedDone {
+				// Find the related Add call
+				relatedAdd := wga.findRelatedAddCall(goStmt, wgName)
+				if relatedAdd != token.NoPos {
+					wga.errorCollector.AddError(relatedAdd,
+						"waitgroup '"+wgName+"' has Add without corresponding Done")
 				}
 			}
 

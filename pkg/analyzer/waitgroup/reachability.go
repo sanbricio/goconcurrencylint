@@ -244,23 +244,33 @@ func (wga *Analyzer) containsDoneCall(stmt ast.Stmt, wgName string) bool {
 
 // findRelatedAddCall finds an Add call that might be related to this goroutine
 func (wga *Analyzer) findRelatedAddCall(goStmt *ast.GoStmt, wgName string) token.Pos {
-	var lastAddPos token.Pos
+	// First, try to find an Add call that appears just before this goroutine
+	var lastAddBeforeGo token.Pos
+	var allAdds []token.Pos
 
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
-		if n == goStmt {
-			return false
-		}
-
 		if call, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				if sel.Sel.Name == "Add" && common.GetVarName(sel.X) == wgName {
-					lastAddPos = call.Pos()
+					allAdds = append(allAdds, call.Pos())
+					if call.Pos() < goStmt.Pos() {
+						lastAddBeforeGo = call.Pos()
+					}
 				}
 			}
 		}
-
 		return true
 	})
 
-	return lastAddPos
+	// If we found an Add before this goroutine, return it
+	if lastAddBeforeGo != token.NoPos {
+		return lastAddBeforeGo
+	}
+
+	// Otherwise, return the first Add call we found (if any)
+	if len(allAdds) > 0 {
+		return allAdds[0]
+	}
+
+	return token.NoPos
 }
