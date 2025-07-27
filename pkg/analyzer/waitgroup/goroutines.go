@@ -1,7 +1,6 @@
 package waitgroup
 
 import (
-	"fmt"
 	"go/ast"
 	"go/token"
 
@@ -212,20 +211,12 @@ type doneCallInfo struct {
 func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneCallInfo {
 	info := doneCallInfo{}
 
-	// DEBUG
-	fmt.Printf("=== Analyzing block for WaitGroup '%s' ===\n", wgName)
-
-	for i, stmt := range block.List {
+	for _, stmt := range block.List {
 		if wga.commentFilter.ShouldSkipStatement(stmt) {
 			continue
 		}
 
-		// DEBUG
-		fmt.Printf("Statement %d: %T\n", i, stmt)
-
 		if info.hasGuaranteedDone {
-			// DEBUG
-			fmt.Printf("Already found guaranteed Done, returning\n")
 			return info
 		}
 
@@ -234,8 +225,6 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 			if wga.isSimpleDeferDone(s, wgName) || wga.isDeferPanicRecoveryPattern(s, wgName) {
 				info.hasAnyDone = true
 				info.hasGuaranteedDone = true
-				// DEBUG
-				fmt.Printf("Found defer Done - guaranteed\n")
 				return info
 			}
 
@@ -244,19 +233,12 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
 					info.hasAnyDone = true
 					info.hasGuaranteedDone = true
-					// DEBUG
-					// fmt.Printf("Found direct Done call - guaranteed\n")
 					return info
 				}
 			}
 
 		case *ast.SwitchStmt:
-			// DEBUG
-			fmt.Printf("Analyzing switch statement\n")
 			switchInfo := wga.analyzeSwitchStatement(s, wgName)
-			// DEBUG
-			fmt.Printf("Switch result: hasAnyDone=%v, hasGuaranteedDone=%v\n",
-				switchInfo.hasAnyDone, switchInfo.hasGuaranteedDone)
 			info.hasAnyDone = info.hasAnyDone || switchInfo.hasAnyDone
 			if switchInfo.hasGuaranteedDone {
 				info.hasGuaranteedDone = true
@@ -264,10 +246,6 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 			}
 		}
 	}
-
-	// DEBUG
-	fmt.Printf("=== Final result: hasAnyDone=%v, hasGuaranteedDone=%v ===\n",
-		info.hasAnyDone, info.hasGuaranteedDone)
 
 	return info
 }
@@ -278,41 +256,18 @@ func (wga *Analyzer) analyzeSwitchStatement(switchStmt *ast.SwitchStmt, wgName s
 	hasDefault := false
 	defaultInfo := doneCallInfo{}
 
-	fmt.Printf("  === SWITCH ANALYSIS START ===\n")
-	fmt.Printf("  Number of cases: %d\n", len(switchStmt.Body.List))
-
-	for i, stmt := range switchStmt.Body.List {
+	for _, stmt := range switchStmt.Body.List {
 		cc, ok := stmt.(*ast.CaseClause)
 		if !ok {
-			fmt.Printf("  Case %d: Not a CaseClause\n", i)
 			continue
 		}
 
 		// Check if this is the default case
 		isDefaultCase := len(cc.List) == 0
 
-		fmt.Printf("  Case %d: default=%v, expressions=%d, statements=%d\n",
-			i, isDefaultCase, len(cc.List), len(cc.Body))
-
-		// Debug what's in the case body
-		for j, bodyStmt := range cc.Body {
-			fmt.Printf("    Statement %d in case: %T", j, bodyStmt)
-			if exprStmt, ok := bodyStmt.(*ast.ExprStmt); ok {
-				if call, ok := exprStmt.X.(*ast.CallExpr); ok {
-					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-						fmt.Printf(" -> %s.%s()", common.GetVarName(sel.X), sel.Sel.Name)
-					}
-				}
-			}
-			fmt.Printf("\n")
-		}
-
 		// Create a block from the case body
 		caseBlock := &ast.BlockStmt{List: cc.Body}
 		caseInfo := wga.analyzeDoneCalls(caseBlock, wgName)
-
-		fmt.Printf("  Case %d result: hasAnyDone=%v, hasGuaranteedDone=%v\n",
-			i, caseInfo.hasAnyDone, caseInfo.hasGuaranteedDone)
 
 		// Track if any case has Done
 		info.hasAnyDone = info.hasAnyDone || caseInfo.hasAnyDone
@@ -327,9 +282,6 @@ func (wga *Analyzer) analyzeSwitchStatement(switchStmt *ast.SwitchStmt, wgName s
 	if hasDefault && defaultInfo.hasGuaranteedDone {
 		info.hasGuaranteedDone = true
 	}
-
-	fmt.Printf("  === SWITCH ANALYSIS END: hasDefault=%v, defaultHasGuaranteedDone=%v, final.hasGuaranteedDone=%v ===\n",
-		hasDefault, defaultInfo.hasGuaranteedDone, info.hasGuaranteedDone)
 
 	return info
 }
