@@ -3,7 +3,6 @@ package waitgroup
 import (
 	"go/ast"
 	"go/token"
-	"slices"
 	"sort"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -12,7 +11,6 @@ import (
 // validateUsage performs validation checks on collected statistics
 func (wga *Analyzer) validateUsage(stats map[string]*Stats) {
 	wga.checkAddAfterWait(stats)
-	wga.checkBlockingGoroutines()
 	wga.checkLoopAddDoneBalance()
 	wga.checkUnreachableDone()
 	wga.checkWaitGroupBalance(stats)
@@ -20,36 +18,61 @@ func (wga *Analyzer) validateUsage(stats map[string]*Stats) {
 
 // validateBalance performs the actual balance validation for a WaitGroup
 func (wga *Analyzer) validateBalance(wgName string, stats *Stats) {
-	effectiveDoneCount := wga.getEffectiveDoneCount(wgName, stats)
-	totalExpectedDone := effectiveDoneCount
-
-	if stats.hasDeferDone && !wga.isDeferDoneInGoroutine(wgName) {
-		totalExpectedDone++
-	}
-
-	if stats.totalAdd > totalExpectedDone {
-		wga.reportUnmatchedAdds(wgName, stats, totalExpectedDone)
-	}
-
-	if totalExpectedDone > stats.totalAdd {
-		wga.reportExcessDones(wgName, stats, totalExpectedDone)
-	}
-}
-
-// getEffectiveDoneCount counts Done calls that will actually be executed
-func (wga *Analyzer) getEffectiveDoneCount(wgName string, stats *Stats) int {
-	effectiveCount := 0
-
+	// Count Done calls from main flow (not in goroutines)
+	mainFlowDoneCount := 0
 	for _, donePos := range stats.doneCalls {
-		if !wga.isInBlockedGoroutine(donePos, wgName) {
-			effectiveCount++
+		if !wga.isInGoroutine(donePos) {
+			mainFlowDoneCount++
 		}
 	}
 
-	deferDoneCount := wga.countDeferDoneInGoroutines(wgName)
-	effectiveCount += deferDoneCount
+	totalDone := mainFlowDoneCount
 
-	return effectiveCount
+	// Add defer Done count if present and not in goroutine
+	if stats.hasDeferDone && !wga.isDeferDoneInGoroutine(wgName) {
+		totalDone++
+	}
+
+	// Add guaranteed Done calls from goroutines (but don't double count)
+	guaranteedFromGoroutines := wga.countGuaranteedDoneInGoroutines(wgName)
+	totalDone += guaranteedFromGoroutines
+
+	// Check for balance and report errors
+	if stats.totalAdd > totalDone {
+		wga.reportUnmatchedAdds(wgName, stats, totalDone)
+	}
+
+	if totalDone > stats.totalAdd {
+		wga.reportExcessDones(wgName, stats, totalDone, mainFlowDoneCount)
+	}
+}
+
+// countGuaranteedDoneInGoroutines counts Done calls that are guaranteed to execute in goroutines
+func (wga *Analyzer) countGuaranteedDoneInGoroutines(wgName string) int {
+	count := 0
+
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if goStmt, ok := n.(*ast.GoStmt); ok {
+			if wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
+				if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
+					doneInfo := wga.analyzeDoneCalls(fnLit.Body, wgName)
+					if doneInfo.hasGuaranteedDone {
+						count++
+					} else if !doneInfo.hasAnyDone {
+						// Report blocking goroutine error here
+						relatedAdd := wga.findRelatedAddCall(goStmt, wgName)
+						if relatedAdd != token.NoPos {
+							wga.errorCollector.AddError(relatedAdd,
+								"waitgroup '"+wgName+"' has Add without corresponding Done")
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	return count
 }
 
 // checkWaitGroupBalance validates that Add and Done calls are properly balanced
@@ -81,22 +104,30 @@ func (wga *Analyzer) reportUnmatchedAdds(wgName string, stats *Stats, totalExpec
 }
 
 // reportExcessDones reports Done calls that don't have corresponding Add calls
-func (wga *Analyzer) reportExcessDones(wgName string, stats *Stats, totalExpectedDone int) {
-	slices.Sort(stats.doneCalls)
-
-	excessDone := totalExpectedDone - stats.totalAdd
-	if excessDone <= 0 || len(stats.doneCalls) == 0 {
+func (wga *Analyzer) reportExcessDones(wgName string, stats *Stats, totalExpectedDone int, mainFlowDoneCount int) {
+	if totalExpectedDone <= stats.totalAdd {
 		return
 	}
 
-	startIndex := len(stats.doneCalls) - excessDone
-	if stats.hasDeferDone && excessDone > 1 {
-		startIndex = len(stats.doneCalls) - (excessDone - 1)
-	}
+	// Only report excess for main flow Done calls (not goroutine Done calls)
+	if mainFlowDoneCount > stats.totalAdd {
+		// Sort done calls to report the last ones (most likely to be excess)
+		var mainFlowDoneCalls []token.Pos
+		for _, donePos := range stats.doneCalls {
+			if !wga.isInGoroutine(donePos) {
+				mainFlowDoneCalls = append(mainFlowDoneCalls, donePos)
+			}
+		}
 
-	for i := startIndex; i < len(stats.doneCalls); i++ {
-		if i >= 0 {
-			wga.errorCollector.AddError(stats.doneCalls[i], "waitgroup '"+wgName+"' has Done without corresponding Add")
+		sort.Slice(mainFlowDoneCalls, func(i, j int) bool {
+			return mainFlowDoneCalls[i] < mainFlowDoneCalls[j]
+		})
+
+		excessCount := mainFlowDoneCount - stats.totalAdd
+		startIndex := len(mainFlowDoneCalls) - excessCount
+
+		for i := startIndex; i < len(mainFlowDoneCalls) && i >= 0; i++ {
+			wga.errorCollector.AddError(mainFlowDoneCalls[i], "waitgroup '"+wgName+"' has Done without corresponding Add")
 		}
 	}
 }
@@ -144,8 +175,6 @@ func (wga *Analyzer) checkAddInGoroutine(goStmt *ast.GoStmt, wgName string) {
 }
 
 // checkAddAfterWaitInMainFlow detects Add calls in the main execution flow that occur after Wait
-// without a proper Add->Done cycle before the Wait. This catches cases where Wait() is called
-// first (without prior operations) and then Add() is called, which is incorrect usage.
 func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
 	for _, wait := range st.waitCalls {
 		// Check if this Wait has any Add or Done operations before it in main flow
@@ -178,43 +207,6 @@ func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
 				}
 			}
 		}
-	}
-}
-
-// checkBlockingGoroutines checks for Add without Done in goroutines that block indefinitely
-func (wga *Analyzer) checkBlockingGoroutines() {
-	for wgName := range wga.waitGroupNames {
-		ast.Inspect(wga.function.Body, func(n ast.Node) bool {
-			goStmt, ok := n.(*ast.GoStmt)
-			if !ok {
-				return true
-			}
-
-			// Skip if the goroutine is not related to this WaitGroup
-			if !wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
-				return true
-			}
-
-			// NEW: Use the new analysis method
-			fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
-			if !ok {
-				return true
-			}
-
-			doneInfo := wga.analyzeDoneCalls(fnLit.Body, wgName)
-
-			// Report error if no guaranteed Done
-			if !doneInfo.hasGuaranteedDone {
-				// Find the related Add call
-				relatedAdd := wga.findRelatedAddCall(goStmt, wgName)
-				if relatedAdd != token.NoPos {
-					wga.errorCollector.AddError(relatedAdd,
-						"waitgroup '"+wgName+"' has Add without corresponding Done")
-				}
-			}
-
-			return true
-		})
 	}
 }
 
