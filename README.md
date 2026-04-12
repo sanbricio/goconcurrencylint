@@ -1,6 +1,6 @@
 # goconcurrencylint
 
-[![Go Version](https://img.shields.io/badge/Go-1.23+-blue)](https://golang.org/doc/go1.23)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-blue)](https://golang.org/doc/go1.25)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 
