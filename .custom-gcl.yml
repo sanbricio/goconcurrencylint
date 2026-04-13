@@ -1,5 +1,0 @@
-version: v2.11.4
-plugins:
-  - module: "github.com/sanbricio/goconcurrencylint"
-    import: "github.com/sanbricio/goconcurrencylint/plugin"
-    path: .

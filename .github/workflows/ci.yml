@@ -50,7 +50,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4
-          args: --config=.golangci.plugin.yml ./...
+          args: --config=.golangci.yml ./...
 
   build:
     name: Build
@@ -66,6 +66,3 @@ jobs:
 
       - name: Build binary
         run: go build -v -o goconcurrencylint ./cmd
-
-      - name: Build plugin
-        run: go build -v ./plugin

@@ -39,21 +39,15 @@ waitgroup.go:23:3: waitgroup 'wg' has Add without corresponding Done
 waitgroup.go:41:2: waitgroup 'wg' Go called after Wait
 ```
 
-## golangci-lint Plugin
+## golangci-lint Upstreaming
 
-This repository includes the files needed to exercise the module-plugin flow locally and in CI:
+The repository is structured so the analyzer can be consumed directly from `go/analysis`
+and wrapped inside `golangci-lint`.
 
-- [`.custom-gcl.yml`](/Users/sanbricio/projects/goconcurrencylint/.custom-gcl.yml)
-- [`.golangci.plugin.yml`](/Users/sanbricio/projects/goconcurrencylint/.golangci.plugin.yml)
+For upstream contribution, the key integration points live in the analyzer package:
 
-Build and run the custom binary locally with:
-
-```bash
-golangci-lint custom
-./custom-gcl run --config=.golangci.plugin.yml ./...
-```
-
-The plugin is exposed under the linter name `goconcurrencylint`.
+- `github.com/sanbricio/goconcurrencylint/pkg/analyzer`
+- linter name: `goconcurrencylint`
 
 ## Example Cases
 
@@ -98,7 +92,7 @@ func BadWaitGroupGoAfterWait() {
 
 - functional analyzer tests via `analysistest`
 - regression coverage for mutex, waitgroup, and package-level primitives
-- CI coverage for tests, custom `golangci-lint` plugin build, and plugin execution
+- CI coverage for tests, linting, and binary build
 
 ## Contributing
 
