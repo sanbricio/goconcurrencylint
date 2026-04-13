@@ -176,9 +176,9 @@ func GoodSwitchWithDefault() {
 		x := 1
 		switch x {
 		case 2:
-			// some work
+			wg.Done()
 		default:
-			wg.Done() // This always executes
+			wg.Done()
 		}
 	}()
 	wg.Wait()
@@ -450,6 +450,161 @@ func EdgeCaseComplexButValid() {
 func GoodWaitNoAddNoDone() {
 	var wg sync.WaitGroup
 	wg.Wait() // legal, returns immediately
+}
+
+// ---------- Switch/Select Edge Cases ----------
+
+// Bad: switch with default that has Done, but another case does NOT
+func BadSwitchDefaultOnlyDone() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		x := 1
+		switch x {
+		case 2:
+			// no Done here - if x==2, Done is never called
+		default:
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+// Good: select with Done in all cases including default
+func GoodSelectAllCasesDone() {
+	var wg sync.WaitGroup
+	ch := make(chan int, 1)
+	ch <- 1
+	wg.Add(1)
+	go func() {
+		select {
+		case <-ch:
+			wg.Done()
+		default:
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+// Bad: select with Done missing in one comm clause
+func BadSelectMissingDoneInCase() {
+	var wg sync.WaitGroup
+	ch1 := make(chan int)
+	ch2 := make(chan int)
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		select {
+		case <-ch1:
+			wg.Done()
+		case <-ch2:
+			// forgot Done in this case
+		}
+	}()
+	wg.Wait()
+}
+
+// Good: type switch with Done in all cases + default
+func GoodTypeSwitchAllCasesDone() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		var x interface{} = 1
+		switch x.(type) {
+		case int:
+			wg.Done()
+		case string:
+			wg.Done()
+		default:
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+// Bad: type switch with Done missing in one case
+func BadTypeSwitchMissingDone() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		var x interface{} = "hello"
+		switch x.(type) {
+		case int:
+			wg.Done()
+		case string:
+			// forgot Done for string case
+		default:
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+// ---------- Add(n) Balance Edge Cases ----------
+
+// Bad: Add(3) but only 2 goroutines with Done
+func BadAddMoreThanGoroutines() {
+	var wg sync.WaitGroup
+	wg.Add(3) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() { defer wg.Done() }()
+	go func() { defer wg.Done() }()
+	wg.Wait()
+}
+
+// Good: Add(3) matches exactly 3 goroutines
+func GoodAddMatchesGoroutines() {
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done() }()
+	go func() { defer wg.Done() }()
+	go func() { defer wg.Done() }()
+	wg.Wait()
+}
+
+// ---------- If/Else Done Patterns ----------
+
+// Good: Both branches of if/else call Done in goroutine
+func GoodIfElseBothDone() {
+	var wg sync.WaitGroup
+	condition := true
+	wg.Add(1)
+	go func() {
+		if condition {
+			wg.Done()
+		} else {
+			wg.Done()
+		}
+	}()
+	wg.Wait()
+}
+
+// ---------- Multiple Goroutine Done Patterns ----------
+
+// Good: Multiple goroutines each with defer Done for same WaitGroup
+func GoodMultipleGoroutinesSameWg() {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+	}()
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
+// ---------- Defer Wrapped Done Patterns ----------
+
+// Good: Done called inside defer func() { ... }()
+func GoodDeferWrappedDone() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer func() {
+			wg.Done()
+		}()
+	}()
+	wg.Wait()
 }
 
 // ========== COMMENT FILTERING TESTS ==========

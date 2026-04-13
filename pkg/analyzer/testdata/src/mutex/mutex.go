@@ -515,6 +515,69 @@ func EdgeCaseNestedBlocks() {
 	}
 }
 
+// ---------- For Loop Edge Cases ----------
+
+// Good: Lock/Unlock per iteration in for loop
+func GoodForLoopLockUnlock() {
+	var mu sync.Mutex
+	for i := 0; i < 10; i++ {
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+// Good: Lock with defer Unlock in for loop (defers stack per iteration)
+func GoodForLoopDeferUnlock() {
+	var mu sync.Mutex
+	for i := 0; i < 10; i++ {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+}
+
+// ---------- Switch All Cases Edge Cases ----------
+
+// Good: switch where all cases + default properly lock/unlock
+func GoodSwitchAllCases() {
+	var mu sync.Mutex
+	x := 1
+	switch x {
+	case 1:
+		mu.Lock()
+		mu.Unlock()
+	case 2:
+		mu.Lock()
+		defer mu.Unlock()
+	default:
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+// Bad: switch where default has unlock but another case is missing it
+func BadSwitchDefaultOnlyUnlock() {
+	var mu sync.Mutex
+	x := 1
+	switch x {
+	case 1:
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in case"
+	default:
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+// ---------- RWMutex For Loop Edge Cases ----------
+
+// Good: RLock/RUnlock per iteration
+func GoodRWForLoopRLock() {
+	var rwmu sync.RWMutex
+	for i := 0; i < 10; i++ {
+		rwmu.RLock()
+		rwmu.RUnlock()
+	}
+}
+
 // ========== COMMENT FILTERING TESTS ==========
 
 // Test that commented code is properly ignored by the linter.
