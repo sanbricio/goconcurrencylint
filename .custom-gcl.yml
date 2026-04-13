@@ -1,0 +1,5 @@
+version: "2"
+plugins:
+  - module: "github.com/sanbricio/goconcurrencylint"
+    import: "github.com/sanbricio/goconcurrencylint/plugin"
+    version: "v1.0.0"
