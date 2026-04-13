@@ -13,12 +13,12 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-// Analyzer is the main entry point for the goconcurrentlint linter.
+// Analyzer is the main entry point for the goconcurrencylint linter.
 // It detects common mistakes in the use of sync.Mutex and sync.WaitGroup:
 // - Locks without unlocks
 // - Add without Done
 var Analyzer = &analysis.Analyzer{
-	Name:     "goconcurrentlint",
+	Name:     "goconcurrencylint",
 	Doc:      "Detects common mistakes in the use of sync.Mutex and sync.WaitGroup: locks without unlock and Add without Done.",
 	Run:      run,
 	Requires: []*analysis.Analyzer{},
@@ -33,9 +33,10 @@ type syncPrimitive struct {
 
 func run(pass *analysis.Pass) (interface{}, error) {
 	errorCollector := &report.ErrorCollector{}
+	pkgPrimitives := collectPackageLevelPrimitives(pass)
 
 	for _, file := range pass.Files {
-		analyzeFunctions(file, pass, errorCollector)
+		analyzeFunctions(file, pass, errorCollector, pkgPrimitives)
 	}
 
 	errorCollector.ReportAll(pass)
@@ -43,9 +44,8 @@ func run(pass *analysis.Pass) (interface{}, error) {
 }
 
 // analyzeFunctions processes all function declarations in a file
-func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *report.ErrorCollector, pkgPrimitives *syncPrimitive) {
 	commentFilter := commnetfilter.NewCommentFilter(pass.Fset, file)
-	pkgPrimitives := collectPackageLevelPrimitives(file, pass)
 
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -66,32 +66,28 @@ func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *repor
 	}
 }
 
-// collectPackageLevelPrimitives scans file-level var declarations for sync primitives
-func collectPackageLevelPrimitives(file *ast.File, pass *analysis.Pass) *syncPrimitive {
+// collectPackageLevelPrimitives scans package-level declarations for sync primitives,
+// including declarations that live in other files from the same package.
+func collectPackageLevelPrimitives(pass *analysis.Pass) *syncPrimitive {
 	primitives := &syncPrimitive{
 		mutexes:    make(map[string]bool),
 		rwMutexes:  make(map[string]bool),
 		waitGroups: make(map[string]bool),
 	}
 
-	for _, decl := range file.Decls {
-		genDecl, ok := decl.(*ast.GenDecl)
-		if !ok || genDecl.Tok != token.VAR {
+	scope := pass.Pkg.Scope()
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		varObj, ok := obj.(*types.Var)
+		if !ok || varObj.IsField() {
 			continue
 		}
-		for _, spec := range genDecl.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-			typ := getVariableType(vs, pass)
-			if typ == nil {
-				continue
-			}
-			for _, name := range vs.Names {
-				classifyAndAddPrimitive(name.Name, typ, primitives)
-			}
+
+		if varObj.Pkg() != pass.Pkg {
+			continue
 		}
+
+		classifyAndAddPrimitive(name, varObj.Type(), primitives)
 	}
 
 	return primitives

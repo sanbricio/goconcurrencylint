@@ -164,8 +164,15 @@ func (wga *Analyzer) checkAddInGoroutine(goStmt *ast.GoStmt, wgName string) {
 				}
 
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					if sel.Sel.Name == "Add" && common.GetVarName(sel.X) == wgName {
+					if common.GetVarName(sel.X) != wgName {
+						return true
+					}
+
+					switch sel.Sel.Name {
+					case "Add":
 						wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Add called after Wait")
+					case "Go":
+						wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Go called after Wait")
 					}
 				}
 			}
@@ -198,12 +205,28 @@ func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
 			}
 		}
 
+		// WaitGroup.Go is also a task-starting operation and must be treated like Add
+		// for the "empty Wait followed by new work" pattern.
+		if !hasOperationsBefore {
+			for _, goPos := range st.goCalls {
+				if goPos < wait && !wga.isInGoroutine(goPos) {
+					hasOperationsBefore = true
+					break
+				}
+			}
+		}
+
 		// If this is an "empty" Wait (no operations before it), flag subsequent Add calls
 		if !hasOperationsBefore {
 			for _, add := range st.addCalls {
 				// Only report Add calls in main flow after this empty Wait
 				if add.pos > wait && !wga.isInGoroutine(add.pos) {
 					wga.errorCollector.AddError(add.pos, "waitgroup '"+wgName+"' Add called after Wait")
+				}
+			}
+			for _, goPos := range st.goCalls {
+				if goPos > wait && !wga.isInGoroutine(goPos) {
+					wga.errorCollector.AddError(goPos, "waitgroup '"+wgName+"' Go called after Wait")
 				}
 			}
 		}

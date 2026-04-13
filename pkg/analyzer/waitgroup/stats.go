@@ -147,6 +147,8 @@ func (wga *Analyzer) handleExpressionStatement(stmt *ast.ExprStmt, stats map[str
 		wga.handleAddCall(call, wgName, stats)
 	case "Done":
 		wga.handleDoneCall(call, wgName, stats)
+	case "Go":
+		wga.handleGoCall(call, wgName, stats)
 	case "Wait":
 		wga.handleWaitCall(call, wgName, stats)
 	}

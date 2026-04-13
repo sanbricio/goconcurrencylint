@@ -8,9 +8,9 @@
 //
 //     version: v2.11.4
 //     plugins:
-//       - module: "github.com/sanbricio/goconcurrencylint"
-//         import: "github.com/sanbricio/goconcurrencylint/plugin"
-//         path: .
+//     - module: "github.com/sanbricio/goconcurrencylint"
+//     import: "github.com/sanbricio/goconcurrencylint/plugin"
+//     path: .
 //
 //  2. Build a custom golangci-lint binary:
 //
@@ -19,20 +19,37 @@
 //  3. Enable the linter in your .golangci.yml:
 //
 //     linters:
-//       enable:
-//         - goconcurrentlint
+//     enable:
+//     - goconcurrencylint
 //
 //  4. Run the custom binary:
 //
-//     ./custom-gcl run ./...
+//     ./custom-gcl run --config=.golangci.plugin.yml ./...
 package plugin
 
 import (
+	"github.com/golangci/plugin-module-register/register"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer"
 	"golang.org/x/tools/go/analysis"
 )
 
+type linterPlugin struct{}
+
+func init() {
+	register.Plugin(analyzer.Analyzer.Name, New)
+}
+
 // New is the entry point required by golangci-lint's module plugin system.
-func New(_ any) ([]*analysis.Analyzer, error) {
+func New(_ any) (register.LinterPlugin, error) {
+	return &linterPlugin{}, nil
+}
+
+// BuildAnalyzers returns the analyzers provided by this plugin.
+func (p *linterPlugin) BuildAnalyzers() ([]*analysis.Analyzer, error) {
 	return []*analysis.Analyzer{analyzer.Analyzer}, nil
+}
+
+// GetLoadMode declares the data needed by the analyzer.
+func (p *linterPlugin) GetLoadMode() string {
+	return register.LoadModeTypesInfo
 }

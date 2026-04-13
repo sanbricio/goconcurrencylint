@@ -120,6 +120,24 @@ func EdgeCaseMultipleWaits() {
 	wg.Wait()
 }
 
+// WaitGroup.Go handles Add/Done internally and should be accepted.
+func GoodWaitGroupGo() {
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		doSomething()
+	})
+	wg.Wait()
+}
+
+// WaitGroup.Go after an empty Wait should be rejected, same as Add after Wait.
+func BadWaitGroupGoAfterWait() {
+	var wg sync.WaitGroup
+	wg.Wait()
+	wg.Go(func() { // want "waitgroup 'wg' Go called after Wait"
+		doSomething()
+	})
+}
+
 // ---------- Loop Patterns ----------
 
 // Add and Done inside a loop (typical worker pattern)

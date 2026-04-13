@@ -27,6 +27,7 @@ type addCall struct {
 type Stats struct {
 	addCalls     []addCall
 	doneCalls    []token.Pos
+	goCalls      []token.Pos
 	waitCalls    []token.Pos
 	doneCount    int
 	hasDeferDone bool
@@ -64,10 +65,20 @@ func (wga *Analyzer) initializeStats() map[string]*Stats {
 		stats[wgName] = &Stats{
 			addCalls:  []addCall{},
 			doneCalls: []token.Pos{},
+			goCalls:   []token.Pos{},
 			waitCalls: []token.Pos{},
 		}
 	}
 	return stats
+}
+
+// handleGoCall processes WaitGroup.Go() calls.
+func (wga *Analyzer) handleGoCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
+	if wga.commentFilter.ShouldSkipCall(call) {
+		return
+	}
+
+	stats[wgName].goCalls = append(stats[wgName].goCalls, call.Pos())
 }
 
 // handleAddCall processes Add() calls

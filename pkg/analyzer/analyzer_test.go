@@ -22,6 +22,11 @@ func TestWaitGroupAnalyzer(t *testing.T) {
 	analysistest.Run(t, testdata, Analyzer, "waitgroup")
 }
 
+func TestPackageLevelAnalyzer(t *testing.T) {
+	testdata := analysistest.TestData()
+	analysistest.Run(t, testdata, Analyzer, "packagelevel")
+}
+
 func TestGetVariableTypeNilCases(t *testing.T) {
 	vs := &ast.ValueSpec{
 		Names:  []*ast.Ident{{Name: "test"}},

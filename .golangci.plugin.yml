@@ -1,0 +1,18 @@
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - goconcurrencylint
+  settings:
+    govet:
+      enable:
+        - shadow
+    custom:
+      goconcurrencylint:
+        type: module
+        description: Detects incorrect sync.Mutex, sync.RWMutex, and sync.WaitGroup usage.
