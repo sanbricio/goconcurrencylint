@@ -3,13 +3,14 @@
 //
 // Usage with golangci-lint:
 //
-//  1. Create a .custom-gcl.yml in your project root:
+//  1. Create a .custom-gcl.yml in your project root.
+//     While the plugin is still local to this repository, use a local path:
 //
-//     version: "2"
+//     version: v2.11.4
 //     plugins:
 //       - module: "github.com/sanbricio/goconcurrencylint"
 //         import: "github.com/sanbricio/goconcurrencylint/plugin"
-//         version: "v1.0.0"
+//         path: .
 //
 //  2. Build a custom golangci-lint binary:
 //
