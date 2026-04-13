@@ -39,6 +39,6 @@ func (ec *ErrorCollector) ReportAll(pass *analysis.Pass) {
 		return posI.Column < posJ.Column
 	})
 	for _, err := range ec.errors {
-		pass.Reportf(err.Pos, err.Message)
+		pass.Reportf(err.Pos, "%s", err.Message)
 	}
 }

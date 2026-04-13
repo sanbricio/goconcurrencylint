@@ -7,170 +7,6 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
 
-// countReachableDeferDoneInBlock counts defer Done calls that are actually reachable
-func (wga *Analyzer) countReachableDeferDoneInBlock(block *ast.BlockStmt, wgName string) int {
-	count := 0
-
-mainLoop:
-	for _, stmt := range block.List {
-		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
-			if wga.commentFilter.ShouldSkipCall(deferStmt.Call) {
-				continue
-			}
-
-			if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-				if ident, ok := call.X.(*ast.Ident); ok && call.Sel.Name == "Done" {
-					if ident.Name == wgName {
-						count++
-					}
-				}
-			}
-			continue
-		}
-
-		if wga.isTerminatingStatement(stmt) {
-			break mainLoop
-		}
-
-		switch s := stmt.(type) {
-		case *ast.IfStmt:
-			if wga.isAlwaysTrueCondition(s.Cond) {
-				thenCount := wga.countReachableDeferDoneInBlock(s.Body, wgName)
-				count += thenCount
-
-				if wga.blockTerminates(s.Body) {
-					break mainLoop
-				}
-			} else if s.Else != nil {
-				thenCount := wga.countReachableDeferDoneInBlock(s.Body, wgName)
-
-				var elseCount int
-				if elseBlock, ok := s.Else.(*ast.BlockStmt); ok {
-					elseCount = wga.countReachableDeferDoneInBlock(elseBlock, wgName)
-				} else if elseIf, ok := s.Else.(*ast.IfStmt); ok {
-					elseBlock := &ast.BlockStmt{List: []ast.Stmt{elseIf}}
-					elseCount = wga.countReachableDeferDoneInBlock(elseBlock, wgName)
-				}
-
-				if thenCount < elseCount {
-					count += thenCount
-				} else {
-					count += elseCount
-				}
-
-				if wga.allBranchesTerminate(s) {
-					break mainLoop
-				}
-			}
-
-		case *ast.BlockStmt:
-			count += wga.countReachableDeferDoneInBlock(s, wgName)
-		case *ast.ForStmt:
-			if s.Body != nil {
-				count += wga.countReachableDeferDoneInBlock(s.Body, wgName)
-			}
-		case *ast.RangeStmt:
-			if s.Body != nil {
-				count += wga.countReachableDeferDoneInBlock(s.Body, wgName)
-			}
-		case *ast.SwitchStmt:
-			minCount := -1
-			for _, caseStmt := range s.Body.List {
-				if cc, ok := caseStmt.(*ast.CaseClause); ok {
-					caseBlock := &ast.BlockStmt{List: cc.Body}
-					caseCount := wga.countReachableDeferDoneInBlock(caseBlock, wgName)
-					if minCount == -1 || caseCount < minCount {
-						minCount = caseCount
-					}
-				}
-			}
-			if minCount > 0 {
-				count += minCount
-			}
-		case *ast.TypeSwitchStmt:
-			minCount := -1
-			for _, caseStmt := range s.Body.List {
-				if cc, ok := caseStmt.(*ast.CaseClause); ok {
-					caseBlock := &ast.BlockStmt{List: cc.Body}
-					caseCount := wga.countReachableDeferDoneInBlock(caseBlock, wgName)
-					if minCount == -1 || caseCount < minCount {
-						minCount = caseCount
-					}
-				}
-			}
-			if minCount > 0 {
-				count += minCount
-			}
-		case *ast.SelectStmt:
-			minCount := -1
-			for _, commClause := range s.Body.List {
-				if cc, ok := commClause.(*ast.CommClause); ok {
-					commBlock := &ast.BlockStmt{List: cc.Body}
-					commCount := wga.countReachableDeferDoneInBlock(commBlock, wgName)
-					if minCount == -1 || commCount < minCount {
-						minCount = commCount
-					}
-				}
-			}
-			if minCount > 0 {
-				count += minCount
-			}
-		}
-	}
-
-	return count
-}
-
-// isAlwaysTrueCondition checks if a condition is always true (like "true")
-func (wga *Analyzer) isAlwaysTrueCondition(cond ast.Expr) bool {
-	if ident, ok := cond.(*ast.Ident); ok {
-		return ident.Name == "true"
-	}
-	return false
-}
-
-// allBranchesTerminate checks if all branches of an if statement terminate execution
-func (wga *Analyzer) allBranchesTerminate(ifStmt *ast.IfStmt) bool {
-	thenTerminates := wga.blockTerminates(ifStmt.Body)
-
-	if ifStmt.Else == nil {
-		return false
-	}
-
-	var elseTerminates bool
-	switch e := ifStmt.Else.(type) {
-	case *ast.BlockStmt:
-		elseTerminates = wga.blockTerminates(e)
-	case *ast.IfStmt:
-		elseTerminates = wga.allBranchesTerminate(e)
-	default:
-		elseTerminates = false
-	}
-
-	return thenTerminates && elseTerminates
-}
-
-// blockTerminates checks if a block definitely terminates execution
-func (wga *Analyzer) blockTerminates(block *ast.BlockStmt) bool {
-	for _, stmt := range block.List {
-		if wga.isTerminatingStatement(stmt) {
-			return true
-		}
-
-		switch s := stmt.(type) {
-		case *ast.IfStmt:
-			if wga.allBranchesTerminate(s) {
-				return true
-			}
-		case *ast.BlockStmt:
-			if wga.blockTerminates(s) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // isTerminatingStatement checks if a statement terminates execution flow
 func (wga *Analyzer) isTerminatingStatement(stmt ast.Stmt) bool {
 	switch s := stmt.(type) {
@@ -242,25 +78,111 @@ func (wga *Analyzer) containsDoneCall(stmt ast.Stmt, wgName string) bool {
 	return found
 }
 
-// findRelatedAddCall finds an Add call that might be related to this goroutine
-func (wga *Analyzer) findRelatedAddCall(goStmt *ast.GoStmt, wgName string) token.Pos {
-	var lastAddPos token.Pos
-
-	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
-		if n == goStmt {
-			return false
+// blockAlwaysTerminates checks if a block always terminates execution (return, panic, etc.)
+func (wga *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
+	for _, stmt := range block.List {
+		if wga.isTerminatingStatement(stmt) {
+			return true
 		}
-
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Add" && common.GetVarName(sel.X) == wgName {
-					lastAddPos = call.Pos()
+		if ifStmt, ok := stmt.(*ast.IfStmt); ok {
+			if ifStmt.Else != nil {
+				var elseTerminates bool
+				if elseBlock, ok := ifStmt.Else.(*ast.BlockStmt); ok {
+					elseTerminates = wga.blockAlwaysTerminates(elseBlock)
+				} else if elseIf, ok := ifStmt.Else.(*ast.IfStmt); ok {
+					elseBlock := &ast.BlockStmt{List: []ast.Stmt{elseIf}}
+					elseTerminates = wga.blockAlwaysTerminates(elseBlock)
+				}
+				if wga.blockAlwaysTerminates(ifStmt.Body) && elseTerminates {
+					return true
 				}
 			}
 		}
+	}
+	return false
+}
 
+// hasChannelSends checks if there are any send operations or close calls for the given channel in the function
+func (wga *Analyzer) hasChannelSends(chanName string) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if sendStmt, ok := n.(*ast.SendStmt); ok {
+			if common.GetVarName(sendStmt.Chan) == chanName {
+				found = true
+				return false
+			}
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "close" {
+				if len(call.Args) == 1 && common.GetVarName(call.Args[0]) == chanName {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// isLocallyCreatedChannel checks if a channel was created with make() in the current function
+func (wga *Analyzer) isLocallyCreatedChannel(chanName string) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if assign, ok := n.(*ast.AssignStmt); ok {
+			for i, lhs := range assign.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && ident.Name == chanName {
+					if i < len(assign.Rhs) {
+						if call, ok := assign.Rhs[i].(*ast.CallExpr); ok {
+							if fnIdent, ok := call.Fun.(*ast.Ident); ok && fnIdent.Name == "make" {
+								found = true
+								return false
+							}
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// findRelatedAddCall finds an Add call that might be related to this goroutine
+func (wga *Analyzer) findRelatedAddCall(goStmt *ast.GoStmt, wgName string) token.Pos {
+	// First, try to find an Add call that appears just before this goroutine
+	var lastAddBeforeGo token.Pos
+	var allAdds []token.Pos
+
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel.Name == "Add" && common.GetVarName(sel.X) == wgName {
+					allAdds = append(allAdds, call.Pos())
+					if call.Pos() < goStmt.Pos() {
+						lastAddBeforeGo = call.Pos()
+					}
+				}
+			}
+		}
 		return true
 	})
 
-	return lastAddPos
+	// If we found an Add before this goroutine, return it
+	if lastAddBeforeGo != token.NoPos {
+		return lastAddBeforeGo
+	}
+
+	// Otherwise, return the first Add call we found (if any)
+	if len(allAdds) > 0 {
+		return allAdds[0]
+	}
+
+	return token.NoPos
 }
