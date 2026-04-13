@@ -1,13 +1,13 @@
+version: "2"
+
 linters:
   enable:
     - govet
     - staticcheck
     - errcheck
-    - gosimple
     - ineffassign
     - unused
-
-linters-settings:
-  govet:
-    enable:
-      - shadow
+  settings:
+    govet:
+      enable:
+        - shadow
