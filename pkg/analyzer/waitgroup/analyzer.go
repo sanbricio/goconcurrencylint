@@ -106,12 +106,12 @@ func (wga *Analyzer) handleWaitCall(call *ast.CallExpr, wgName string, stats map
 // isWaitGroupArgument checks if an argument represents a WaitGroup being passed
 func (wga *Analyzer) isWaitGroupArgument(arg ast.Expr, wgName string) bool {
 	if unary, ok := arg.(*ast.UnaryExpr); ok && unary.Op == token.AND {
-		if ident, ok := unary.X.(*ast.Ident); ok && ident.Name == wgName {
+		if common.GetVarName(unary.X) == wgName {
 			return true
 		}
 	}
 
-	if ident, ok := arg.(*ast.Ident); ok && ident.Name == wgName {
+	if common.GetVarName(arg) == wgName {
 		return true
 	}
 

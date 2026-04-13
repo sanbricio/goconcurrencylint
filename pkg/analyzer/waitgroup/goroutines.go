@@ -19,13 +19,11 @@ func (wga *Analyzer) isDeferDoneInGoroutine(wgName string) bool {
 			}
 
 			if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-				if ident, ok := call.X.(*ast.Ident); ok && call.Sel.Name == "Done" {
-					if ident.Name == wgName {
-						if wga.isNodeInGoroutine(deferStmt) {
-							foundInGoroutine = true
-						} else {
-							foundOutsideGoroutine = true
-						}
+				if call.Sel.Name == "Done" && common.GetVarName(call.X) == wgName {
+					if wga.isNodeInGoroutine(deferStmt) {
+						foundInGoroutine = true
+					} else {
+						foundOutsideGoroutine = true
 					}
 				}
 			}

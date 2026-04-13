@@ -20,9 +20,10 @@ func (wga *Analyzer) findDeferDoneCalls(stats map[string]*Stats) {
 		}
 
 		if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-			if ident, ok := call.X.(*ast.Ident); ok && call.Sel.Name == "Done" {
-				if wga.waitGroupNames[ident.Name] {
-					stats[ident.Name].hasDeferDone = true
+			if call.Sel.Name == "Done" {
+				wgName := common.GetVarName(call.X)
+				if wga.waitGroupNames[wgName] {
+					stats[wgName].hasDeferDone = true
 				}
 			}
 			return true

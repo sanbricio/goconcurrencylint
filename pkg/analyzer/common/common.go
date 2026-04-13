@@ -40,10 +40,18 @@ func IsWaitGroup(typ types.Type) bool {
 		named.Obj().Name() == "WaitGroup"
 }
 
-// GetVarName returns the variable name if the expression is an identifier, otherwise returns "?".
+// GetVarName returns the variable name if the expression is an identifier,
+// or a compound name for selector expressions (e.g., "s.mu" for struct field access).
+// Returns "?" if the expression cannot be reduced to a name.
 func GetVarName(expr ast.Expr) string {
-	if id, ok := expr.(*ast.Ident); ok {
-		return id.Name
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		parent := GetVarName(e.X)
+		if parent != "?" {
+			return parent + "." + e.Sel.Name
+		}
 	}
 	return "?"
 }

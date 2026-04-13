@@ -607,6 +607,63 @@ func GoodDeferWrappedDone() {
 	wg.Wait()
 }
 
+// ========== PACKAGE-LEVEL VARIABLE TESTS ==========
+
+var pkgWG sync.WaitGroup
+
+// Good: package-level waitgroup with proper Add and Done
+func GoodPackageLevelWaitGroup() {
+	pkgWG.Add(1)
+	go func() {
+		defer pkgWG.Done()
+	}()
+	pkgWG.Wait()
+}
+
+// Bad: package-level waitgroup with Add but no Done
+func BadPackageLevelWaitGroup() {
+	pkgWG.Add(1) // want "waitgroup 'pkgWG' has Add without corresponding Done"
+	pkgWG.Wait()
+}
+
+// ========== STRUCT FIELD ACCESS TESTS ==========
+
+type WorkerPool struct {
+	wg sync.WaitGroup
+}
+
+// Good: struct field waitgroup with proper Add and Done
+func GoodStructFieldWaitGroup() {
+	var wp WorkerPool
+	wp.wg.Add(1)
+	go func() {
+		defer wp.wg.Done()
+	}()
+	wp.wg.Wait()
+}
+
+// Bad: struct field waitgroup with Add but no Done
+func BadStructFieldWaitGroup() {
+	var wp WorkerPool
+	wp.wg.Add(1) // want "waitgroup 'wp.wg' has Add without corresponding Done"
+	wp.wg.Wait()
+}
+
+// Good: method receiver with struct field waitgroup, properly balanced
+func (wp *WorkerPool) GoodMethodWaitGroup() {
+	wp.wg.Add(1)
+	go func() {
+		defer wp.wg.Done()
+	}()
+	wp.wg.Wait()
+}
+
+// Bad: method receiver with struct field waitgroup, Add but no Done
+func (wp *WorkerPool) BadMethodWaitGroup() {
+	wp.wg.Add(1) // want "waitgroup 'wp.wg' has Add without corresponding Done"
+	wp.wg.Wait()
+}
+
 // ========== COMMENT FILTERING TESTS ==========
 
 // Test that commented code is properly ignored by the linter.

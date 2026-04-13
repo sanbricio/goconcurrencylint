@@ -578,6 +578,115 @@ func GoodRWForLoopRLock() {
 	}
 }
 
+// ========== FUNCTION PARAMETER TESTS ==========
+
+// Good: function receives mutex parameter, properly locks and unlocks
+func GoodMutexParameter(mu *sync.Mutex) {
+	mu.Lock()
+	mu.Unlock()
+}
+
+// Bad: function receives mutex parameter, locks but forgets to unlock
+func BadMutexParameter(mu *sync.Mutex) {
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+}
+
+// Good: function receives mutex parameter with defer unlock
+func GoodMutexParameterDefer(mu *sync.Mutex) {
+	mu.Lock()
+	defer mu.Unlock()
+}
+
+// Good: function receives rwmutex parameter, properly rlocks and runlocks
+func GoodRWMutexParameter(rw *sync.RWMutex) {
+	rw.RLock()
+	defer rw.RUnlock()
+}
+
+// Bad: function receives rwmutex parameter, rlocks but forgets to runlock
+func BadRWMutexParameter(rw *sync.RWMutex) {
+	rw.RLock() // want "rwmutex 'rw' is rlocked but not runlocked"
+}
+
+// ========== PACKAGE-LEVEL VARIABLE TESTS ==========
+
+var pkgMu sync.Mutex
+var pkgRWMu sync.RWMutex
+
+// Good: package-level mutex properly locked and unlocked
+func GoodPackageLevelMutex() {
+	pkgMu.Lock()
+	defer pkgMu.Unlock()
+}
+
+// Bad: package-level mutex locked but not unlocked
+func BadPackageLevelMutex() {
+	pkgMu.Lock() // want "mutex 'pkgMu' is locked but not unlocked"
+}
+
+// Good: package-level rwmutex properly rlocked and runlocked
+func GoodPackageLevelRWMutex() {
+	pkgRWMu.RLock()
+	defer pkgRWMu.RUnlock()
+}
+
+// Bad: package-level rwmutex rlocked but not runlocked
+func BadPackageLevelRWMutex() {
+	pkgRWMu.RLock() // want "rwmutex 'pkgRWMu' is rlocked but not runlocked"
+}
+
+// ========== STRUCT FIELD ACCESS TESTS ==========
+
+type SafeMap struct {
+	mu   sync.Mutex
+	rwmu sync.RWMutex
+	data map[string]string
+}
+
+// Good: struct field mutex properly locked and unlocked
+func GoodStructFieldMutex() {
+	var sm SafeMap
+	sm.mu.Lock()
+	sm.mu.Unlock()
+}
+
+// Good: struct field mutex with defer
+func GoodStructFieldMutexDefer() {
+	var sm SafeMap
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+}
+
+// Bad: struct field mutex locked but not unlocked
+func BadStructFieldMutex() {
+	var sm SafeMap
+	sm.mu.Lock() // want "mutex 'sm.mu' is locked but not unlocked"
+}
+
+// Good: struct field rwmutex properly rlocked and runlocked
+func GoodStructFieldRWMutex() {
+	var sm SafeMap
+	sm.rwmu.RLock()
+	defer sm.rwmu.RUnlock()
+}
+
+// Bad: struct field rwmutex rlocked but not runlocked
+func BadStructFieldRWMutex() {
+	var sm SafeMap
+	sm.rwmu.RLock() // want "rwmutex 'sm.rwmu' is rlocked but not runlocked"
+}
+
+// Good: method receiver with struct field mutex, properly balanced
+func (sm *SafeMap) GoodMethodMutex() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+}
+
+// Bad: method receiver with struct field mutex, locked but not unlocked
+func (sm *SafeMap) BadMethodMutex() {
+	sm.mu.Lock() // want "mutex 'sm.mu' is locked but not unlocked"
+}
+
 // ========== COMMENT FILTERING TESTS ==========
 
 // Test that commented code is properly ignored by the linter.

@@ -41,6 +41,27 @@ func TestGetVarName(t *testing.T) {
 	assert.Equal(t, "?", GetVarName(lit))
 
 	assert.Equal(t, "?", GetVarName(nil))
+
+	// SelectorExpr: s.mu → "s.mu"
+	sel := &ast.SelectorExpr{
+		X:   &ast.Ident{Name: "s"},
+		Sel: &ast.Ident{Name: "mu"},
+	}
+	assert.Equal(t, "s.mu", GetVarName(sel))
+
+	// Nested SelectorExpr: a.b.mu → "a.b.mu"
+	nested := &ast.SelectorExpr{
+		X:   sel,
+		Sel: &ast.Ident{Name: "extra"},
+	}
+	assert.Equal(t, "s.mu.extra", GetVarName(nested))
+
+	// SelectorExpr with non-ident root → "?"
+	selBadRoot := &ast.SelectorExpr{
+		X:   &ast.BasicLit{Value: "123"},
+		Sel: &ast.Ident{Name: "mu"},
+	}
+	assert.Equal(t, "?", GetVarName(selBadRoot))
 }
 
 func TestGetAddValue(t *testing.T) {

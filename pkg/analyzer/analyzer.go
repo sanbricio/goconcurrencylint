@@ -44,8 +44,8 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 // analyzeFunctions processes all function declarations in a file
 func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
-
 	commentFilter := commnetfilter.NewCommentFilter(pass.Fset, file)
+	pkgPrimitives := collectPackageLevelPrimitives(file, pass)
 
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -54,6 +54,7 @@ func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *repor
 		}
 
 		primitives := findSyncPrimitives(fn, pass)
+		mergePrimitives(primitives, pkgPrimitives)
 
 		if hasMutexes(primitives) {
 			analyzeMutexUsage(fn, primitives, errorCollector, commentFilter)
@@ -65,12 +66,77 @@ func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *repor
 	}
 }
 
-// findSyncPrimitives identifies all sync primitives declared in a function
+// collectPackageLevelPrimitives scans file-level var declarations for sync primitives
+func collectPackageLevelPrimitives(file *ast.File, pass *analysis.Pass) *syncPrimitive {
+	primitives := &syncPrimitive{
+		mutexes:    make(map[string]bool),
+		rwMutexes:  make(map[string]bool),
+		waitGroups: make(map[string]bool),
+	}
+
+	for _, decl := range file.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range genDecl.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			typ := getVariableType(vs, pass)
+			if typ == nil {
+				continue
+			}
+			for _, name := range vs.Names {
+				classifyAndAddPrimitive(name.Name, typ, primitives)
+			}
+		}
+	}
+
+	return primitives
+}
+
+// mergePrimitives merges src primitives into dst
+func mergePrimitives(dst, src *syncPrimitive) {
+	for k, v := range src.mutexes {
+		dst.mutexes[k] = v
+	}
+	for k, v := range src.rwMutexes {
+		dst.rwMutexes[k] = v
+	}
+	for k, v := range src.waitGroups {
+		dst.waitGroups[k] = v
+	}
+}
+
+// findSyncPrimitives identifies all sync primitives declared in a function,
+// including local variables, function parameters, and struct field accesses.
 func findSyncPrimitives(fn *ast.FuncDecl, pass *analysis.Pass) *syncPrimitive {
 	primitives := &syncPrimitive{
 		mutexes:    make(map[string]bool),
 		rwMutexes:  make(map[string]bool),
 		waitGroups: make(map[string]bool),
+	}
+
+	// Check function parameters for mutex primitives (e.g., func f(mu *sync.Mutex)).
+	// WaitGroup parameters are intentionally excluded: Done-only worker functions
+	// (e.g., func worker(wg *sync.WaitGroup) { defer wg.Done() }) would produce false positives.
+	if fn.Type != nil && fn.Type.Params != nil {
+		for _, field := range fn.Type.Params.List {
+			typ := pass.TypesInfo.TypeOf(field.Type)
+			if typ == nil {
+				continue
+			}
+			for _, name := range field.Names {
+				switch {
+				case common.IsMutex(typ):
+					primitives.mutexes[name.Name] = true
+				case common.IsRWMutex(typ):
+					primitives.rwMutexes[name.Name] = true
+				}
+			}
+		}
 	}
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -104,6 +170,17 @@ func findSyncPrimitives(fn *ast.FuncDecl, pass *analysis.Pass) *syncPrimitive {
 							classifyAndAddPrimitive(ident.Name, typ, primitives)
 						}
 					}
+				}
+			}
+
+		case *ast.SelectorExpr:
+			// Handle struct field access (e.g., s.mu where mu is sync.Mutex)
+			if selection, ok := pass.TypesInfo.Selections[node]; ok && selection.Kind() == types.FieldVal {
+				fieldType := selection.Type()
+				parentName := common.GetVarName(node.X)
+				if parentName != "?" {
+					compoundName := parentName + "." + node.Sel.Name
+					classifyAndAddPrimitive(compoundName, fieldType, primitives)
 				}
 			}
 		}
