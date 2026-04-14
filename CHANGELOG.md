@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.1 - 2026-04-14
+
+## What's Changed
+* fix: update build paths in CI and release workflows  by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/8
+
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.2.0...v0.2.1
+
 ## v0.2.0 - 2026-04-13
 
 **Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.1.0...v0.2.0
