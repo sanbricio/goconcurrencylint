@@ -35,11 +35,11 @@ jobs:
 
       - name: Build binaries
         run: |
-          GOOS=linux   GOARCH=amd64 go build -o dist/goconcurrencylint-linux-amd64   ./cmd
-          GOOS=linux   GOARCH=arm64 go build -o dist/goconcurrencylint-linux-arm64   ./cmd
-          GOOS=darwin  GOARCH=amd64 go build -o dist/goconcurrencylint-darwin-amd64  ./cmd
-          GOOS=darwin  GOARCH=arm64 go build -o dist/goconcurrencylint-darwin-arm64  ./cmd
-          GOOS=windows GOARCH=amd64 go build -o dist/goconcurrencylint-windows-amd64.exe ./cmd
+          GOOS=linux   GOARCH=amd64 go build -o dist/goconcurrencylint-linux-amd64   ./cmd/goconcurrencylint
+          GOOS=linux   GOARCH=arm64 go build -o dist/goconcurrencylint-linux-arm64   ./cmd/goconcurrencylint
+          GOOS=darwin  GOARCH=amd64 go build -o dist/goconcurrencylint-darwin-amd64  ./cmd/goconcurrencylint
+          GOOS=darwin  GOARCH=arm64 go build -o dist/goconcurrencylint-darwin-arm64  ./cmd/goconcurrencylint
+          GOOS=windows GOARCH=amd64 go build -o dist/goconcurrencylint-windows-amd64.exe ./cmd/goconcurrencylint
 
       - name: Generate release notes
         uses: actions/github-script@v9
