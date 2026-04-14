@@ -65,4 +65,4 @@ jobs:
           go-version: '1.25'
 
       - name: Build binary
-        run: go build -v -o goconcurrencylint ./cmd
+        run: go build -v -o goconcurrencylint ./cmd/goconcurrencylint
