@@ -116,11 +116,6 @@ type doneCallInfo struct {
 	hasGuaranteedDone bool
 }
 
-// analyzeDoneCalls analyzes Done calls in a block and returns info about them
-func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneCallInfo {
-	return wga.analyzeDoneCallsWithVisited(block, wgName, make(map[token.Pos]bool))
-}
-
 func (wga *Analyzer) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	// Tracks whether a prior branch could exit early, making subsequent statements conditional
@@ -279,11 +274,6 @@ func (wga *Analyzer) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName st
 	return info
 }
 
-// analyzeSwitchStatement analyzes Done calls in a switch statement
-func (wga *Analyzer) analyzeSwitchStatement(switchStmt *ast.SwitchStmt, wgName string) doneCallInfo {
-	return wga.analyzeSwitchStatementWithVisited(switchStmt, wgName, make(map[token.Pos]bool))
-}
-
 func (wga *Analyzer) analyzeSwitchStatementWithVisited(switchStmt *ast.SwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
@@ -318,11 +308,6 @@ func (wga *Analyzer) analyzeSwitchStatementWithVisited(switchStmt *ast.SwitchStm
 	return info
 }
 
-// analyzeTypeSwitchStatement analyzes Done calls in a type switch statement
-func (wga *Analyzer) analyzeTypeSwitchStatement(typeSwitchStmt *ast.TypeSwitchStmt, wgName string) doneCallInfo {
-	return wga.analyzeTypeSwitchStatementWithVisited(typeSwitchStmt, wgName, make(map[token.Pos]bool))
-}
-
 func (wga *Analyzer) analyzeTypeSwitchStatementWithVisited(typeSwitchStmt *ast.TypeSwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
@@ -354,11 +339,6 @@ func (wga *Analyzer) analyzeTypeSwitchStatementWithVisited(typeSwitchStmt *ast.T
 	}
 
 	return info
-}
-
-// analyzeSelectStatement analyzes Done calls in a select statement
-func (wga *Analyzer) analyzeSelectStatement(selectStmt *ast.SelectStmt, wgName string) doneCallInfo {
-	return wga.analyzeSelectStatementWithVisited(selectStmt, wgName, make(map[token.Pos]bool))
 }
 
 func (wga *Analyzer) analyzeSelectStatementWithVisited(selectStmt *ast.SelectStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
@@ -514,7 +494,7 @@ func (wga *Analyzer) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName s
 	if typ == nil {
 		return false
 	}
-	if ptr, ok := typ.(*types.Pointer); ok {
+	if ptr, isPointer := typ.(*types.Pointer); isPointer {
 		typ = ptr.Elem()
 	}
 
