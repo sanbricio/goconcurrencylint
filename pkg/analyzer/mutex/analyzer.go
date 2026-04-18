@@ -20,8 +20,12 @@ type Analyzer struct {
 
 // Stats tracks the state of a mutex within a block
 type Stats struct {
-	lock, rlock       int
-	lockPos, rlockPos []token.Pos
+	lock, rlock                 int
+	borrowedLock, borrowedRLock int
+	deferUnlock, deferRUnlock   int
+	lockPos, rlockPos           []token.Pos
+	borrowedUnlockPos           []token.Pos
+	borrowedRUnlockPos          []token.Pos
 }
 
 // deferErrorCollector tracks defer-related errors to avoid duplicate reporting
@@ -47,7 +51,7 @@ func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *repor
 // AnalyzeFunction analyzes mutex usage in a function
 func (ma *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.initializeStats()
-	finalStats := ma.analyzeBlock(fn.Body)
+	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
 	ma.reportUnmatchedLocks(finalStats)
 }
 
@@ -69,24 +73,38 @@ func (ma *Analyzer) copyStats(original map[string]*Stats) map[string]*Stats {
 	copy := make(map[string]*Stats)
 	for name, stats := range original {
 		copy[name] = &Stats{
-			lock:     stats.lock,
-			rlock:    stats.rlock,
-			lockPos:  append([]token.Pos{}, stats.lockPos...),
-			rlockPos: append([]token.Pos{}, stats.rlockPos...),
+			lock:               stats.lock,
+			rlock:              stats.rlock,
+			borrowedLock:       stats.borrowedLock,
+			borrowedRLock:      stats.borrowedRLock,
+			deferUnlock:        stats.deferUnlock,
+			deferRUnlock:       stats.deferRUnlock,
+			lockPos:            append([]token.Pos{}, stats.lockPos...),
+			rlockPos:           append([]token.Pos{}, stats.rlockPos...),
+			borrowedUnlockPos:  append([]token.Pos{}, stats.borrowedUnlockPos...),
+			borrowedRUnlockPos: append([]token.Pos{}, stats.borrowedRUnlockPos...),
 		}
 	}
 	return copy
 }
 
-// mergeStats merges stats from a nested block into parent stats
-func (ma *Analyzer) mergeStats(parent, child map[string]*Stats) {
-	for name, childStats := range child {
-		if parentStats, exists := parent[name]; exists {
-			parentStats.lock += childStats.lock
-			parentStats.rlock += childStats.rlock
-			parentStats.lockPos = append(parentStats.lockPos, childStats.lockPos...)
-			parentStats.rlockPos = append(parentStats.rlockPos, childStats.rlockPos...)
+// replaceStats overwrites the current stats with the analyzed result of a
+// sequential block.
+func (ma *Analyzer) replaceStats(dst, src map[string]*Stats) {
+	for name, srcStats := range src {
+		if _, exists := dst[name]; !exists {
+			dst[name] = &Stats{}
 		}
+		dst[name].lock = srcStats.lock
+		dst[name].rlock = srcStats.rlock
+		dst[name].borrowedLock = srcStats.borrowedLock
+		dst[name].borrowedRLock = srcStats.borrowedRLock
+		dst[name].deferUnlock = srcStats.deferUnlock
+		dst[name].deferRUnlock = srcStats.deferRUnlock
+		dst[name].lockPos = append([]token.Pos{}, srcStats.lockPos...)
+		dst[name].rlockPos = append([]token.Pos{}, srcStats.rlockPos...)
+		dst[name].borrowedUnlockPos = append([]token.Pos{}, srcStats.borrowedUnlockPos...)
+		dst[name].borrowedRUnlockPos = append([]token.Pos{}, srcStats.borrowedRUnlockPos...)
 	}
 }
 
@@ -101,5 +119,17 @@ func (ma *Analyzer) removeFirstLockPos(stats *Stats) {
 func (ma *Analyzer) removeFirstRLockPos(stats *Stats) {
 	if len(stats.rlockPos) > 0 {
 		stats.rlockPos = stats.rlockPos[1:]
+	}
+}
+
+func (ma *Analyzer) removeFirstBorrowedUnlockPos(stats *Stats) {
+	if len(stats.borrowedUnlockPos) > 0 {
+		stats.borrowedUnlockPos = stats.borrowedUnlockPos[1:]
+	}
+}
+
+func (ma *Analyzer) removeFirstBorrowedRUnlockPos(stats *Stats) {
+	if len(stats.borrowedRUnlockPos) > 0 {
+		stats.borrowedRUnlockPos = stats.borrowedRUnlockPos[1:]
 	}
 }

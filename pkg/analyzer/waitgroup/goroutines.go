@@ -3,6 +3,7 @@ package waitgroup
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
@@ -98,6 +99,17 @@ func (wga *Analyzer) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName stri
 	return false
 }
 
+func (wga *Analyzer) goroutineDoneInfo(goStmt *ast.GoStmt, wgName string) (doneCallInfo, bool) {
+	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
+		if !wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
+			return doneCallInfo{}, false
+		}
+		return wga.analyzeDoneCallsWithVisited(fnLit.Body, wgName, make(map[token.Pos]bool)), true
+	}
+
+	return wga.analyzeRelatedCall(goStmt.Call, wgName, make(map[token.Pos]bool))
+}
+
 // doneCallInfo contains information about Done calls in a block
 type doneCallInfo struct {
 	hasAnyDone        bool
@@ -106,6 +118,10 @@ type doneCallInfo struct {
 
 // analyzeDoneCalls analyzes Done calls in a block and returns info about them
 func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneCallInfo {
+	return wga.analyzeDoneCallsWithVisited(block, wgName, make(map[token.Pos]bool))
+}
+
+func (wga *Analyzer) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	// Tracks whether a prior branch could exit early, making subsequent statements conditional
 	mightExitEarly := false
@@ -122,7 +138,7 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 
 		switch s := stmt.(type) {
 		case *ast.DeferStmt:
-			if wga.isSimpleDeferDone(s, wgName) || wga.isDeferPanicRecoveryPattern(s, wgName) || wga.isDeferFuncWithDone(s, wgName) {
+			if wga.isSimpleDeferDone(s, wgName) || wga.isCallbackDeferDone(s, wgName) || wga.isDeferPanicRecoveryPattern(s, wgName) || wga.isDeferFuncWithDone(s, wgName) {
 				info.hasAnyDone = true
 				if !mightExitEarly {
 					info.hasGuaranteedDone = true
@@ -142,10 +158,18 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 
 			// Direct Done() call
 			if call, ok := s.X.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok &&
-					sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
+				if wga.callInvokesDone(call, wgName) {
 					info.hasAnyDone = true
 					if !mightExitEarly {
+						info.hasGuaranteedDone = true
+						return info
+					}
+				}
+
+				helperInfo, related := wga.analyzeRelatedCall(call, wgName, visited)
+				if related {
+					info.hasAnyDone = info.hasAnyDone || helperInfo.hasAnyDone
+					if helperInfo.hasGuaranteedDone && !mightExitEarly {
 						info.hasGuaranteedDone = true
 						return info
 					}
@@ -154,7 +178,7 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 
 		case *ast.IfStmt:
 			// For if statements, Done is guaranteed only if both branches have it
-			thenInfo := wga.analyzeDoneCalls(s.Body, wgName)
+			thenInfo := wga.analyzeDoneCallsWithVisited(s.Body, wgName, visited)
 			info.hasAnyDone = info.hasAnyDone || thenInfo.hasAnyDone
 
 			thenTerminates := wga.blockAlwaysTerminates(s.Body)
@@ -163,11 +187,11 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 				var elseInfo doneCallInfo
 				var elseTerminates bool
 				if elseBlock, ok := s.Else.(*ast.BlockStmt); ok {
-					elseInfo = wga.analyzeDoneCalls(elseBlock, wgName)
+					elseInfo = wga.analyzeDoneCallsWithVisited(elseBlock, wgName, visited)
 					elseTerminates = wga.blockAlwaysTerminates(elseBlock)
 				} else if elseIf, ok := s.Else.(*ast.IfStmt); ok {
 					elseBlock := &ast.BlockStmt{List: []ast.Stmt{elseIf}}
-					elseInfo = wga.analyzeDoneCalls(elseBlock, wgName)
+					elseInfo = wga.analyzeDoneCallsWithVisited(elseBlock, wgName, visited)
 					elseTerminates = wga.blockAlwaysTerminates(elseBlock)
 				}
 
@@ -196,7 +220,7 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 			}
 
 		case *ast.SwitchStmt:
-			switchInfo := wga.analyzeSwitchStatement(s, wgName)
+			switchInfo := wga.analyzeSwitchStatementWithVisited(s, wgName, visited)
 			info.hasAnyDone = info.hasAnyDone || switchInfo.hasAnyDone
 			if switchInfo.hasGuaranteedDone {
 				info.hasGuaranteedDone = true
@@ -204,7 +228,7 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 			}
 
 		case *ast.TypeSwitchStmt:
-			typeSwitchInfo := wga.analyzeTypeSwitchStatement(s, wgName)
+			typeSwitchInfo := wga.analyzeTypeSwitchStatementWithVisited(s, wgName, visited)
 			info.hasAnyDone = info.hasAnyDone || typeSwitchInfo.hasAnyDone
 			if typeSwitchInfo.hasGuaranteedDone {
 				info.hasGuaranteedDone = true
@@ -212,11 +236,21 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 			}
 
 		case *ast.SelectStmt:
-			selectInfo := wga.analyzeSelectStatement(s, wgName)
+			selectInfo := wga.analyzeSelectStatementWithVisited(s, wgName, visited)
 			info.hasAnyDone = info.hasAnyDone || selectInfo.hasAnyDone
 			if selectInfo.hasGuaranteedDone {
 				info.hasGuaranteedDone = true
 				return info
+			}
+
+		case *ast.GoStmt:
+			goInfo, related := wga.goroutineDoneInfo(s, wgName)
+			if related {
+				info.hasAnyDone = info.hasAnyDone || goInfo.hasAnyDone
+				if goInfo.hasGuaranteedDone && !mightExitEarly {
+					info.hasGuaranteedDone = true
+					return info
+				}
 			}
 
 		case *ast.ForStmt, *ast.RangeStmt:
@@ -224,16 +258,16 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 			// But we still track if there's any Done
 			var loopInfo doneCallInfo
 			if forStmt, ok := s.(*ast.ForStmt); ok && forStmt.Body != nil {
-				loopInfo = wga.analyzeDoneCalls(forStmt.Body, wgName)
+				loopInfo = wga.analyzeDoneCallsWithVisited(forStmt.Body, wgName, visited)
 			} else if rangeStmt, ok := s.(*ast.RangeStmt); ok && rangeStmt.Body != nil {
-				loopInfo = wga.analyzeDoneCalls(rangeStmt.Body, wgName)
+				loopInfo = wga.analyzeDoneCallsWithVisited(rangeStmt.Body, wgName, visited)
 			}
 			info.hasAnyDone = info.hasAnyDone || loopInfo.hasAnyDone
 			// Note: We don't set hasGuaranteedDone for loops
 
 		case *ast.BlockStmt:
 			// Nested block - analyze recursively
-			blockInfo := wga.analyzeDoneCalls(s, wgName)
+			blockInfo := wga.analyzeDoneCallsWithVisited(s, wgName, visited)
 			info.hasAnyDone = info.hasAnyDone || blockInfo.hasAnyDone
 			if blockInfo.hasGuaranteedDone {
 				info.hasGuaranteedDone = true
@@ -247,6 +281,10 @@ func (wga *Analyzer) analyzeDoneCalls(block *ast.BlockStmt, wgName string) doneC
 
 // analyzeSwitchStatement analyzes Done calls in a switch statement
 func (wga *Analyzer) analyzeSwitchStatement(switchStmt *ast.SwitchStmt, wgName string) doneCallInfo {
+	return wga.analyzeSwitchStatementWithVisited(switchStmt, wgName, make(map[token.Pos]bool))
+}
+
+func (wga *Analyzer) analyzeSwitchStatementWithVisited(switchStmt *ast.SwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
 	allCasesGuaranteed := true
@@ -259,7 +297,7 @@ func (wga *Analyzer) analyzeSwitchStatement(switchStmt *ast.SwitchStmt, wgName s
 
 		isDefaultCase := len(cc.List) == 0
 		caseBlock := &ast.BlockStmt{List: cc.Body}
-		caseInfo := wga.analyzeDoneCalls(caseBlock, wgName)
+		caseInfo := wga.analyzeDoneCallsWithVisited(caseBlock, wgName, visited)
 
 		info.hasAnyDone = info.hasAnyDone || caseInfo.hasAnyDone
 
@@ -282,6 +320,10 @@ func (wga *Analyzer) analyzeSwitchStatement(switchStmt *ast.SwitchStmt, wgName s
 
 // analyzeTypeSwitchStatement analyzes Done calls in a type switch statement
 func (wga *Analyzer) analyzeTypeSwitchStatement(typeSwitchStmt *ast.TypeSwitchStmt, wgName string) doneCallInfo {
+	return wga.analyzeTypeSwitchStatementWithVisited(typeSwitchStmt, wgName, make(map[token.Pos]bool))
+}
+
+func (wga *Analyzer) analyzeTypeSwitchStatementWithVisited(typeSwitchStmt *ast.TypeSwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
 	allCasesGuaranteed := true
@@ -294,7 +336,7 @@ func (wga *Analyzer) analyzeTypeSwitchStatement(typeSwitchStmt *ast.TypeSwitchSt
 
 		isDefaultCase := len(cc.List) == 0
 		caseBlock := &ast.BlockStmt{List: cc.Body}
-		caseInfo := wga.analyzeDoneCalls(caseBlock, wgName)
+		caseInfo := wga.analyzeDoneCallsWithVisited(caseBlock, wgName, visited)
 
 		info.hasAnyDone = info.hasAnyDone || caseInfo.hasAnyDone
 
@@ -316,6 +358,10 @@ func (wga *Analyzer) analyzeTypeSwitchStatement(typeSwitchStmt *ast.TypeSwitchSt
 
 // analyzeSelectStatement analyzes Done calls in a select statement
 func (wga *Analyzer) analyzeSelectStatement(selectStmt *ast.SelectStmt, wgName string) doneCallInfo {
+	return wga.analyzeSelectStatementWithVisited(selectStmt, wgName, make(map[token.Pos]bool))
+}
+
+func (wga *Analyzer) analyzeSelectStatementWithVisited(selectStmt *ast.SelectStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
 	allCasesGuaranteed := true
@@ -328,7 +374,7 @@ func (wga *Analyzer) analyzeSelectStatement(selectStmt *ast.SelectStmt, wgName s
 
 		isDefaultCase := cc.Comm == nil
 		caseBlock := &ast.BlockStmt{List: cc.Body}
-		caseInfo := wga.analyzeDoneCalls(caseBlock, wgName)
+		caseInfo := wga.analyzeDoneCallsWithVisited(caseBlock, wgName, visited)
 
 		info.hasAnyDone = info.hasAnyDone || caseInfo.hasAnyDone
 
@@ -348,10 +394,45 @@ func (wga *Analyzer) analyzeSelectStatement(selectStmt *ast.SelectStmt, wgName s
 	return info
 }
 
+func (wga *Analyzer) analyzeRelatedCall(call *ast.CallExpr, wgName string, visited map[token.Pos]bool) (doneCallInfo, bool) {
+	fn, calleeWGName, related := wga.relatedWaitGroupForCall(call, wgName)
+	if !related || fn == nil || fn.Body == nil || calleeWGName == "" {
+		return doneCallInfo{}, false
+	}
+	if visited[fn.Pos()] {
+		return doneCallInfo{}, true
+	}
+
+	visited[fn.Pos()] = true
+	defer delete(visited, fn.Pos())
+
+	return wga.analyzeDoneCallsWithVisited(fn.Body, calleeWGName, visited), true
+}
+
+func (wga *Analyzer) callInvokesDone(call *ast.CallExpr, wgName string) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok &&
+		sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
+		return true
+	}
+
+	if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == wgName {
+		return true
+	}
+
+	return wga.isSyncOnceDoWithCallback(call, wgName)
+}
+
 // isSimpleDeferDone checks if a defer statement is a simple defer wg.Done()
 func (wga *Analyzer) isSimpleDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
 		return call.Sel.Name == "Done" && common.GetVarName(call.X) == wgName
+	}
+	return false
+}
+
+func (wga *Analyzer) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
+	if ident, ok := deferStmt.Call.Fun.(*ast.Ident); ok {
+		return ident.Name == wgName
 	}
 	return false
 }
@@ -406,6 +487,41 @@ func (wga *Analyzer) isDeferFuncWithDone(deferStmt *ast.DeferStmt, wgName string
 		return false
 	}
 	return wga.containsDoneCall(fnLit.Body, wgName)
+}
+
+func (wga *Analyzer) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName string) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+
+	hasCallbackArg := false
+	for _, arg := range call.Args {
+		if ident, ok := arg.(*ast.Ident); ok && ident.Name == callbackName {
+			hasCallbackArg = true
+			break
+		}
+	}
+	if !hasCallbackArg {
+		return false
+	}
+
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Do" {
+		return false
+	}
+
+	typ := wga.typesInfo.TypeOf(sel.X)
+	if typ == nil {
+		return false
+	}
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+
+	named, ok := typ.(*types.Named)
+	return ok && named.Obj().Pkg() != nil &&
+		named.Obj().Pkg().Path() == "sync" &&
+		named.Obj().Name() == "Once"
 }
 
 // isRecoverCheck checks if an if statement is checking recover() result

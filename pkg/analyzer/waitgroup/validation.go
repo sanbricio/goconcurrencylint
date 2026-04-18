@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"sort"
+	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
@@ -49,35 +50,15 @@ func (wga *Analyzer) validateBalance(wgName string, stats *Stats) {
 
 // countGuaranteedDoneInGoroutines counts Done calls that are guaranteed to execute in goroutines
 func (wga *Analyzer) countGuaranteedDoneInGoroutines(wgName string) int {
-	count := 0
-
-	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
-		if goStmt, ok := n.(*ast.GoStmt); ok {
-			if wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
-				if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
-					doneInfo := wga.analyzeDoneCalls(fnLit.Body, wgName)
-					if doneInfo.hasGuaranteedDone {
-						count++
-					} else if !doneInfo.hasAnyDone {
-						// Report blocking goroutine error here
-						relatedAdd := wga.findRelatedAddCall(goStmt, wgName)
-						if relatedAdd != token.NoPos {
-							wga.errorCollector.AddError(relatedAdd,
-								"waitgroup '"+wgName+"' has Add without corresponding Done")
-						}
-					}
-				}
-			}
-		}
-		return true
-	})
-
-	return count
+	return wga.countGuaranteedDoneInStatements(wga.function.Body.List, wgName, 1)
 }
 
 // checkWaitGroupBalance validates that Add and Done calls are properly balanced
 func (wga *Analyzer) checkWaitGroupBalance(stats map[string]*Stats) {
 	for wgName, st := range stats {
+		if wga.isBorrowedWaitGroupField(wgName, st) {
+			continue
+		}
 		if wga.isWaitGroupPassedToOtherFunctions(wgName) {
 			if st.doneCount == 0 && !st.hasDeferDone && len(st.addCalls) > 0 {
 				continue
@@ -85,6 +66,182 @@ func (wga *Analyzer) checkWaitGroupBalance(stats map[string]*Stats) {
 		}
 		wga.validateBalance(wgName, st)
 	}
+}
+
+func (wga *Analyzer) isBorrowedWaitGroupField(wgName string, st *Stats) bool {
+	return strings.Contains(wgName, ".") && st.totalAdd == 0 && len(st.waitCalls) == 0 && (st.doneCount > 0 || st.hasDeferDone)
+}
+
+func (wga *Analyzer) countGuaranteedDoneInStatements(stmts []ast.Stmt, wgName string, multiplier int) int {
+	count := 0
+
+	for _, stmt := range stmts {
+		if wga.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+
+		switch s := stmt.(type) {
+		case *ast.GoStmt:
+			if fnLit, ok := s.Call.Fun.(*ast.FuncLit); ok {
+				nestedCount := wga.countGuaranteedDoneInStatements(fnLit.Body.List, wgName, multiplier)
+				if nestedCount > 0 {
+					count += nestedCount
+					continue
+				}
+			}
+
+			doneInfo, related := wga.goroutineDoneInfo(s, wgName)
+			if !related {
+				continue
+			}
+			if doneInfo.hasGuaranteedDone {
+				count += multiplier
+				continue
+			}
+			if wga.goroutineOnlyWaitsOnWaitGroup(s, wgName) {
+				continue
+			}
+			if !doneInfo.hasAnyDone {
+				relatedAdd := wga.findRelatedAddCall(s, wgName)
+				if relatedAdd != token.NoPos {
+					wga.errorCollector.AddError(relatedAdd,
+						"waitgroup '"+wgName+"' has Add without corresponding Done")
+				}
+			}
+
+		case *ast.BlockStmt:
+			count += wga.countGuaranteedDoneInStatements(s.List, wgName, multiplier)
+
+		case *ast.IfStmt:
+			count += wga.countGuaranteedDoneInStatements(s.Body.List, wgName, multiplier)
+			if elseBlock, ok := s.Else.(*ast.BlockStmt); ok {
+				count += wga.countGuaranteedDoneInStatements(elseBlock.List, wgName, multiplier)
+			} else if elseIf, ok := s.Else.(*ast.IfStmt); ok {
+				count += wga.countGuaranteedDoneInStatements([]ast.Stmt{elseIf}, wgName, multiplier)
+			}
+
+		case *ast.ForStmt:
+			factor := multiplier * wga.estimateForIterations(s)
+			count += wga.countGuaranteedDoneInStatements(s.Body.List, wgName, factor)
+
+		case *ast.RangeStmt:
+			count += wga.countGuaranteedDoneInStatements(s.Body.List, wgName, multiplier)
+
+		case *ast.SwitchStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					count += wga.countGuaranteedDoneInStatements(cc.Body, wgName, multiplier)
+				}
+			}
+
+		case *ast.TypeSwitchStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					count += wga.countGuaranteedDoneInStatements(cc.Body, wgName, multiplier)
+				}
+			}
+
+		case *ast.SelectStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CommClause); ok {
+					count += wga.countGuaranteedDoneInStatements(cc.Body, wgName, multiplier)
+				}
+			}
+
+		case *ast.LabeledStmt:
+			count += wga.countGuaranteedDoneInStatements([]ast.Stmt{s.Stmt}, wgName, multiplier)
+		}
+	}
+
+	return count
+}
+
+func (wga *Analyzer) estimateForIterations(forStmt *ast.ForStmt) int {
+	if forStmt == nil {
+		return 1
+	}
+
+	start := 0
+	counterName := ""
+
+	if init, ok := forStmt.Init.(*ast.AssignStmt); ok && len(init.Lhs) == 1 && len(init.Rhs) == 1 {
+		if ident, ok := init.Lhs[0].(*ast.Ident); ok {
+			if lit, ok := init.Rhs[0].(*ast.BasicLit); ok && lit.Kind == token.INT {
+				start = parseIntLiteral(lit)
+				counterName = ident.Name
+			}
+		}
+	}
+
+	if counterName == "" {
+		return 1
+	}
+
+	cond, ok := forStmt.Cond.(*ast.BinaryExpr)
+	if !ok {
+		return 1
+	}
+	left, ok := cond.X.(*ast.Ident)
+	if !ok || left.Name != counterName {
+		return 1
+	}
+	right, ok := cond.Y.(*ast.BasicLit)
+	if !ok || right.Kind != token.INT {
+		return 1
+	}
+	limit := parseIntLiteral(right)
+
+	switch post := forStmt.Post.(type) {
+	case *ast.IncDecStmt:
+		if ident, ok := post.X.(*ast.Ident); !ok || ident.Name != counterName || post.Tok != token.INC {
+			return 1
+		}
+	case *ast.AssignStmt:
+		if len(post.Lhs) != 1 || len(post.Rhs) != 1 {
+			return 1
+		}
+		ident, ok := post.Lhs[0].(*ast.Ident)
+		if !ok || ident.Name != counterName {
+			return 1
+		}
+		if post.Tok != token.ADD_ASSIGN {
+			return 1
+		}
+		if lit, ok := post.Rhs[0].(*ast.BasicLit); !ok || lit.Kind != token.INT || parseIntLiteral(lit) != 1 {
+			return 1
+		}
+	default:
+		return 1
+	}
+
+	switch cond.Op {
+	case token.LSS:
+		if limit <= start {
+			return 1
+		}
+		return limit - start
+	case token.LEQ:
+		if limit < start {
+			return 1
+		}
+		return limit - start + 1
+	default:
+		return 1
+	}
+}
+
+func parseIntLiteral(lit *ast.BasicLit) int {
+	if lit == nil {
+		return 0
+	}
+	value := 0
+	for _, ch := range lit.Value {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		value = value*10 + int(ch-'0')
+	}
+	return value
 }
 
 // reportUnmatchedAdds reports Add calls that don't have corresponding Done calls
@@ -221,6 +378,9 @@ func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
 			for _, add := range st.addCalls {
 				// Only report Add calls in main flow after this empty Wait
 				if add.pos > wait && !wga.isInGoroutine(add.pos) {
+					if add.value == 1 && wga.hasDeferredDoneAfter(wgName, add.pos) {
+						continue
+					}
 					wga.errorCollector.AddError(add.pos, "waitgroup '"+wgName+"' Add called after Wait")
 				}
 			}
@@ -231,6 +391,65 @@ func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
 			}
 		}
 	}
+}
+
+func (wga *Analyzer) goroutineOnlyWaitsOnWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
+	fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+	if !ok {
+		return false
+	}
+
+	hasWait := false
+	hasTaskLikeUse := false
+
+	ast.Inspect(fnLit.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || common.GetVarName(sel.X) != wgName {
+			return true
+		}
+
+		switch sel.Sel.Name {
+		case "Wait":
+			hasWait = true
+		case "Add", "Done", "Go":
+			hasTaskLikeUse = true
+			return false
+		}
+
+		return true
+	})
+
+	return hasWait && !hasTaskLikeUse
+}
+
+func (wga *Analyzer) hasDeferredDoneAfter(wgName string, after token.Pos) bool {
+	found := false
+
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+
+		deferStmt, ok := n.(*ast.DeferStmt)
+		if !ok || deferStmt.Pos() <= after {
+			return true
+		}
+		if wga.isNodeInGoroutine(deferStmt) {
+			return true
+		}
+		if wga.isSimpleDeferDone(deferStmt, wgName) {
+			found = true
+			return false
+		}
+		return true
+	})
+
+	return found
 }
 
 // checkLoopAddDoneBalance checks for Add/Done balance issues in loops

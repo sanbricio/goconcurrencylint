@@ -367,6 +367,136 @@ func GoodWaitGroupMethodPassed() {
 	wg.Wait()
 }
 
+type callbackOwner struct {
+	wg sync.WaitGroup
+}
+
+func (o *callbackOwner) GoodWaitGroupFieldMethodPassed() {
+	o.wg.Add(1)
+	go runWithCallback(o.wg.Done)
+	o.wg.Wait()
+}
+
+func (o *callbackOwner) GoodWaitGroupFieldMethodPassedThroughOnce() {
+	o.wg.Add(1)
+	go runWithOnceCallback(o.wg.Done)
+	o.wg.Wait()
+}
+
+// WaitGroup Done callback passed through a runner helper that starts goroutines internally.
+func GoodWaitGroupDoneCallbackPassedIntoRunner() {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	runner := newCallbackRunner(
+		func(stopCh chan struct{}) { runUntilFirstSuccess(wg.Done, stopCh) },
+		func(stopCh chan struct{}) { runUntilFirstSuccess(wg.Done, stopCh) },
+	)
+	runner.Start()
+	wg.Wait()
+}
+
+func GoodWaitGroupDoneInRegisteredCallback() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	registerCallback(func() {
+		wg.Done()
+	})
+	wg.Wait()
+}
+
+func GoodWaitGroupDoneInCallbackVariable() {
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	test := func() {
+		wg.Done()
+		wg.Wait()
+	}
+
+	runNamedCallbacks(test, test, test)
+}
+
+type syncHooks struct {
+	run func()
+}
+
+func (o *callbackOwner) GoodWaitGroupMethodValueAssignedToField() {
+	hooks := &syncHooks{}
+	o.wg.Add(1)
+	hooks.run = o.markDone
+	go hooks.run()
+	o.wg.Wait()
+}
+
+// Reusing a WaitGroup as a generation barrier is valid when Add happens
+// after the previous Wait has returned and the same goroutine later calls Done.
+func GoodWaitGroupReuseAfterWait() {
+	var wg sync.WaitGroup
+
+	startCycle(&wg)
+	startCycle(&wg)
+}
+
+func GoodWaitGroupAddBeforeFixedLoopGoroutines() {
+	var wg sync.WaitGroup
+	wg.Add(10)
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+func GoodWaitGroupInsideCoordinatorGoroutine() {
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		var wg sync.WaitGroup
+		wg.Add(3)
+		for i := 0; i < 3; i++ {
+			go func() {
+				defer wg.Done()
+			}()
+		}
+		wg.Wait()
+	}()
+
+	<-done
+}
+
+type RestartableReflector struct {
+	wg sync.WaitGroup
+}
+
+func (r *RestartableReflector) GoodWaitGroupReuseAfterWaitOnField() {
+	r.wg.Wait()
+	r.wg.Add(1)
+	defer r.wg.Done()
+}
+
+// A goroutine that only waits on the WaitGroup is a coordinator, not work that
+// needs to call Done itself.
+func GoodWaitGroupWaitOnlyGoroutine() {
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+
+	go func() {
+		defer close(done)
+		wg.Wait()
+	}()
+
+	<-done
+}
+
 // ========== MIXED SCENARIOS ==========
 
 // ---------- Multiple WaitGroups ----------
@@ -438,6 +568,40 @@ func (m *MyStruct) DoWork() {
 	m.wg.Add(1)
 	go func() { defer m.wg.Done() }()
 	m.wg.Wait()
+}
+
+// Add in one method, Done in a sibling method launched as a goroutine.
+// The linter must not flag Add when Done lives in another method of the same struct.
+type StructWithSiblingMethods struct {
+	stopWg sync.WaitGroup
+	stopCh chan struct{}
+}
+
+func (s *StructWithSiblingMethods) GoodAddInStartDoneInSiblingMethod() {
+	s.stopCh = make(chan struct{})
+	s.stopWg.Add(1)
+	go s.run(s.stopCh)
+}
+
+func (s *StructWithSiblingMethods) run(stopCh chan struct{}) {
+	defer s.stopWg.Done()
+	<-stopCh
+}
+
+// Add in a loop, Done in the per-iteration goroutine method.
+type StructWithConnHandler struct {
+	connWG sync.WaitGroup
+}
+
+func (l *StructWithConnHandler) GoodAddInLoopDoneInHandlerMethod() {
+	for i := 0; i < 3; i++ {
+		l.connWG.Add(1)
+		go l.handleConn()
+	}
+}
+
+func (l *StructWithConnHandler) handleConn() {
+	defer l.connWG.Done()
 }
 
 // ========== EDGE CASES ==========
@@ -736,9 +900,54 @@ func runWithCallback(done func()) {
 	// run with callback
 }
 
+func runWithOnceCallback(done func()) {
+	var once sync.Once
+	once.Do(done)
+}
+
+func registerCallback(callback func()) {
+	go callback()
+}
+
+func runNamedCallbacks(callbacks ...func()) {
+	for _, callback := range callbacks {
+		go callback()
+	}
+}
+
+type callbackRunner struct {
+	loopFuncs []func(stopCh chan struct{})
+}
+
+func newCallbackRunner(loopFuncs ...func(stopCh chan struct{})) *callbackRunner {
+	return &callbackRunner{loopFuncs: loopFuncs}
+}
+
+func (r *callbackRunner) Start() {
+	stopCh := make(chan struct{})
+	for _, loopFn := range r.loopFuncs {
+		go loopFn(stopCh)
+	}
+}
+
+func runUntilFirstSuccess(onFirstSuccess func(), stopCh chan struct{}) {
+	_ = stopCh
+	onFirstSuccess()
+}
+
+func startCycle(wg *sync.WaitGroup) {
+	wg.Wait()
+	wg.Add(1)
+	defer wg.Done()
+}
+
 func handleExternalWork(wg *sync.WaitGroup) {
 	defer wg.Done()
 	// external work
+}
+
+func (o *callbackOwner) markDone() {
+	o.wg.Done()
 }
 
 func doSomething() any {

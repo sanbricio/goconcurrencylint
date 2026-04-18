@@ -7,9 +7,10 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
 
-// analyzeBlock analyzes a block statement and returns the final stats
-func (ma *Analyzer) analyzeBlock(block *ast.BlockStmt) map[string]*Stats {
-	blockStats := ma.copyStats(ma.stats)
+// analyzeBlock analyzes a block statement starting from the provided state and
+// returns the resulting stats after executing that block.
+func (ma *Analyzer) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats) map[string]*Stats {
+	blockStats := ma.copyStats(initial)
 
 	for _, stmt := range block.List {
 		if ma.commentFilter.ShouldSkipStatement(stmt) {
@@ -28,8 +29,10 @@ func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 		ma.analyzeExpressionStatement(s, stats)
 	case *ast.DeferStmt:
 		ma.analyzeDeferStatement(s, stats)
+	case *ast.ReturnStmt:
+		ma.analyzeReturnStatement(s, stats)
 	case *ast.IfStmt:
-		ma.analyzeIfStatement(s)
+		ma.analyzeIfStatement(s, stats)
 	case *ast.GoStmt:
 		ma.analyzeGoStatement(s)
 	case *ast.ForStmt:
@@ -37,14 +40,16 @@ func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	case *ast.RangeStmt:
 		ma.analyzeRangeStatement(s, stats)
 	case *ast.SwitchStmt:
-		ma.analyzeSwitchStatement(s)
+		ma.analyzeSwitchStatement(s, stats)
 	case *ast.TypeSwitchStmt:
-		ma.analyzeTypeSwitchStatement(s)
+		ma.analyzeTypeSwitchStatement(s, stats)
 	case *ast.SelectStmt:
-		ma.analyzeSelectStatement(s)
+		ma.analyzeSelectStatement(s, stats)
+	case *ast.LabeledStmt:
+		ma.analyzeStatement(s.Stmt, stats)
 	case *ast.BlockStmt:
-		nestedStats := ma.analyzeBlock(s)
-		ma.mergeStats(stats, nestedStats)
+		nestedStats := ma.analyzeBlock(s, stats)
+		ma.replaceStats(stats, nestedStats)
 	}
 }
 
@@ -64,6 +69,13 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 		return
 	}
 
+	if sel.Sel.Name == "Cleanup" && len(call.Args) == 1 {
+		if fnlit, ok := call.Args[0].(*ast.FuncLit); ok {
+			ma.handleDeferFunctionLiteral(fnlit, call.Pos(), stats)
+		}
+		return
+	}
+
 	varName := common.GetVarName(sel.X)
 
 	if ma.mutexNames[varName] {
@@ -78,12 +90,18 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 // handleMutexCall processes mutex method calls
 func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
 	switch methodName {
-	case "Lock":
+	case "Lock", "TryLock":
+		if stats[varName].borrowedLock > 0 {
+			stats[varName].borrowedLock--
+			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			return
+		}
 		stats[varName].lock++
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
-			ma.errorCollector.AddError(pos, "mutex '"+varName+"' is unlocked but not locked")
+			stats[varName].borrowedLock++
+			stats[varName].borrowedUnlockPos = append(stats[varName].borrowedUnlockPos, pos)
 		} else {
 			stats[varName].lock--
 			ma.removeFirstLockPos(stats[varName])
@@ -94,26 +112,48 @@ func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, s
 // handleRWMutexCall processes rwmutex method calls
 func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
 	switch methodName {
-	case "Lock":
+	case "Lock", "TryLock":
+		if stats[varName].borrowedLock > 0 {
+			stats[varName].borrowedLock--
+			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			return
+		}
 		stats[varName].lock++
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
-			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' is unlocked but not locked")
+			stats[varName].borrowedLock++
+			stats[varName].borrowedUnlockPos = append(stats[varName].borrowedUnlockPos, pos)
 		} else {
 			stats[varName].lock--
 			ma.removeFirstLockPos(stats[varName])
 		}
-	case "RLock":
+	case "RLock", "TryRLock":
+		if stats[varName].borrowedRLock > 0 {
+			stats[varName].borrowedRLock--
+			ma.removeFirstBorrowedRUnlockPos(stats[varName])
+			return
+		}
 		stats[varName].rlock++
 		stats[varName].rlockPos = append(stats[varName].rlockPos, pos)
 	case "RUnlock":
 		if stats[varName].rlock == 0 {
-			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' is runlocked but not rlocked")
+			stats[varName].borrowedRLock++
+			stats[varName].borrowedRUnlockPos = append(stats[varName].borrowedRUnlockPos, pos)
 		} else {
 			stats[varName].rlock--
 			ma.removeFirstRLockPos(stats[varName])
 		}
+	}
+}
+
+func (ma *Analyzer) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[string]*Stats) {
+	for _, result := range stmt.Results {
+		fnlit, ok := result.(*ast.FuncLit)
+		if !ok {
+			continue
+		}
+		ma.handleDeferFunctionLiteral(fnlit, stmt.Pos(), stats)
 	}
 }
 
@@ -157,17 +197,17 @@ func (ma *Analyzer) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats
 func (ma *Analyzer) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, stats map[string]*Stats) {
 	// Check for mutex unlocks in function literal
 	for mutexName := range ma.mutexNames {
-		if ma.containsUnlock(fnlit.Body, mutexName) {
+		if ma.containsUnlock(fnlit.Body, mutexName) && !ma.containsLock(fnlit.Body, mutexName) {
 			ma.handleDeferUnlock(mutexName, pos, stats, false)
 		}
 	}
 
 	// Check for rwmutex unlocks in function literal
 	for rwMutexName := range ma.rwMutexNames {
-		if ma.containsUnlock(fnlit.Body, rwMutexName) {
+		if ma.containsUnlock(fnlit.Body, rwMutexName) && !ma.containsLock(fnlit.Body, rwMutexName) {
 			ma.handleDeferUnlock(rwMutexName, pos, stats, true)
 		}
-		if ma.containsRUnlock(fnlit.Body, rwMutexName) {
+		if ma.containsRUnlock(fnlit.Body, rwMutexName) && !ma.containsRLock(fnlit.Body, rwMutexName) {
 			ma.handleDeferRUnlock(rwMutexName, pos, stats)
 		}
 	}
@@ -194,6 +234,27 @@ func (ma *Analyzer) containsUnlock(block *ast.BlockStmt, mutexName string) bool 
 	return found
 }
 
+// containsLock checks if a block contains a lock call for a specific mutex
+func (ma *Analyzer) containsLock(block *ast.BlockStmt, mutexName string) bool {
+	found := false
+	ast.Inspect(block, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if ma.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel.Name == "Lock" && common.GetVarName(sel.X) == mutexName {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
 // containsRUnlock checks if a block contains an runlock call for a specific rwmutex
 func (ma *Analyzer) containsRUnlock(block *ast.BlockStmt, mutexName string) bool {
 	found := false
@@ -205,6 +266,27 @@ func (ma *Analyzer) containsRUnlock(block *ast.BlockStmt, mutexName string) bool
 
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				if sel.Sel.Name == "RUnlock" && common.GetVarName(sel.X) == mutexName {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// containsRLock checks if a block contains an rlock call for a specific rwmutex
+func (ma *Analyzer) containsRLock(block *ast.BlockStmt, mutexName string) bool {
+	found := false
+	ast.Inspect(block, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if ma.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel.Name == "RLock" && common.GetVarName(sel.X) == mutexName {
 					found = true
 					return false
 				}

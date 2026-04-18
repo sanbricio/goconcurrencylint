@@ -61,7 +61,7 @@ func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *repor
 		}
 
 		if hasWaitGroups(primitives) {
-			analyzeWaitGroupUsage(fn, primitives, errorCollector, commentFilter)
+			analyzeWaitGroupUsage(fn, primitives, errorCollector, commentFilter, pass)
 		}
 	}
 }
@@ -243,7 +243,7 @@ func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollect
 }
 
 // analyzeWaitGroupUsage handles waitgroup analysis
-func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter) {
-	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, errorCollector, cf)
+func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
+	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, errorCollector, cf, pass)
 	analyzer.AnalyzeFunction(fn)
 }

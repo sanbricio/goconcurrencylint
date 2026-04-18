@@ -68,6 +68,22 @@ func BadDoubleUnlock() {
 
 // ---------- Defer Patterns ----------
 
+// Deferred anonymous function that performs its own Lock + defer Unlock.
+// The outer function releases the lock before registering the closure; the
+// closure acquires it again when it executes at function exit.
+func GoodDeferClosureWithOwnLockUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	items := []int{1, 2, 3}
+	mu.Unlock()
+
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = items
+	}()
+}
+
 // Lock and unlock using defer
 func GoodDeferUnlock() {
 	var mu sync.Mutex
@@ -103,6 +119,55 @@ func BadDeferUnlockAfterPanic() {
 }
 
 // ---------- Conditional Logic ----------
+
+// RLock + early-return-with-RUnlock in one branch + defer RUnlock in the other
+// Both paths execute exactly one RUnlock — not a double-unlock.
+func GoodRLockEarlyReturnDeferRUnlock(enablePersistence bool) error {
+	var mu sync.RWMutex
+	mu.RLock()
+	if !enablePersistence {
+		mu.RUnlock()
+		return nil
+	}
+	defer mu.RUnlock()
+	return nil
+}
+
+// Lock + early-return-with-Unlock in one branch + defer Unlock in the other
+func GoodLockEarlyReturnDeferUnlock(f func() error) error {
+	var mu sync.RWMutex
+	mu.Lock()
+	if f == nil {
+		mu.Unlock()
+		return nil
+	}
+	defer mu.Unlock()
+	return f()
+}
+
+// RLock with two mutually exclusive explicit RUnlock branches (no defer)
+func GoodRLockMutuallyExclusiveRUnlock(flush bool, p []byte) (int, error) {
+	var mu sync.RWMutex
+	mu.RLock()
+	if flush {
+		mu.RUnlock()
+		return len(p), nil
+	}
+	mu.RUnlock()
+	return 0, nil
+}
+
+// Lock + early-return-Unlock + later Unlock (mutually exclusive, no defer)
+func GoodLockMutuallyExclusiveUnlock(cur, size int) error {
+	var mu sync.Mutex
+	mu.Lock()
+	if cur < size {
+		mu.Unlock()
+		return nil
+	}
+	mu.Unlock()
+	return nil
+}
 
 // Conditional: both branches lock and unlock
 func GoodConditionalBothBranches() {
@@ -182,6 +247,60 @@ func GoodGoroutineLockUnlock() {
 		mu.Lock()
 		defer mu.Unlock()
 	}()
+}
+
+type borrowedLockManager struct {
+	mu sync.Mutex
+}
+
+func (m *borrowedLockManager) GoodBorrowedLockHelperCaller() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callWithBorrowedLock()
+}
+
+func (m *borrowedLockManager) callWithBorrowedLock() {
+	m.mu.Unlock()
+	m.mu.Lock()
+}
+
+type cleanupRegistrar struct{}
+
+func (cleanupRegistrar) Cleanup(fn func()) {
+	fn()
+}
+
+func GoodCleanupUnlock() {
+	var mu sync.Mutex
+	t := cleanupRegistrar{}
+	mu.Lock()
+	t.Cleanup(func() {
+		mu.Unlock()
+	})
+}
+
+type returnUnlocker struct {
+	mu sync.Mutex
+}
+
+func (r *returnUnlocker) GoodReturnUnlocker() func() {
+	r.mu.Lock()
+	return func() {
+		r.mu.Unlock()
+	}
+}
+
+type tryLocker struct {
+	mu sync.Mutex
+}
+
+func (t *tryLocker) GoodTryLockWithDeferredUnlock() {
+	if t.mu.TryLock() {
+		// lock acquired in the fast path
+	} else {
+		t.mu.Lock()
+	}
+	defer t.mu.Unlock()
 }
 
 // Goroutine deadlock (lock, but unlock never called)
@@ -535,6 +654,48 @@ func GoodForLoopDeferUnlock() {
 	}
 }
 
+// Lock at top of a block, then a switch where every reachable path
+// (each case) calls Unlock before returning or continuing — no path skips it.
+func GoodLockThenSwitchAllPathsUnlock(errVal error, idx, minIdx uint64) (uint64, error) {
+	var mu sync.Mutex
+	for {
+		mu.Lock()
+
+		switch {
+		case errVal != nil:
+			mu.Unlock()
+			return idx, errVal
+		case idx <= minIdx:
+			mu.Unlock()
+			continue
+		}
+
+		mu.Unlock()
+		return idx, nil
+	}
+}
+
+// Lock + defer Unlock with a temporary explicit Unlock/relock mid-function.
+// The defer still balances the final state on every exit path.
+func GoodDeferUnlockWithTemporaryRelease(buf []byte, bufLen, bufSize int) {
+	var mu sync.Mutex
+	mu.Lock()
+	defer mu.Unlock()
+
+COPY:
+	remain := bufSize - bufLen
+	if remain > len(buf) {
+		bufLen += len(buf)
+	} else {
+		bufLen += remain
+		mu.Unlock()
+		// expensive work outside the critical section
+		mu.Lock()
+		goto COPY
+	}
+	_ = bufLen
+}
+
 // ---------- Switch All Cases Edge Cases ----------
 
 // Good: switch where all cases + default properly lock/unlock
@@ -575,6 +736,22 @@ func GoodRWForLoopRLock() {
 	for i := 0; i < 10; i++ {
 		rwmu.RLock()
 		rwmu.RUnlock()
+	}
+}
+
+// Good: a labeled statement before RLock should still be analyzed.
+// Regression for real-world code like consul/agent/cache getWithIndex.
+func GoodLabeledRLockRUnlock(retry bool) {
+	var mu sync.RWMutex
+
+RETRY:
+	mu.RLock()
+	_, _ = retry, 1
+	mu.RUnlock()
+
+	if retry {
+		retry = false
+		goto RETRY
 	}
 }
 

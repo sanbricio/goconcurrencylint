@@ -66,11 +66,9 @@ func (wga *Analyzer) containsDoneCall(stmt ast.Stmt, wgName string) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
-					found = true
-					return false
-				}
+			if wga.callInvokesDone(call, wgName) {
+				found = true
+				return false
 			}
 		}
 		return true
