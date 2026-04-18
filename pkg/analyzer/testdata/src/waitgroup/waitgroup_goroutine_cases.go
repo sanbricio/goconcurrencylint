@@ -204,3 +204,44 @@ func GoodAddDoneWithPanicRecovery() {
 	}()
 	wg.Wait()
 }
+
+func GoodIntegerRangeFanout() {
+	var wg sync.WaitGroup
+	wg.Add(2000)
+
+	start := make(chan struct{})
+	for range 1000 {
+		go func() {
+			<-start
+			wg.Done()
+		}()
+	}
+
+	for i := range 1000 {
+		go func(worker int) {
+			<-start
+			_ = worker
+			wg.Done()
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+}
+
+func GoodIntegerRangeWorkersWithDeferredDone() {
+	var wg sync.WaitGroup
+	wg.Add(50)
+
+	start := make(chan struct{})
+	for worker := range 50 {
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			_ = worker
+		}(worker)
+	}
+
+	close(start)
+	wg.Wait()
+}

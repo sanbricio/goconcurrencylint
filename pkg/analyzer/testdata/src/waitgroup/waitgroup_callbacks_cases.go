@@ -78,6 +78,23 @@ func GoodWaitGroupDoneInCallbackVariable() {
 	runNamedCallbacks(test, test, test)
 }
 
+func GoodWaitGroupDoneInErrorCallbacks() {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	runWithErrorCallback(func(err error) {
+		defer wg.Done()
+		_ = err
+	})
+
+	runWithErrorCallback(func(err error) {
+		defer wg.Done()
+		_ = err
+	})
+
+	wg.Wait()
+}
+
 type syncHooks struct {
 	run func()
 }

@@ -1,6 +1,9 @@
 package waitgroup
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 // ========== HELPER FUNCTIONS ==========
 
@@ -23,6 +26,10 @@ func processWork(wg sync.WaitGroup) {
 func runWithCallback(done func()) {
 	defer done()
 	// run with callback
+}
+
+func runWithErrorCallback(callback func(error)) {
+	callback(nil)
 }
 
 func runWithOnceCallback(done func()) {
@@ -76,5 +83,36 @@ func (o *callbackOwner) markDone() {
 }
 
 func doSomething() any {
+	return nil
+}
+
+type readerLifecycleOwner struct {
+	pendingReaders sync.WaitGroup
+	closing        bool
+}
+
+var errReaderClosed = errors.New("closing")
+
+func (o *readerLifecycleOwner) startRead() error {
+	if o.closing {
+		return errReaderClosed
+	}
+	o.pendingReaders.Add(1)
+	return nil
+}
+
+func (o *readerLifecycleOwner) OpenReader() (readerToken, error) {
+	if err := o.startRead(); err != nil {
+		return readerToken{}, err
+	}
+	return readerToken{owner: o}, nil
+}
+
+type readerToken struct {
+	owner *readerLifecycleOwner
+}
+
+func (t readerToken) Close() error {
+	t.owner.pendingReaders.Done()
 	return nil
 }
