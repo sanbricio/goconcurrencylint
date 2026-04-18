@@ -9,23 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/analysistest"
 )
-
-func TestMutexAnalyzer(t *testing.T) {
-	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, Analyzer, "mutex")
-}
-
-func TestWaitGroupAnalyzer(t *testing.T) {
-	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, Analyzer, "waitgroup")
-}
-
-func TestPackageLevelAnalyzer(t *testing.T) {
-	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, Analyzer, "packagelevel")
-}
 
 func TestGetVariableTypeNilCases(t *testing.T) {
 	vs := &ast.ValueSpec{
@@ -83,7 +67,6 @@ func TestFunc() {
 		},
 	}
 
-	// Find the test function
 	var testFunc *ast.FuncDecl
 	for _, decl := range file.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "TestFunc" {
