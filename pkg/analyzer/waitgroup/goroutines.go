@@ -8,33 +8,6 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
 
-// isDeferDoneInGoroutine checks if hasDeferDone flag was set due to defer in goroutines
-func (wga *Analyzer) isDeferDoneInGoroutine(wgName string) bool {
-	foundInGoroutine := false
-	foundOutsideGoroutine := false
-
-	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
-		if deferStmt, ok := n.(*ast.DeferStmt); ok {
-			if wga.commentFilter.ShouldSkipCall(deferStmt.Call) {
-				return true
-			}
-
-			if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
-				if call.Sel.Name == "Done" && common.GetVarName(call.X) == wgName {
-					if wga.isNodeInGoroutine(deferStmt) {
-						foundInGoroutine = true
-					} else {
-						foundOutsideGoroutine = true
-					}
-				}
-			}
-		}
-		return true
-	})
-
-	return foundInGoroutine && !foundOutsideGoroutine
-}
-
 // isNodeInGoroutine checks if a node is inside a goroutine
 func (wga *Analyzer) isNodeInGoroutine(targetNode ast.Node) bool {
 	inGoroutine := false
