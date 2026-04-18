@@ -30,13 +30,13 @@ type addCall struct {
 
 // Stats tracks the state of a WaitGroup within a function
 type Stats struct {
-	addCalls     []addCall
-	doneCalls    []token.Pos
-	goCalls      []token.Pos
-	waitCalls    []token.Pos
-	doneCount    int
-	hasDeferDone bool
-	totalAdd     int
+	addCalls       []addCall
+	doneCalls      []token.Pos
+	deferDoneCalls []token.Pos
+	goCalls        []token.Pos
+	waitCalls      []token.Pos
+	doneCount      int
+	totalAdd       int
 }
 
 // NewAnalyzer creates a new WaitGroup analyzer
@@ -83,10 +83,11 @@ func (wga *Analyzer) initializeStats() map[string]*Stats {
 	stats := make(map[string]*Stats)
 	for wgName := range wga.waitGroupNames {
 		stats[wgName] = &Stats{
-			addCalls:  []addCall{},
-			doneCalls: []token.Pos{},
-			goCalls:   []token.Pos{},
-			waitCalls: []token.Pos{},
+			addCalls:       []addCall{},
+			doneCalls:      []token.Pos{},
+			deferDoneCalls: []token.Pos{},
+			goCalls:        []token.Pos{},
+			waitCalls:      []token.Pos{},
 		}
 	}
 	return stats

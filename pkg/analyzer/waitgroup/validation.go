@@ -2,6 +2,7 @@ package waitgroup
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"sort"
 	"strings"
@@ -29,9 +30,10 @@ func (wga *Analyzer) validateBalance(wgName string, stats *Stats) {
 
 	totalDone := mainFlowDoneCount
 
-	// Add defer Done count if present and not in goroutine
-	if stats.hasDeferDone && !wga.isDeferDoneInGoroutine(wgName) {
-		totalDone++
+	for _, deferDonePos := range stats.deferDoneCalls {
+		if !wga.isInGoroutine(deferDonePos) {
+			totalDone++
+		}
 	}
 
 	// Add guaranteed Done calls from goroutines (but don't double count)
@@ -59,8 +61,11 @@ func (wga *Analyzer) checkWaitGroupBalance(stats map[string]*Stats) {
 		if wga.isBorrowedWaitGroupField(wgName, st) {
 			continue
 		}
+		if wga.isLikelyExternalLifecycleWaitGroup(wgName, st) {
+			continue
+		}
 		if wga.isWaitGroupPassedToOtherFunctions(wgName) {
-			if st.doneCount == 0 && !st.hasDeferDone && len(st.addCalls) > 0 {
+			if st.doneCount == 0 && len(st.deferDoneCalls) == 0 && len(st.addCalls) > 0 {
 				continue
 			}
 		}
@@ -69,7 +74,31 @@ func (wga *Analyzer) checkWaitGroupBalance(stats map[string]*Stats) {
 }
 
 func (wga *Analyzer) isBorrowedWaitGroupField(wgName string, st *Stats) bool {
-	return strings.Contains(wgName, ".") && st.totalAdd == 0 && len(st.waitCalls) == 0 && (st.doneCount > 0 || st.hasDeferDone)
+	return strings.Contains(wgName, ".") && st.totalAdd == 0 && len(st.waitCalls) == 0 && (st.doneCount > 0 || len(st.deferDoneCalls) > 0)
+}
+
+func (wga *Analyzer) isLikelyExternalLifecycleWaitGroup(wgName string, st *Stats) bool {
+	if !strings.Contains(wgName, ".") {
+		return false
+	}
+	if st.totalAdd == 0 || st.doneCount > 0 || len(st.deferDoneCalls) > 0 || len(st.waitCalls) > 0 || len(st.goCalls) > 0 {
+		return false
+	}
+
+	relatedGoroutine := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		if wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
+			relatedGoroutine = true
+			return false
+		}
+		return true
+	})
+
+	return !relatedGoroutine
 }
 
 func (wga *Analyzer) countGuaranteedDoneInStatements(stmts []ast.Stmt, wgName string, multiplier int) int {
@@ -125,7 +154,8 @@ func (wga *Analyzer) countGuaranteedDoneInStatements(stmts []ast.Stmt, wgName st
 			count += wga.countGuaranteedDoneInStatements(s.Body.List, wgName, factor)
 
 		case *ast.RangeStmt:
-			count += wga.countGuaranteedDoneInStatements(s.Body.List, wgName, multiplier)
+			factor := multiplier * wga.estimateRangeIterations(s)
+			count += wga.countGuaranteedDoneInStatements(s.Body.List, wgName, factor)
 
 		case *ast.SwitchStmt:
 			for _, stmt := range s.Body.List {
@@ -228,6 +258,20 @@ func (wga *Analyzer) estimateForIterations(forStmt *ast.ForStmt) int {
 	default:
 		return 1
 	}
+}
+
+func (wga *Analyzer) estimateRangeIterations(rangeStmt *ast.RangeStmt) int {
+	if rangeStmt == nil || rangeStmt.X == nil {
+		return 1
+	}
+
+	if tv, ok := wga.typesInfo.Types[rangeStmt.X]; ok && tv.Value != nil {
+		if value, ok := constant.Int64Val(tv.Value); ok && value > 0 {
+			return int(value)
+		}
+	}
+
+	return 1
 }
 
 func parseIntLiteral(lit *ast.BasicLit) int {

@@ -7,7 +7,7 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
 
-// findDeferDoneCalls identifies defer Done calls to avoid counting them as regular Done calls
+// findDeferDoneCalls identifies defer Done calls to avoid counting them as regular Done calls.
 func (wga *Analyzer) findDeferDoneCalls(stats map[string]*Stats) {
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		deferStmt, ok := n.(*ast.DeferStmt)
@@ -23,7 +23,7 @@ func (wga *Analyzer) findDeferDoneCalls(stats map[string]*Stats) {
 			if call.Sel.Name == "Done" {
 				wgName := common.GetVarName(call.X)
 				if wga.waitGroupNames[wgName] {
-					stats[wgName].hasDeferDone = true
+					stats[wgName].deferDoneCalls = append(stats[wgName].deferDoneCalls, deferStmt.Call.Pos())
 				}
 			}
 			return true
@@ -37,7 +37,7 @@ func (wga *Analyzer) findDeferDoneCalls(stats map[string]*Stats) {
 	})
 }
 
-// findDoneInFunctionLiteral looks for Done calls within function literals
+// findDoneInFunctionLiteral looks for Done calls within function literals.
 func (wga *Analyzer) findDoneInFunctionLiteral(body *ast.BlockStmt, stats map[string]*Stats) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
@@ -48,7 +48,7 @@ func (wga *Analyzer) findDoneInFunctionLiteral(body *ast.BlockStmt, stats map[st
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" {
 				wgName := common.GetVarName(sel.X)
 				if wga.waitGroupNames[wgName] {
-					stats[wgName].hasDeferDone = true
+					stats[wgName].deferDoneCalls = append(stats[wgName].deferDoneCalls, call.Pos())
 				}
 			}
 		}
@@ -67,6 +67,8 @@ func (wga *Analyzer) traverseWithContext(n ast.Node, forStack []*ast.ForStmt, st
 	switch node := n.(type) {
 	case *ast.ForStmt:
 		wga.handleForStatement(node, forStack, stats, alreadyReported)
+	case *ast.RangeStmt:
+		wga.handleRangeStatement(node, forStack, stats, alreadyReported)
 	case *ast.GoStmt:
 		wga.handleGoStatement(node, forStack, stats, alreadyReported)
 	case *ast.BlockStmt:
@@ -78,7 +80,7 @@ func (wga *Analyzer) traverseWithContext(n ast.Node, forStack []*ast.ForStmt, st
 	}
 }
 
-// handleForStatement processes for loop statements
+// handleForStatement processes for loop statements.
 func (wga *Analyzer) handleForStatement(stmt *ast.ForStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
@@ -89,7 +91,18 @@ func (wga *Analyzer) handleForStatement(stmt *ast.ForStmt, forStack []*ast.ForSt
 	}
 }
 
-// handleGoStatement processes goroutine statements
+// handleRangeStatement processes range loop statements.
+func (wga *Analyzer) handleRangeStatement(stmt *ast.RangeStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+
+	for _, nestedStmt := range stmt.Body.List {
+		wga.traverseWithReportMap(nestedStmt, forStack, stats, alreadyReported)
+	}
+}
+
+// handleGoStatement processes goroutine statements.
 func (wga *Analyzer) handleGoStatement(stmt *ast.GoStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
@@ -102,14 +115,14 @@ func (wga *Analyzer) handleGoStatement(stmt *ast.GoStmt, forStack []*ast.ForStmt
 	}
 }
 
-// handleBlockStatement processes block statements
+// handleBlockStatement processes block statements.
 func (wga *Analyzer) handleBlockStatement(stmt *ast.BlockStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	for _, nestedStmt := range stmt.List {
 		wga.traverseWithContext(nestedStmt, forStack, stats, alreadyReported)
 	}
 }
 
-// handleIfStatement processes if statements
+// handleIfStatement processes if statements.
 func (wga *Analyzer) handleIfStatement(stmt *ast.IfStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
@@ -121,7 +134,7 @@ func (wga *Analyzer) handleIfStatement(stmt *ast.IfStmt, forStack []*ast.ForStmt
 	}
 }
 
-// handleExpressionStatement processes expression statements (Add, Done, Wait calls)
+// handleExpressionStatement processes expression statements (Add, Done, Wait calls).
 func (wga *Analyzer) handleExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
@@ -159,6 +172,8 @@ func (wga *Analyzer) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, 
 	switch node := n.(type) {
 	case *ast.ForStmt:
 		wga.handleForStatement(node, forStack, stats, alreadyReported)
+	case *ast.RangeStmt:
+		wga.handleRangeStatement(node, forStack, stats, alreadyReported)
 	case *ast.BlockStmt:
 		wga.handleBlockStatement(node, forStack, stats, alreadyReported)
 	case *ast.IfStmt:

@@ -351,6 +351,18 @@ func (wp *WorkerPool) BadMethodWaitGroup() {
 	wp.wg.Wait()
 }
 
+// Good: a WaitGroup field whose lifecycle is balanced through returned closers.
+func GoodWaitGroupLifecycleManagedByCloser() {
+	var owner readerLifecycleOwner
+
+	reader, err := owner.OpenReader()
+	if err != nil {
+		return
+	}
+
+	_ = reader.Close()
+}
+
 // ========== COMMENT FILTERING TESTS ==========
 
 // Test that commented code is properly ignored by the linter.
