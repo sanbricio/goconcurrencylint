@@ -16,13 +16,23 @@ type ErrorReport struct {
 // ErrorCollector collects all errors and allows sorting them by position
 type ErrorCollector struct {
 	errors []ErrorReport
+	seen   map[ErrorReport]struct{}
 }
 
 func (ec *ErrorCollector) AddError(pos token.Pos, message string) {
-	ec.errors = append(ec.errors, ErrorReport{
+	report := ErrorReport{
 		Pos:     pos,
 		Message: message,
-	})
+	}
+
+	if ec.seen == nil {
+		ec.seen = make(map[ErrorReport]struct{})
+	}
+	if _, exists := ec.seen[report]; exists {
+		return
+	}
+	ec.seen[report] = struct{}{}
+	ec.errors = append(ec.errors, report)
 }
 
 func (ec *ErrorCollector) ReportAll(pass *analysis.Pass) {

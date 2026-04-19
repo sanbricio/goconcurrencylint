@@ -1,6 +1,10 @@
 package mutex
 
-import "sync"
+import (
+	"errors"
+	"runtime"
+	"sync"
+)
 
 // ========== MIXED SCENARIOS ==========
 
@@ -240,6 +244,32 @@ RETRY:
 	}
 }
 
+// Good: repeated platform guards should behave like straight-line code on the
+// active target, not like unrelated conditional branches.
+func GoodPlatformGuardedLockingFlow(pending bool, err error) error {
+	var mu sync.Mutex
+
+	if runtime.GOOS == "linux" {
+		mu.Lock()
+		if pending {
+			mu.Unlock()
+			return nil
+		}
+	}
+
+	if err != nil {
+		if runtime.GOOS == "linux" {
+			mu.Unlock()
+		}
+		return err
+	}
+
+	if runtime.GOOS == "linux" {
+		mu.Unlock()
+	}
+	return nil
+}
+
 // ========== FUNCTION PARAMETER TESTS ==========
 
 // Good: function receives mutex parameter, properly locks and unlocks
@@ -323,6 +353,47 @@ type NamedWrapperMutex struct {
 }
 
 type LoopExitLocker struct {
+	mu sync.Mutex
+}
+
+type HelperUnlockedState struct {
+	mu sync.Mutex
+}
+
+type ResolverLikeClient struct {
+	mu sync.RWMutex
+}
+
+type NestedResolverWrapper struct {
+	cc *ResolverLikeClient
+}
+
+type BranchingUnlockClient struct {
+	mu    sync.RWMutex
+	conns map[int]struct{}
+}
+
+type RetryLoopStream struct {
+	mu        sync.Mutex
+	committed bool
+}
+
+type RetryContinueStream struct {
+	mu        sync.Mutex
+	committed bool
+	attempt   *int
+}
+
+type RetryLikeAttempt struct{}
+
+type RetryLikeStream struct {
+	mu          sync.Mutex
+	committed   bool
+	replayReady bool
+	attempt     *RetryLikeAttempt
+}
+
+type MixedCallerManagedRelease struct {
 	mu sync.Mutex
 }
 
@@ -433,6 +504,182 @@ func (l *LoopExitLocker) GoodLoopBreakWithUnlockAfterLoop(stop bool) {
 		stop = true
 	}
 	l.mu.Unlock()
+}
+
+func (h *HelperUnlockedState) releaseHelper() {
+	h.mu.Unlock()
+}
+
+func (h *HelperUnlockedState) GoodHelperReleasesCallerLock(async bool) {
+	h.mu.Lock()
+	if async {
+		go h.releaseHelper()
+		return
+	}
+	h.releaseHelper()
+}
+
+func (cc *ResolverLikeClient) updateAndUnlock() {
+	cc.mu.Unlock()
+}
+
+func (w *NestedResolverWrapper) GoodNestedHelperUnlock() {
+	w.cc.mu.Lock()
+	w.cc.updateAndUnlock()
+}
+
+func (cc *ResolverLikeClient) updateAndUnlockWithError(err error) error {
+	cc.mu.Unlock()
+	return err
+}
+
+func (w *NestedResolverWrapper) GoodNestedReturnHelperUnlock(err error) error {
+	w.cc.mu.Lock()
+	return w.cc.updateAndUnlockWithError(err)
+}
+
+func (cc *BranchingUnlockClient) updateStateAndUnlock(err error) error {
+	if cc.conns == nil {
+		cc.mu.Unlock()
+		return nil
+	}
+	if err != nil {
+		cc.mu.Unlock()
+		return err
+	}
+	cc.mu.Unlock()
+	return nil
+}
+
+func (cc *BranchingUnlockClient) GoodBranchingHelperUnlock(err error) error {
+	cc.mu.Lock()
+	if err != nil {
+		cc.updateStateAndUnlock(err)
+		return errors.New("wrapped")
+	}
+	cc.mu.Unlock()
+	return nil
+}
+
+func (cc *BranchingUnlockClient) GoodExitIdleModeLike(startErr error) error {
+	cc.mu.Lock()
+	if cc.conns == nil {
+		cc.mu.Unlock()
+		return errors.New("closed")
+	}
+	cc.mu.Unlock()
+
+	if startErr != nil {
+		cc.mu.Lock()
+		cc.updateStateAndUnlock(startErr)
+		return errors.New("failed to start")
+	}
+	return nil
+}
+
+func (s *RetryLoopStream) GoodRetryLoopLockCarry() error {
+	s.mu.Lock()
+	for {
+		if s.committed {
+			s.mu.Unlock()
+			return nil
+		}
+		s.mu.Unlock()
+		s.mu.Lock()
+		if s.committed {
+			s.mu.Unlock()
+			return nil
+		}
+	}
+}
+
+func (s *RetryContinueStream) retryLocked() error {
+	return nil
+}
+
+func (s *RetryContinueStream) GoodRetryLoopWithContinue(switched, fail bool) error {
+	s.mu.Lock()
+	for {
+		if s.committed {
+			s.mu.Unlock()
+			return nil
+		}
+		s.mu.Unlock()
+		a := s.attempt
+		_ = a
+		s.mu.Lock()
+		if switched {
+			continue
+		}
+		if fail {
+			s.mu.Unlock()
+			return errors.New("failed")
+		}
+		if err := s.retryLocked(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+}
+
+func (s *RetryLikeStream) newAttemptLocked() (*RetryLikeAttempt, error) {
+	return &RetryLikeAttempt{}, nil
+}
+
+func (s *RetryLikeStream) retryLocked(_ *RetryLikeAttempt, _ error) error {
+	return nil
+}
+
+func (s *RetryLikeStream) commitAttemptLocked() {}
+
+func (s *RetryLikeStream) GoodWithRetryLike(switched bool, opErr error, onSuccess func()) error {
+	s.mu.Lock()
+	for {
+		if s.committed {
+			s.mu.Unlock()
+			return opErr
+		}
+		if !s.replayReady {
+			var err error
+			if s.attempt, err = s.newAttemptLocked(); err != nil {
+				s.mu.Unlock()
+				return err
+			}
+		}
+		a := s.attempt
+		s.mu.Unlock()
+		err := opErr
+		s.mu.Lock()
+		if a != s.attempt {
+			continue
+		}
+		if err == nil {
+			if onSuccess != nil {
+				onSuccess()
+			} else {
+				s.commitAttemptLocked()
+			}
+			s.mu.Unlock()
+			return nil
+		}
+		if err := s.retryLocked(a, err); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+}
+
+func (m *MixedCallerManagedRelease) releaseHelper() {
+	m.mu.Unlock() // want "mutex 'm.mu' is unlocked but not locked"
+}
+
+func (m *MixedCallerManagedRelease) GoodCallerManagedRelease() {
+	m.mu.Lock()
+	m.releaseHelper()
+}
+
+func (m *MixedCallerManagedRelease) BadCallerManagedRelease() {
+	m.releaseHelper()
 }
 
 // Good: a creator can return a token that owns the eventual unlock in Close.

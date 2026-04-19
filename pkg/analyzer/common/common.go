@@ -2,6 +2,7 @@ package common
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"strconv"
@@ -69,4 +70,19 @@ func GetAddValue(call *ast.CallExpr) int {
 	}
 	// If the argument is not a literal integer, default to 1.
 	return 1
+}
+
+// ConstantBoolValue returns the constant boolean value of expr when one is
+// available in the type information.
+func ConstantBoolValue(expr ast.Expr, info *types.Info) (bool, bool) {
+	if expr == nil || info == nil {
+		return false, false
+	}
+
+	tv, ok := info.Types[expr]
+	if !ok || tv.Value == nil || tv.Value.Kind() != constant.Bool {
+		return false, false
+	}
+
+	return constant.BoolVal(tv.Value), true
 }

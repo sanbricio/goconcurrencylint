@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -19,6 +20,8 @@ type Analyzer struct {
 	deferErrors     *deferErrorCollector
 	commentFilter   *commnetfilter.CommentFilter
 	function        *ast.FuncDecl
+	typesInfo       *types.Info
+	rawBodyEffects  bool
 	receiverMethods map[string]map[string]*ast.FuncDecl
 	functions       []*ast.FuncDecl
 }
@@ -40,12 +43,13 @@ type deferErrorCollector struct {
 }
 
 // NewAnalyzer creates a new mutex analyzer
-func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, files []*ast.File) *Analyzer {
+func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
 	return &Analyzer{
 		mutexNames:      mutexNames,
 		rwMutexNames:    rwMutexNames,
 		errorCollector:  errorCollector,
 		commentFilter:   cf,
+		typesInfo:       typesInfo,
 		receiverMethods: buildReceiverMethodMap(files),
 		functions:       collectFunctionDecls(files),
 		deferErrors: &deferErrorCollector{
@@ -139,7 +143,28 @@ func baseTypeName(expr ast.Expr) string {
 	}
 }
 
+func baseTypeNameFromType(typ types.Type) string {
+	if typ == nil {
+		return ""
+	}
+
+	switch t := types.Unalias(typ).(type) {
+	case *types.Pointer:
+		return baseTypeNameFromType(t.Elem())
+	case *types.Named:
+		if obj := t.Obj(); obj != nil {
+			return obj.Name()
+		}
+	}
+
+	return ""
+}
+
 func (ma *Analyzer) isBorrowedWrapperCall(varName, methodName string) bool {
+	if ma.rawBodyEffects {
+		return false
+	}
+
 	if ma.function == nil || ma.function.Name == nil {
 		return false
 	}
@@ -315,6 +340,42 @@ func containsMethod(methodNames []string, methodName string) bool {
 		}
 	}
 	return false
+}
+
+func relativeMutexPath(varName, prefix string) (string, bool) {
+	relative, ok := strings.CutPrefix(varName, prefix+".")
+	if !ok || relative == "" {
+		return "", false
+	}
+	return relative, true
+}
+
+func functionBodyContainsFieldCallBefore(body *ast.BlockStmt, varName string, methodNames []string, before token.Pos) bool {
+	if body == nil {
+		return false
+	}
+
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || call.Pos() >= before {
+			return true
+		}
+
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+
+		if containsMethod(methodNames, sel.Sel.Name) && common.GetVarName(sel.X) == varName {
+			found = true
+			return false
+		}
+
+		return true
+	})
+
+	return found
 }
 
 func splitBaseAndSuffix(varName string) (string, string, bool) {
@@ -525,6 +586,285 @@ func (ma *Analyzer) functionIsLifecycleReleaseFor(mutexName string, methodNames 
 	}
 
 	return false
+}
+
+func (ma *Analyzer) callTargetsCurrentMethod(call *ast.CallExpr, receiverType string) (string, bool) {
+	if ma.function == nil || ma.function.Name == nil {
+		return "", false
+	}
+
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != ma.function.Name.Name {
+		return "", false
+	}
+
+	if baseTypeNameFromType(ma.typesInfo.TypeOf(sel.X)) != receiverType {
+		return "", false
+	}
+
+	baseVar := common.GetVarName(sel.X)
+	if baseVar == "?" {
+		return "", false
+	}
+
+	return baseVar, true
+}
+
+func (ma *Analyzer) explicitTransferCallPositions(body *ast.BlockStmt) map[token.Pos]struct{} {
+	positions := make(map[token.Pos]struct{})
+	if body == nil {
+		return positions
+	}
+
+	var visitStmt func(ast.Stmt)
+	var visitStmtList func([]ast.Stmt)
+	var visitElse func(ast.Stmt)
+
+	recordCall := func(call *ast.CallExpr) {
+		if call != nil {
+			positions[call.Pos()] = struct{}{}
+		}
+	}
+
+	visitStmtList = func(stmts []ast.Stmt) {
+		for _, stmt := range stmts {
+			visitStmt(stmt)
+		}
+	}
+
+	visitElse = func(stmt ast.Stmt) {
+		switch e := stmt.(type) {
+		case *ast.BlockStmt:
+			visitStmtList(e.List)
+		case *ast.IfStmt:
+			visitStmt(e)
+		}
+	}
+
+	visitStmt = func(stmt ast.Stmt) {
+		switch s := stmt.(type) {
+		case *ast.BlockStmt:
+			visitStmtList(s.List)
+		case *ast.LabeledStmt:
+			visitStmt(s.Stmt)
+		case *ast.ExprStmt:
+			if call, ok := s.X.(*ast.CallExpr); ok {
+				recordCall(call)
+			}
+		case *ast.ReturnStmt:
+			for _, result := range s.Results {
+				if call, ok := result.(*ast.CallExpr); ok {
+					recordCall(call)
+				}
+			}
+		case *ast.GoStmt:
+			recordCall(s.Call)
+		case *ast.IfStmt:
+			visitStmtList(s.Body.List)
+			if s.Else != nil {
+				visitElse(s.Else)
+			}
+		case *ast.ForStmt:
+			visitStmtList(s.Body.List)
+		case *ast.RangeStmt:
+			visitStmtList(s.Body.List)
+		case *ast.SwitchStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok {
+					visitStmtList(cc.Body)
+				}
+			}
+		case *ast.TypeSwitchStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok {
+					visitStmtList(cc.Body)
+				}
+			}
+		case *ast.SelectStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CommClause); ok {
+					visitStmtList(cc.Body)
+				}
+			}
+		}
+	}
+
+	visitStmtList(body.List)
+	return positions
+}
+
+func (ma *Analyzer) functionIsCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
+	if ma.function == nil || ma.function.Name == nil {
+		return false
+	}
+
+	currentReceiver := receiverName(ma.function)
+	currentType := receiverTypeName(ma.function)
+	if currentReceiver == "" || currentType == "" {
+		return false
+	}
+
+	relativePath, ok := relativeMutexPath(mutexName, currentReceiver)
+	if !ok {
+		return false
+	}
+
+	totalCallSites := 0
+
+	for _, fn := range ma.functions {
+		if fn == nil || fn.Body == nil || fn == ma.function {
+			continue
+		}
+
+		explicitTransferPositions := ma.explicitTransferCallPositions(fn.Body)
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+
+			baseVar, ok := ma.callTargetsCurrentMethod(call, currentType)
+			if !ok {
+				return true
+			}
+
+			totalCallSites++
+			if _, ok := explicitTransferPositions[call.Pos()]; !ok {
+				totalCallSites = -1
+				return false
+			}
+			if !functionBodyContainsFieldCallBefore(fn.Body, baseVar+"."+relativePath, methodNames, call.Pos()) {
+				totalCallSites = -1
+				return false
+			}
+			return true
+		})
+		if totalCallSites < 0 {
+			return false
+		}
+	}
+
+	return totalCallSites > 0
+}
+
+func cloneStats(stats *Stats) *Stats {
+	if stats == nil {
+		return &Stats{}
+	}
+
+	return &Stats{
+		lock:               stats.lock,
+		rlock:              stats.rlock,
+		borrowedLock:       stats.borrowedLock,
+		borrowedRLock:      stats.borrowedRLock,
+		deferUnlock:        stats.deferUnlock,
+		deferRUnlock:       stats.deferRUnlock,
+		lockPos:            append([]token.Pos{}, stats.lockPos...),
+		rlockPos:           append([]token.Pos{}, stats.rlockPos...),
+		borrowedUnlockPos:  append([]token.Pos{}, stats.borrowedUnlockPos...),
+		borrowedRUnlockPos: append([]token.Pos{}, stats.borrowedRUnlockPos...),
+	}
+}
+
+func (ma *Analyzer) clearStats(stats map[string]*Stats) {
+	for name := range stats {
+		stats[name] = &Stats{}
+	}
+}
+
+func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
+	if fn == nil || fn.Body == nil {
+		return nil
+	}
+
+	mutexNames := map[string]bool{}
+	rwMutexNames := map[string]bool{}
+	if isRWMutex {
+		rwMutexNames[varName] = true
+	} else {
+		mutexNames[varName] = true
+	}
+
+	simulated := &Analyzer{
+		mutexNames:      mutexNames,
+		rwMutexNames:    rwMutexNames,
+		errorCollector:  &report.ErrorCollector{},
+		commentFilter:   ma.commentFilter,
+		function:        fn,
+		typesInfo:       ma.typesInfo,
+		rawBodyEffects:  true,
+		receiverMethods: ma.receiverMethods,
+		functions:       ma.functions,
+		deferErrors: &deferErrorCollector{
+			badDeferUnlock:  make(map[string]bool),
+			badDeferRUnlock: make(map[string]bool),
+		},
+	}
+
+	start := map[string]*Stats{varName: cloneStats(initial)}
+	final := simulated.analyzeBlock(fn.Body, start)
+	return cloneStats(final[varName])
+}
+
+func (ma *Analyzer) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+
+	baseVar := common.GetVarName(sel.X)
+	if baseVar == "?" {
+		return false
+	}
+
+	receiverType := baseTypeNameFromType(ma.typesInfo.TypeOf(sel.X))
+	if receiverType == "" {
+		return false
+	}
+
+	callee := ma.receiverMethods[receiverType][sel.Sel.Name]
+	if callee == nil || callee.Body == nil || callee == ma.function {
+		return false
+	}
+
+	calleeReceiver := receiverName(callee)
+	if calleeReceiver == "" {
+		return false
+	}
+
+	changed := false
+
+	for mutexName := range ma.mutexNames {
+		relativePath, ok := relativeMutexPath(mutexName, baseVar)
+		if !ok {
+			continue
+		}
+
+		simulated := ma.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName])
+		if simulated == nil {
+			continue
+		}
+
+		stats[mutexName] = simulated
+		changed = true
+	}
+
+	for rwMutexName := range ma.rwMutexNames {
+		relativePath, ok := relativeMutexPath(rwMutexName, baseVar)
+		if !ok {
+			continue
+		}
+
+		simulated := ma.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName])
+		if simulated == nil {
+			continue
+		}
+
+		stats[rwMutexName] = simulated
+		changed = true
+	}
+
+	return changed
 }
 
 // initializeStats initializes the stats map for all known mutexes
