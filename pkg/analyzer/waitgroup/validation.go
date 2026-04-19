@@ -65,7 +65,7 @@ func (wga *Analyzer) checkWaitGroupBalance(stats map[string]*Stats) {
 			continue
 		}
 		if wga.isWaitGroupPassedToOtherFunctions(wgName) {
-			if st.doneCount == 0 && len(st.deferDoneCalls) == 0 && len(st.addCalls) > 0 {
+			if len(st.addCalls) > 0 {
 				continue
 			}
 		}
@@ -305,31 +305,32 @@ func (wga *Analyzer) reportUnmatchedAdds(wgName string, stats *Stats, totalExpec
 }
 
 // reportExcessDones reports Done calls that don't have corresponding Add calls
-func (wga *Analyzer) reportExcessDones(wgName string, stats *Stats, totalExpectedDone int, mainFlowDoneCount int) {
+func (wga *Analyzer) reportExcessDones(wgName string, stats *Stats, totalExpectedDone int, _ int) {
 	if totalExpectedDone <= stats.totalAdd {
 		return
 	}
 
 	// Only report excess for main flow Done calls (not goroutine Done calls)
-	if mainFlowDoneCount > stats.totalAdd {
-		// Sort done calls to report the last ones (most likely to be excess)
-		var mainFlowDoneCalls []token.Pos
-		for _, donePos := range stats.doneCalls {
-			if !wga.isInGoroutine(donePos) {
-				mainFlowDoneCalls = append(mainFlowDoneCalls, donePos)
-			}
+	var mainFlowDoneCalls []token.Pos
+	for _, donePos := range stats.doneCalls {
+		if !wga.isInGoroutine(donePos) && !wga.isInBranchingControlFlow(donePos) {
+			mainFlowDoneCalls = append(mainFlowDoneCalls, donePos)
 		}
+	}
 
-		sort.Slice(mainFlowDoneCalls, func(i, j int) bool {
-			return mainFlowDoneCalls[i] < mainFlowDoneCalls[j]
-		})
+	if len(mainFlowDoneCalls) <= stats.totalAdd {
+		return
+	}
 
-		excessCount := mainFlowDoneCount - stats.totalAdd
-		startIndex := len(mainFlowDoneCalls) - excessCount
+	sort.Slice(mainFlowDoneCalls, func(i, j int) bool {
+		return mainFlowDoneCalls[i] < mainFlowDoneCalls[j]
+	})
 
-		for i := startIndex; i < len(mainFlowDoneCalls) && i >= 0; i++ {
-			wga.errorCollector.AddError(mainFlowDoneCalls[i], "waitgroup '"+wgName+"' has Done without corresponding Add")
-		}
+	excessCount := len(mainFlowDoneCalls) - stats.totalAdd
+	startIndex := len(mainFlowDoneCalls) - excessCount
+
+	for i := startIndex; i < len(mainFlowDoneCalls) && i >= 0; i++ {
+		wga.errorCollector.AddError(mainFlowDoneCalls[i], "waitgroup '"+wgName+"' has Done without corresponding Add")
 	}
 }
 
@@ -580,6 +581,50 @@ func (wga *Analyzer) isInConditional(target ast.Node, scope ast.Node) bool {
 	})
 
 	return inConditional
+}
+
+func (wga *Analyzer) isInBranchingControlFlow(pos token.Pos) bool {
+	inBranch := false
+
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if inBranch || n == nil {
+			return false
+		}
+
+		switch node := n.(type) {
+		case *ast.IfStmt:
+			if nodeContainsPos(node.Body, pos) || nodeContainsPos(node.Else, pos) {
+				inBranch = true
+				return false
+			}
+		case *ast.SwitchStmt:
+			if nodeContainsPos(node.Body, pos) {
+				inBranch = true
+				return false
+			}
+		case *ast.TypeSwitchStmt:
+			if nodeContainsPos(node.Body, pos) {
+				inBranch = true
+				return false
+			}
+		case *ast.SelectStmt:
+			if nodeContainsPos(node.Body, pos) {
+				inBranch = true
+				return false
+			}
+		}
+
+		return true
+	})
+
+	return inBranch
+}
+
+func nodeContainsPos(n ast.Node, pos token.Pos) bool {
+	if n == nil {
+		return false
+	}
+	return n.Pos() <= pos && pos <= n.End()
 }
 
 // checkUnreachableDone checks for Done calls that are unreachable due to early returns

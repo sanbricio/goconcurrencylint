@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"maps"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -54,14 +55,15 @@ func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *repor
 		}
 
 		primitives := findSyncPrimitives(fn, pass)
+		localWaitGroups := copyPrimitiveNames(primitives.waitGroups)
 		mergePrimitives(primitives, pkgPrimitives)
 
 		if hasMutexes(primitives) {
-			analyzeMutexUsage(fn, primitives, errorCollector, commentFilter)
+			analyzeMutexUsage(fn, primitives, errorCollector, commentFilter, pass)
 		}
 
 		if hasWaitGroups(primitives) {
-			analyzeWaitGroupUsage(fn, primitives, errorCollector, commentFilter, pass)
+			analyzeWaitGroupUsage(fn, primitives, localWaitGroups, pkgPrimitives.waitGroups, errorCollector, commentFilter, pass)
 		}
 	}
 }
@@ -104,6 +106,12 @@ func mergePrimitives(dst, src *syncPrimitive) {
 	for k, v := range src.waitGroups {
 		dst.waitGroups[k] = v
 	}
+}
+
+func copyPrimitiveNames(src map[string]bool) map[string]bool {
+	dst := make(map[string]bool, len(src))
+	maps.Copy(dst, src)
+	return dst
 }
 
 // findSyncPrimitives identifies all sync primitives declared in a function,
@@ -237,13 +245,13 @@ func hasWaitGroups(primitives *syncPrimitive) bool {
 }
 
 // analyzeMutexUsage handles mutex and rwmutex analysis
-func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter) {
-	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf)
+func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
+	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf, pass.Files)
 	analyzer.AnalyzeFunction(fn)
 }
 
 // analyzeWaitGroupUsage handles waitgroup analysis
-func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
-	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, errorCollector, cf, pass)
+func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWaitGroups, packageLevelWaitGroups map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
+	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, localWaitGroups, packageLevelWaitGroups, errorCollector, cf, pass)
 	analyzer.AnalyzeFunction(fn)
 }

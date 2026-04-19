@@ -174,3 +174,78 @@ func GoodWaitGroupWaitOnlyGoroutine() {
 
 	<-done
 }
+
+type externalCallbackRegistrar interface {
+	Register(func())
+}
+
+type externalActivityRegistrar interface {
+	RegisterActivity(func() error)
+}
+
+type externalTaskSubmitter interface {
+	Submit(taskCarrier)
+}
+
+type taskCarrier struct {
+	*sync.WaitGroup
+}
+
+func (t taskCarrier) Ack() {
+	t.Done()
+}
+
+// A callback literal passed to an external registrar still means the WaitGroup lifecycle escaped.
+func GoodEscapingWaitGroupDoneCallback(reg externalCallbackRegistrar) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	reg.Register(func() {
+		wg.Done()
+	})
+	wg.Wait()
+}
+
+// A callback variable registered externally can own the WaitGroup Done lifecycle.
+func GoodEscapingWaitGroupDoneFuncVariable(reg externalActivityRegistrar) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	activity := func() error {
+		defer wg.Done()
+		return nil
+	}
+
+	reg.RegisterActivity(activity)
+	reg.RegisterActivity(activity)
+	wg.Wait()
+}
+
+// A task object carrying a WaitGroup can escape to another component that will Ack it later.
+func GoodEscapingWaitGroupInsideTaskObject(submitter externalTaskSubmitter) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	submitter.Submit(taskCarrier{WaitGroup: &wg})
+	wg.Wait()
+}
+
+// Branch-exclusive Done paths should not be counted as multiple excess Done calls.
+func GoodBranchExclusiveDonePaths(startWorker, enqueue bool) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	if !startWorker {
+		wg.Done()
+		return
+	}
+
+	if enqueue {
+		wg.Done()
+		return
+	}
+
+	go func() {
+		defer wg.Done()
+	}()
+
+	wg.Wait()
+}
