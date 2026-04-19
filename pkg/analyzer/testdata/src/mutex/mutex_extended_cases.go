@@ -305,6 +305,35 @@ type SafeMap struct {
 	data map[string]string
 }
 
+type InstrumentedMutex struct {
+	realLock    sync.Mutex
+	waitersLock sync.Mutex
+}
+
+type BrokenInstrumentedMutex struct {
+	realLock sync.Mutex
+}
+
+type BrokenUnlockInstrumentedMutex struct {
+	realLock sync.Mutex
+}
+
+type NamedWrapperMutex struct {
+	mu sync.RWMutex
+}
+
+type LoopExitLocker struct {
+	mu sync.Mutex
+}
+
+type iteratorLifecycleStore struct {
+	mu sync.Mutex
+}
+
+type iteratorLifecycleToken struct {
+	owner *iteratorLifecycleStore
+}
+
 // Good: struct field mutex properly locked and unlocked
 func GoodStructFieldMutex() {
 	var sm SafeMap
@@ -347,6 +376,76 @@ func (sm *SafeMap) GoodMethodMutex() {
 // Bad: method receiver with struct field mutex, locked but not unlocked
 func (sm *SafeMap) BadMethodMutex() {
 	sm.mu.Lock() // want "mutex 'sm.mu' is locked but not unlocked"
+}
+
+// Good: wrapper-style mutex methods can lock in Lock() and unlock in Unlock().
+func (im *InstrumentedMutex) Lock() {
+	im.waitersLock.Lock()
+	im.waitersLock.Unlock()
+	im.realLock.Lock()
+}
+
+func (im *InstrumentedMutex) Unlock() {
+	im.waitersLock.Lock()
+	im.waitersLock.Unlock()
+	im.realLock.Unlock()
+}
+
+// Bad: wrapper-style Lock() that acquires an underlying mutex with no sibling release.
+func (im *BrokenInstrumentedMutex) Lock() {
+	im.realLock.Lock() // want "mutex 'im.realLock' is locked but not unlocked"
+}
+
+func (im *BrokenInstrumentedMutex) Unlock() {}
+
+// Bad: wrapper-style Unlock() that releases an underlying mutex with no sibling acquire.
+func (im *BrokenUnlockInstrumentedMutex) Lock() {}
+
+func (im *BrokenUnlockInstrumentedMutex) Unlock() {
+	im.realLock.Unlock() // want "mutex 'im.realLock' is unlocked but not locked"
+}
+
+// Good: wrapper methods do not need to be literally named Lock/Unlock.
+func (nwm *NamedWrapperMutex) wLock() {
+	nwm.mu.Lock()
+}
+
+func (nwm *NamedWrapperMutex) wUnlock() {
+	nwm.mu.Unlock()
+}
+
+func (nwm *NamedWrapperMutex) rLock() {
+	nwm.mu.RLock()
+}
+
+func (nwm *NamedWrapperMutex) rUnlock() {
+	nwm.mu.RUnlock()
+}
+
+// Good: a loop can intentionally break while still holding the lock and release it afterwards.
+func (l *LoopExitLocker) GoodLoopBreakWithUnlockAfterLoop(stop bool) {
+	for {
+		l.mu.Lock()
+		if stop {
+			break
+		}
+		l.mu.Unlock()
+		stop = true
+	}
+	l.mu.Unlock()
+}
+
+// Good: a creator can return a token that owns the eventual unlock in Close.
+func (s *iteratorLifecycleStore) GoodIteratorReturnsLockedHandle() *iteratorLifecycleToken {
+	s.mu.Lock()
+	token := &iteratorLifecycleToken{
+		owner: s,
+	}
+	return token
+}
+
+func (t *iteratorLifecycleToken) Close() {
+	t.owner.mu.Unlock()
 }
 
 // ========== COMMENT FILTERING TESTS ==========

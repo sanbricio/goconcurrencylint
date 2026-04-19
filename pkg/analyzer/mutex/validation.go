@@ -197,7 +197,98 @@ func (ma *Analyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Sta
 	}
 
 	forStats := ma.analyzeBlock(stmt.Body, stats)
+	ma.applyLoopExitLocks(stmt, stats, forStats)
 	ma.replaceStats(stats, forStats)
+}
+
+func (ma *Analyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[string]*Stats) {
+	for mutexName := range ma.mutexNames {
+		if pos, ok := ma.loopMayBreakHoldingMutex(stmt.Body.List, mutexName, []string{"Lock", "TryLock"}, []string{"Unlock"}, 0, token.NoPos); ok {
+			if final[mutexName].lock <= initial[mutexName].lock {
+				final[mutexName].lock++
+				final[mutexName].lockPos = append(final[mutexName].lockPos, pos)
+			}
+		}
+	}
+
+	for rwMutexName := range ma.rwMutexNames {
+		if pos, ok := ma.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, []string{"Lock", "TryLock"}, []string{"Unlock"}, 0, token.NoPos); ok {
+			if final[rwMutexName].lock <= initial[rwMutexName].lock {
+				final[rwMutexName].lock++
+				final[rwMutexName].lockPos = append(final[rwMutexName].lockPos, pos)
+			}
+		}
+		if pos, ok := ma.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, []string{"RLock", "TryRLock"}, []string{"RUnlock"}, 0, token.NoPos); ok {
+			if final[rwMutexName].rlock <= initial[rwMutexName].rlock {
+				final[rwMutexName].rlock++
+				final[rwMutexName].rlockPos = append(final[rwMutexName].rlockPos, pos)
+			}
+		}
+	}
+}
+
+func (ma *Analyzer) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int, lastLockPos token.Pos) (token.Pos, bool) {
+	currentDepth := depth
+	currentLockPos := lastLockPos
+
+	for _, stmt := range stmts {
+		if ma.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if !ok || ma.commentFilter.ShouldSkipCall(call) {
+				continue
+			}
+
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || common.GetVarName(sel.X) != varName {
+				continue
+			}
+
+			if containsMethod(lockMethods, sel.Sel.Name) {
+				currentDepth++
+				currentLockPos = call.Pos()
+				continue
+			}
+
+			if containsMethod(unlockMethods, sel.Sel.Name) && currentDepth > 0 {
+				currentDepth--
+			}
+		case *ast.IfStmt:
+			if pos, ok := ma.loopMayBreakHoldingMutex(s.Body.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+				return pos, true
+			}
+			if s.Else != nil {
+				switch elseNode := s.Else.(type) {
+				case *ast.BlockStmt:
+					if pos, ok := ma.loopMayBreakHoldingMutex(elseNode.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+						return pos, true
+					}
+				case *ast.IfStmt:
+					if pos, ok := ma.loopMayBreakHoldingMutex([]ast.Stmt{elseNode}, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+						return pos, true
+					}
+				}
+			}
+		case *ast.BlockStmt:
+			if pos, ok := ma.loopMayBreakHoldingMutex(s.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+				return pos, true
+			}
+		case *ast.LabeledStmt:
+			if pos, ok := ma.loopMayBreakHoldingMutex([]ast.Stmt{s.Stmt}, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+				return pos, true
+			}
+		case *ast.BranchStmt:
+			if s.Tok == token.BREAK && currentDepth > 0 {
+				return currentLockPos, true
+			}
+		}
+	}
+
+	return token.NoPos, false
 }
 
 // reportUnmatchedLocksInBranch reports unmatched locks in conditional branches
@@ -297,19 +388,35 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 		rlockMessage = "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
 	}
 
+	suppressFunctionLevelLock := branchType == "" && ma.functionReturnsLifecycleHandleFor(mutexName, []string{"Unlock"})
 	for _, pos := range ma.trailingPositions(stats.lockPos, ma.remainingLockCount(stats.lock, stats.deferUnlock)) {
+		if suppressFunctionLevelLock {
+			continue
+		}
 		ma.errorCollector.AddError(pos, lockMessage)
 	}
 
+	suppressFunctionLevelUnlock := branchType == "" && ma.functionIsLifecycleReleaseFor(mutexName, []string{"Lock", "TryLock"})
 	for _, pos := range stats.borrowedUnlockPos {
+		if suppressFunctionLevelUnlock {
+			continue
+		}
 		ma.errorCollector.AddError(pos, mutexType+" '"+mutexName+"' is unlocked but not locked")
 	}
 
 	if isRWMutex {
+		suppressFunctionLevelRLock := branchType == "" && ma.functionReturnsLifecycleHandleFor(mutexName, []string{"RUnlock"})
 		for _, pos := range ma.trailingPositions(stats.rlockPos, ma.remainingLockCount(stats.rlock, stats.deferRUnlock)) {
+			if suppressFunctionLevelRLock {
+				continue
+			}
 			ma.errorCollector.AddError(pos, rlockMessage)
 		}
+		suppressFunctionLevelRUnlock := branchType == "" && ma.functionIsLifecycleReleaseFor(mutexName, []string{"RLock", "TryRLock"})
 		for _, pos := range stats.borrowedRUnlockPos {
+			if suppressFunctionLevelRUnlock {
+				continue
+			}
 			ma.errorCollector.AddError(pos, "rwmutex '"+mutexName+"' is runlocked but not rlocked")
 		}
 	}

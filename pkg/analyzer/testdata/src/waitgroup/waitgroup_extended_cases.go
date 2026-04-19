@@ -319,6 +319,14 @@ type WorkerPool struct {
 	wg sync.WaitGroup
 }
 
+type EmbeddedWorkerPool struct {
+	sync.WaitGroup
+}
+
+type HandlerLike struct {
+	startWG sync.WaitGroup
+}
+
 // Good: struct field waitgroup with proper Add and Done
 func GoodStructFieldWaitGroup() {
 	var wp WorkerPool
@@ -349,6 +357,58 @@ func (wp *WorkerPool) GoodMethodWaitGroup() {
 func (wp *WorkerPool) BadMethodWaitGroup() {
 	wp.wg.Add(1) // want "waitgroup 'wp.wg' has Add without corresponding Done"
 	wp.wg.Wait()
+}
+
+// Good: barrier-style waitgroup where goroutines wait and the main loop releases them with Done.
+func GoodBarrierWaitGroupMainLoopDone() {
+	const workers = 4
+
+	var startWG sync.WaitGroup
+	var endWG sync.WaitGroup
+
+	startWG.Add(workers)
+	endWG.Add(workers)
+
+	go func() {
+		startWG.Wait()
+	}()
+
+	for range workers {
+		go func() {
+			defer endWG.Done()
+			startWG.Wait()
+		}()
+		startWG.Done()
+	}
+
+	endWG.Wait()
+}
+
+// Good: embedded waitgroup field managed across sibling methods.
+func (wp *EmbeddedWorkerPool) GoodEmbeddedFieldSiblingMethod() {
+	wp.WaitGroup.Add(1)
+	go wp.run()
+	wp.WaitGroup.Wait()
+}
+
+func (wp *EmbeddedWorkerPool) run() {
+	defer wp.WaitGroup.Done()
+}
+
+// Good: constructor-style setup can Add in one function and Done in a lifecycle method.
+func GoodConstructorLifecycleWaitGroup() {
+	handler := NewHandlerLike()
+	handler.Start()
+}
+
+func NewHandlerLike() *HandlerLike {
+	handler := &HandlerLike{}
+	handler.startWG.Add(1)
+	return handler
+}
+
+func (h *HandlerLike) Start() {
+	h.startWG.Done()
 }
 
 // Good: a WaitGroup field whose lifecycle is balanced through returned closers.

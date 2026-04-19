@@ -14,12 +14,14 @@ import (
 
 // Analyzer handles the analysis of WaitGroup usage
 type Analyzer struct {
-	waitGroupNames map[string]bool
-	errorCollector *report.ErrorCollector
-	function       *ast.FuncDecl
-	commentFilter  *commnetfilter.CommentFilter
-	typesInfo      *types.Info
-	functionDecls  map[token.Pos]*ast.FuncDecl
+	waitGroupNames             map[string]bool
+	localWaitGroupNames        map[string]bool
+	packageLevelWaitGroupNames map[string]bool
+	errorCollector             *report.ErrorCollector
+	function                   *ast.FuncDecl
+	commentFilter              *commnetfilter.CommentFilter
+	typesInfo                  *types.Info
+	functionDecls              map[token.Pos]*ast.FuncDecl
 }
 
 // addCall represents an Add() call with its position and value
@@ -40,13 +42,15 @@ type Stats struct {
 }
 
 // NewAnalyzer creates a new WaitGroup analyzer
-func NewAnalyzer(waitGroupNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) *Analyzer {
+func NewAnalyzer(waitGroupNames, localWaitGroupNames, packageLevelWaitGroupNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) *Analyzer {
 	return &Analyzer{
-		waitGroupNames: waitGroupNames,
-		errorCollector: errorCollector,
-		commentFilter:  cf,
-		typesInfo:      pass.TypesInfo,
-		functionDecls:  buildFunctionDeclMap(pass.Files),
+		waitGroupNames:             waitGroupNames,
+		localWaitGroupNames:        localWaitGroupNames,
+		packageLevelWaitGroupNames: packageLevelWaitGroupNames,
+		errorCollector:             errorCollector,
+		commentFilter:              cf,
+		typesInfo:                  pass.TypesInfo,
+		functionDecls:              buildFunctionDeclMap(pass.Files),
 	}
 }
 
@@ -251,8 +255,17 @@ func (wga *Analyzer) exprEscapesWaitGroup(expr ast.Expr, wgName string, callback
 		return true
 	}
 
+	if fnLit, ok := expr.(*ast.FuncLit); ok {
+		return wga.functionLiteralEscapesWaitGroup(fnLit, wgName, callbacks, seen)
+	}
+
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
+		if exprNode, ok := n.(ast.Expr); ok && wga.isWaitGroupArgument(exprNode, wgName) {
+			found = true
+			return false
+		}
+
 		if call, ok := n.(*ast.CallExpr); ok {
 			if fn, calleeWGName, related := wga.relatedWaitGroupForCall(call, wgName); related &&
 				fn != nil && wga.functionCouldManageWaitGroup(fn, calleeWGName, make(map[token.Pos]bool)) {
@@ -268,7 +281,7 @@ func (wga *Analyzer) exprEscapesWaitGroup(expr ast.Expr, wgName string, callback
 				return false
 			}
 		case *ast.FuncLit:
-			if wga.containsDoneCall(node.Body, wgName) {
+			if wga.functionLiteralEscapesWaitGroup(node, wgName, callbacks, seen) {
 				found = true
 				return false
 			}
@@ -291,6 +304,41 @@ func (wga *Analyzer) exprEscapesWaitGroup(expr ast.Expr, wgName string, callback
 		}
 		return !found
 	})
+	return found
+}
+
+func (wga *Analyzer) functionLiteralEscapesWaitGroup(fn *ast.FuncLit, wgName string, callbacks map[string]ast.Expr, seen map[string]bool) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+
+	if wga.analyzeDoneCallsWithVisited(fn.Body, wgName, make(map[token.Pos]bool)).hasAnyDone {
+		return true
+	}
+
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+
+		if exprNode, ok := n.(ast.Expr); ok && wga.isWaitGroupArgument(exprNode, wgName) {
+			found = true
+			return false
+		}
+
+		if ident, ok := n.(*ast.Ident); ok {
+			if callbackExpr, ok := callbacks[ident.Name]; ok && !seen[ident.Name] {
+				seen[ident.Name] = true
+				found = wga.exprEscapesWaitGroup(callbackExpr, wgName, callbacks, seen)
+				delete(seen, ident.Name)
+				return !found
+			}
+		}
+
+		return true
+	})
+
 	return found
 }
 
@@ -367,6 +415,30 @@ func receiverName(fn *ast.FuncDecl) string {
 	return fn.Recv.List[0].Names[0].Name
 }
 
+func (wga *Analyzer) currentFunctionShadowsPackageLevelWaitGroup(wgName string) bool {
+	if wga.localWaitGroupNames[wgName] {
+		return true
+	}
+
+	if wga.function == nil || wga.function.Type == nil || wga.function.Type.Params == nil {
+		return false
+	}
+
+	for _, field := range wga.function.Type.Params.List {
+		typ := wga.typesInfo.TypeOf(field.Type)
+		if !common.IsWaitGroup(typ) {
+			continue
+		}
+		for _, name := range field.Names {
+			if name.Name == wgName {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func (wga *Analyzer) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*ast.FuncDecl, string, bool) {
 	fn := wga.resolveCalledFunction(call)
 	if fn == nil || fn.Body == nil {
@@ -387,6 +459,11 @@ func (wga *Analyzer) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) 
 	}
 
 	if fn.Type == nil || fn.Type.Params == nil {
+		if wga.packageLevelWaitGroupNames[wgName] &&
+			!wga.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
+			wga.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
+			return fn, wgName, true
+		}
 		return nil, "", false
 	}
 
@@ -407,6 +484,12 @@ func (wga *Analyzer) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) 
 			}
 			return nil, "", false
 		}
+	}
+
+	if wga.packageLevelWaitGroupNames[wgName] &&
+		!wga.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
+		wga.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
+		return fn, wgName, true
 	}
 
 	return nil, "", false

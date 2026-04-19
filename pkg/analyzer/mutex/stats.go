@@ -89,6 +89,10 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 
 // handleMutexCall processes mutex method calls
 func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
+	if ma.isBorrowedWrapperCall(varName, methodName) {
+		return
+	}
+
 	switch methodName {
 	case "Lock", "TryLock":
 		if stats[varName].borrowedLock > 0 {
@@ -111,6 +115,10 @@ func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, s
 
 // handleRWMutexCall processes rwmutex method calls
 func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
+	if ma.isBorrowedWrapperCall(varName, methodName) {
+		return
+	}
+
 	switch methodName {
 	case "Lock", "TryLock":
 		if stats[varName].borrowedLock > 0 {
