@@ -2,6 +2,7 @@ package common
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"testing"
@@ -85,11 +86,49 @@ func TestGetAddValue(t *testing.T) {
 	}
 	assert.Equal(t, 1, GetAddValue(callWrongLit))
 
-
 	callBadLit := &ast.CallExpr{
 		Args: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: "xxx"}},
 	}
 	assert.Equal(t, 1, GetAddValue(callBadLit))
+}
+
+func TestConstantBoolValue(t *testing.T) {
+	trueExpr := &ast.Ident{Name: "always"}
+	falseExpr := &ast.Ident{Name: "never"}
+	unknownExpr := &ast.Ident{Name: "maybe"}
+
+	info := &types.Info{
+		Types: map[ast.Expr]types.TypeAndValue{
+			trueExpr: {
+				Type:  types.Typ[types.Bool],
+				Value: constant.MakeBool(true),
+			},
+			falseExpr: {
+				Type:  types.Typ[types.Bool],
+				Value: constant.MakeBool(false),
+			},
+			unknownExpr: {
+				Type: types.Typ[types.Bool],
+			},
+		},
+	}
+
+	value, ok := ConstantBoolValue(trueExpr, info)
+	assert.True(t, ok)
+	assert.True(t, value)
+
+	value, ok = ConstantBoolValue(falseExpr, info)
+	assert.True(t, ok)
+	assert.False(t, value)
+
+	_, ok = ConstantBoolValue(unknownExpr, info)
+	assert.False(t, ok)
+
+	_, ok = ConstantBoolValue(nil, info)
+	assert.False(t, ok)
+
+	_, ok = ConstantBoolValue(trueExpr, nil)
+	assert.False(t, ok)
 }
 
 func makeNamedType(pkgPath, name string, isPtr bool) types.Type {

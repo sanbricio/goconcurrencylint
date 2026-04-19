@@ -1,10 +1,10 @@
 package analyzer
 
 import (
-	"maps"
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
@@ -246,7 +246,7 @@ func hasWaitGroups(primitives *syncPrimitive) bool {
 
 // analyzeMutexUsage handles mutex and rwmutex analysis
 func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
-	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf, pass.Files)
+	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf, pass.TypesInfo, pass.Files)
 	analyzer.AnalyzeFunction(fn)
 }
 

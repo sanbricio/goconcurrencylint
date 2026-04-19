@@ -34,7 +34,7 @@ func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	case *ast.IfStmt:
 		ma.analyzeIfStatement(s, stats)
 	case *ast.GoStmt:
-		ma.analyzeGoStatement(s)
+		ma.analyzeGoStatement(s, stats)
 	case *ast.ForStmt:
 		ma.analyzeForStatement(s, stats)
 	case *ast.RangeStmt:
@@ -85,6 +85,8 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 	if ma.rwMutexNames[varName] {
 		ma.handleRWMutexCall(varName, sel.Sel.Name, call.Pos(), stats)
 	}
+
+	ma.applyLocalMethodLifecycleEffects(call, stats)
 }
 
 // handleMutexCall processes mutex method calls
@@ -157,12 +159,19 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 
 func (ma *Analyzer) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[string]*Stats) {
 	for _, result := range stmt.Results {
+		call, ok := result.(*ast.CallExpr)
+		if ok && !ma.commentFilter.ShouldSkipCall(call) {
+			ma.applyLocalMethodLifecycleEffects(call, stats)
+		}
+
 		fnlit, ok := result.(*ast.FuncLit)
 		if !ok {
 			continue
 		}
 		ma.handleDeferFunctionLiteral(fnlit, stmt.Pos(), stats)
 	}
+
+	ma.reportUnmatchedLocks(stats)
 }
 
 // analyzeDeferStatement handles defer statements
