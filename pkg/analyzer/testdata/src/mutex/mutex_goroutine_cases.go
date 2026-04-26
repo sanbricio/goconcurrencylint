@@ -13,6 +13,16 @@ func GoodGoroutineLockUnlock() {
 	}()
 }
 
+func GoodGoroutineLocksAfterParentReleases() {
+	var mu sync.Mutex
+	mu.Lock()
+	go func() {
+		mu.Lock()
+		mu.Unlock()
+	}()
+	mu.Unlock()
+}
+
 type borrowedLockManager struct {
 	mu sync.Mutex
 }
@@ -75,6 +85,15 @@ func BadGoroutineDeadlock() {
 		mu.Lock() // want "mutex 'mu' is locked but not unlocked in goroutine"
 		<-ch      // deadlock, never unlocks
 	}()
+}
+
+func BadGoroutineLockWithoutUnlockAfterParentReleases() {
+	var mu sync.Mutex
+	mu.Lock()
+	go func() {
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in goroutine"
+	}()
+	mu.Unlock()
 }
 
 // Goroutine defer unlock without lock
