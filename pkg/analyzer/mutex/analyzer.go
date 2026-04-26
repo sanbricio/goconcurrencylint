@@ -871,6 +871,7 @@ func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWM
 
 	start := map[string]*Stats{varName: cloneStats(initial)}
 	final := simulated.analyzeBlock(fn.Body, start)
+	simulated.applyFunctionExitDefers(final, start)
 	return cloneStats(final[varName])
 }
 
@@ -915,8 +916,9 @@ func (ma *Analyzer) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr
 		},
 	}
 
-	final := simulated.analyzeBlock(fnlit.Body, stats)
-	simulated.applyFunctionExitDefers(final)
+	baseline := simulated.copyStats(stats)
+	final := simulated.analyzeBlock(fnlit.Body, baseline)
+	simulated.applyFunctionExitDefers(final, baseline)
 	ma.replaceStats(stats, final)
 	return true
 }
@@ -960,18 +962,27 @@ func (ma *Analyzer) localFunctionLiteralBefore(name string, before token.Pos) *a
 	return found
 }
 
-func (ma *Analyzer) applyFunctionExitDefers(stats map[string]*Stats) {
-	for _, st := range stats {
-		for st.deferUnlock > 0 && st.lock > 0 {
+func (ma *Analyzer) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
+	for name, st := range stats {
+		baselineDeferUnlocks := 0
+		baselineDeferRUnlocks := 0
+		if baselineStats := baseline[name]; baselineStats != nil {
+			baselineDeferUnlocks = baselineStats.deferUnlock
+			baselineDeferRUnlocks = baselineStats.deferRUnlock
+		}
+
+		for st.deferUnlock > baselineDeferUnlocks && st.lock > 0 {
 			st.deferUnlock--
 			st.lock--
 			ma.removeFirstLockPos(st)
 		}
-		for st.deferRUnlock > 0 && st.rlock > 0 {
+		st.deferUnlock = baselineDeferUnlocks
+		for st.deferRUnlock > baselineDeferRUnlocks && st.rlock > 0 {
 			st.deferRUnlock--
 			st.rlock--
 			ma.removeFirstRLockPos(st)
 		}
+		st.deferRUnlock = baselineDeferRUnlocks
 	}
 }
 
