@@ -13,6 +13,7 @@ import (
 // validateUsage performs validation checks on collected statistics
 func (wga *Analyzer) validateUsage(stats map[string]*Stats) {
 	wga.checkAddAfterWait(stats)
+	wga.checkWaitBeforeDoneSameGoroutine(stats)
 	wga.checkLoopAddDoneBalance()
 	wga.checkUnreachableDone()
 	wga.checkWaitGroupBalance(stats)
@@ -340,6 +341,94 @@ func (wga *Analyzer) checkAddAfterWait(stats map[string]*Stats) {
 		wga.checkAddAfterWaitInGoroutines(wgName, st)
 		wga.checkAddAfterWaitInMainFlow(wgName, st)
 	}
+}
+
+func (wga *Analyzer) checkWaitBeforeDoneSameGoroutine(stats map[string]*Stats) {
+	for wgName, st := range stats {
+		for _, waitPos := range st.waitCalls {
+			if wga.isInGoroutine(waitPos) || wga.hasRelatedGoroutineBeforeWait(wgName, waitPos) {
+				continue
+			}
+			if wga.pendingMainFlowAddsBeforeWait(st, waitPos) > 0 && wga.hasMainFlowReleaseAfterWait(st, waitPos) {
+				wga.errorCollector.AddError(waitPos, "waitgroup '"+wgName+"' waits with pending Add in the same goroutine")
+			}
+		}
+	}
+}
+
+func (wga *Analyzer) pendingMainFlowAddsBeforeWait(st *Stats, waitPos token.Pos) int {
+	pending := 0
+	for _, add := range st.addCalls {
+		if add.pos < waitPos && wga.isInMainFunctionFlow(add.pos) {
+			pending += add.value
+		}
+	}
+	for _, done := range st.doneCalls {
+		if done < waitPos && wga.isInMainFunctionFlow(done) {
+			pending--
+		}
+	}
+	if pending < 0 {
+		return 0
+	}
+	return pending
+}
+
+func (wga *Analyzer) hasMainFlowReleaseAfterWait(st *Stats, waitPos token.Pos) bool {
+	for _, done := range st.doneCalls {
+		if done > waitPos && wga.isInMainFunctionFlow(done) {
+			return true
+		}
+	}
+	for _, deferDone := range st.deferDoneCalls {
+		if deferDone < waitPos && wga.isInMainFunctionFlow(deferDone) {
+			return true
+		}
+	}
+	return false
+}
+
+func (wga *Analyzer) isInMainFunctionFlow(pos token.Pos) bool {
+	return !wga.isInGoroutine(pos) && !wga.isInNestedFunctionLiteral(pos)
+}
+
+func (wga *Analyzer) isInNestedFunctionLiteral(pos token.Pos) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		fnLit, ok := n.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		if nodeContainsPos(fnLit.Body, pos) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func (wga *Analyzer) hasRelatedGoroutineBeforeWait(wgName string, waitPos token.Pos) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok || goStmt.Pos() > waitPos {
+			return true
+		}
+		doneInfo, related := wga.goroutineDoneInfo(goStmt, wgName)
+		if related && doneInfo.hasAnyDone {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // checkAddAfterWaitInGoroutines checks for Add after Wait in goroutines

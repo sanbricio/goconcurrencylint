@@ -29,6 +29,33 @@ func GoodRWMultipleOperations() {
 	mu.Unlock()
 }
 
+// Upgrading from a read lock to a write lock deadlocks in the same goroutine.
+func BadRWMutexPromotion() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.Lock() // want "rwmutex 'mu' attempts write Lock while read lock is held"
+	mu.Unlock()
+	mu.RUnlock()
+}
+
+// The write lock is fine after the read lock has been released.
+func GoodRWMutexReadThenWriteAfterRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
+	mu.Lock()
+	mu.Unlock()
+}
+
+// A deferred RUnlock still leaves the read lock held until the function returns.
+func BadRWMutexPromotionWithDeferredRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()
+	defer mu.RUnlock()
+	mu.Lock() // want "rwmutex 'mu' attempts write Lock while read lock is held"
+	mu.Unlock()
+}
+
 // RLock without RUnlock
 func BadRLockWithoutRUnlock() {
 	var mu sync.RWMutex

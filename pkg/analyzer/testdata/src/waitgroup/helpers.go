@@ -18,7 +18,7 @@ func handleShutdown(wg *sync.WaitGroup, servers interface{}) {
 	// shutdown logic
 }
 
-func processWork(wg sync.WaitGroup) {
+func processWork(wg sync.WaitGroup) { // want "waitgroup 'wg' is copied by value"
 	defer wg.Done()
 	// process work
 }

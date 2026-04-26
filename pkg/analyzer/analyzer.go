@@ -36,6 +36,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	errorCollector := &report.ErrorCollector{}
 	pkgPrimitives := collectPackageLevelPrimitives(pass)
 
+	detectCopyByValue(pass, errorCollector)
 	for _, file := range pass.Files {
 		analyzeFunctions(file, pass, errorCollector, pkgPrimitives)
 	}
@@ -254,4 +255,140 @@ func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollect
 func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWaitGroups, packageLevelWaitGroups map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
 	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, localWaitGroups, packageLevelWaitGroups, errorCollector, cf, pass)
 	analyzer.AnalyzeFunction(fn)
+}
+
+func detectCopyByValue(pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	for _, file := range pass.Files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.FuncDecl:
+				reportCopyByValueParams(node, pass, errorCollector)
+			case *ast.FuncLit:
+				reportCopyByValueFuncLitParams(node, pass, errorCollector)
+			case *ast.ValueSpec:
+				reportCopyByValueValueSpec(node, pass, errorCollector)
+			case *ast.AssignStmt:
+				reportCopyByValueAssignments(node, pass, errorCollector)
+			case *ast.CallExpr:
+				reportCopyByValueArgs(node, pass, errorCollector)
+			}
+			return true
+		})
+	}
+}
+
+func reportCopyByValueFuncLitParams(fn *ast.FuncLit, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	if fn == nil || fn.Type == nil || fn.Type.Params == nil {
+		return
+	}
+
+	reportCopyByValueFieldList(fn.Type.Params, pass, errorCollector)
+}
+
+func reportCopyByValueParams(fn *ast.FuncDecl, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	if fn == nil || fn.Type == nil || fn.Type.Params == nil {
+		return
+	}
+
+	reportCopyByValueFieldList(fn.Type.Params, pass, errorCollector)
+}
+
+func reportCopyByValueFieldList(fields *ast.FieldList, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	for _, field := range fields.List {
+		kind := syncPrimitiveValueKind(pass.TypesInfo.TypeOf(field.Type))
+		if kind == "" {
+			continue
+		}
+		for _, name := range field.Names {
+			errorCollector.AddError(name.Pos(), copyByValueMessage(kind, name.Name))
+		}
+	}
+}
+
+func reportCopyByValueValueSpec(vs *ast.ValueSpec, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	if vs == nil {
+		return
+	}
+
+	for _, value := range vs.Values {
+		if kind, name, ok := copiedSyncPrimitive(value, pass); ok {
+			errorCollector.AddError(value.Pos(), copyByValueMessage(kind, name))
+		}
+	}
+}
+
+func reportCopyByValueAssignments(assign *ast.AssignStmt, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	if assign == nil || (assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE) {
+		return
+	}
+
+	for _, rhs := range assign.Rhs {
+		if kind, name, ok := copiedSyncPrimitive(rhs, pass); ok {
+			errorCollector.AddError(rhs.Pos(), copyByValueMessage(kind, name))
+		}
+	}
+}
+
+func reportCopyByValueArgs(call *ast.CallExpr, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+	if call == nil {
+		return
+	}
+
+	for _, arg := range call.Args {
+		if kind, name, ok := copiedSyncPrimitive(arg, pass); ok {
+			errorCollector.AddError(arg.Pos(), copyByValueMessage(kind, name))
+		}
+	}
+}
+
+func copiedSyncPrimitive(expr ast.Expr, pass *analysis.Pass) (string, string, bool) {
+	if expr == nil || isFreshSyncPrimitiveValue(expr) {
+		return "", "", false
+	}
+
+	kind := syncPrimitiveValueKind(pass.TypesInfo.TypeOf(expr))
+	if kind == "" {
+		return "", "", false
+	}
+
+	name := common.GetVarName(expr)
+	if name == "" || name == "?" {
+		return "", "", false
+	}
+	return kind, name, true
+}
+
+func isFreshSyncPrimitiveValue(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.CompositeLit:
+		return true
+	case *ast.UnaryExpr:
+		return e.Op == token.AND || isFreshSyncPrimitiveValue(e.X)
+	}
+	return false
+}
+
+func syncPrimitiveValueKind(typ types.Type) string {
+	if typ == nil {
+		return ""
+	}
+	named, ok := types.Unalias(typ).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "sync" {
+		return ""
+	}
+
+	switch named.Obj().Name() {
+	case "Mutex":
+		return "mutex"
+	case "RWMutex":
+		return "rwmutex"
+	case "WaitGroup":
+		return "waitgroup"
+	default:
+		return ""
+	}
+}
+
+func copyByValueMessage(kind, name string) string {
+	return kind + " '" + name + "' is copied by value"
 }
