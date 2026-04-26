@@ -249,6 +249,83 @@ COPY:
 	_ = bufLen
 }
 
+type reportDeferredHelperCache struct {
+	mu    sync.Mutex
+	ready bool
+}
+
+func (c *reportDeferredHelperCache) reloadWithDefer() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ready = true
+}
+
+// Good: a local helper's deferred unlock executes before the caller continues.
+// Regression for real-world helpers like kubelet UpdateAllocatedDevices and
+// go-ethereum accountCache.maybeReload.
+func (c *reportDeferredHelperCache) GoodCallHelperWithDeferThenLock() {
+	c.reloadWithDefer()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.ready
+}
+
+type reportBufferedWriterLike struct {
+	mu      sync.Mutex
+	bufLen  int
+	bufSize int
+}
+
+func (w *reportBufferedWriterLike) flushWithDefer() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.bufLen = 0
+}
+
+// Good: the caller temporarily releases a lock, calls a helper that locks and
+// defers unlock, then relocks for its own deferred unlock. Regression for
+// consul's rexecWriter.Write -> Flush pattern.
+func (w *reportBufferedWriterLike) GoodTemporaryReleaseCallHelperAndRelock(buf []byte) {
+	if w.bufSize == 0 {
+		w.bufSize = 1
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+COPY:
+	remain := w.bufSize - w.bufLen
+	if remain > len(buf) {
+		w.bufLen += len(buf)
+	} else {
+		w.bufLen += remain
+		w.mu.Unlock()
+		w.flushWithDefer()
+		w.mu.Lock()
+		goto COPY
+	}
+}
+
+type reportRWDeferredHelperCache struct {
+	mu    sync.RWMutex
+	value int
+}
+
+func (c *reportRWDeferredHelperCache) readWithDefer() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.value
+}
+
+// Good: a read-locking helper has released its deferred RUnlock before the
+// caller takes the write lock.
+func (c *reportRWDeferredHelperCache) GoodReadHelperThenWriteLock() {
+	_ = c.readWithDefer()
+	c.mu.Lock()
+	c.value++
+	c.mu.Unlock()
+}
+
 // ---------- Switch All Cases Edge Cases ----------
 
 // Good: switch where all cases + default properly lock/unlock
