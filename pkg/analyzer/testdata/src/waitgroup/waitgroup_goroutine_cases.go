@@ -273,3 +273,19 @@ func GoodIntegerRangeWorkersWithDeferredDone() {
 	close(start)
 	wg.Wait()
 }
+
+func GoodIIFEGoroutineDoneForDynamicAdd(items map[int]string) {
+	var wg sync.WaitGroup
+	wg.Add(len(items))
+
+	for _, item := range items {
+		func(item string) {
+			go func() {
+				_ = item
+				wg.Done()
+			}()
+		}(item)
+	}
+
+	wg.Wait()
+}

@@ -553,6 +553,23 @@ type HelperUnlockedState struct {
 	mu sync.Mutex
 }
 
+type RecursiveLifecycleStore struct {
+	mu sync.Mutex
+}
+
+type RecursiveReadLifecycleStore struct {
+	mu sync.RWMutex
+}
+
+type ClosureReleaseManager struct {
+	mu sync.Mutex
+}
+
+type ClosureReleaseRecord struct {
+	mu   sync.Mutex
+	keep bool
+}
+
 type ResolverLikeClient struct {
 	mu sync.RWMutex
 }
@@ -596,6 +613,14 @@ type iteratorLifecycleStore struct {
 
 type iteratorLifecycleToken struct {
 	owner *iteratorLifecycleStore
+}
+
+type positionalLifecycleStore struct {
+	mu sync.Mutex
+}
+
+type positionalLifecycleToken struct {
+	*positionalLifecycleStore
 }
 
 // Good: struct field mutex properly locked and unlocked
@@ -710,6 +735,122 @@ func (h *HelperUnlockedState) GoodHelperReleasesCallerLock(async bool) {
 		return
 	}
 	h.releaseHelper()
+}
+
+func (s *RecursiveLifecycleStore) releaseAndMaybeRetry(retry bool) {
+	s.mu.Unlock()
+	if retry {
+		s.postReleaseRetry(retry)
+	}
+}
+
+func (s *RecursiveLifecycleStore) postReleaseRetry(retry bool) {
+	for range []int{1} {
+		s.finishRetry(retry)
+		return
+	}
+}
+
+func (s *RecursiveLifecycleStore) finishRetry(retry bool) {
+	if retry {
+		s.postReleaseRetry(false)
+	}
+}
+
+func (s *RecursiveLifecycleStore) GoodMutualRecursiveLifecycleRelease(retry bool) {
+	s.mu.Lock()
+	s.releaseAndMaybeRetry(retry)
+}
+
+func (s *RecursiveReadLifecycleStore) releaseReadAndMaybeRetry(retry bool) {
+	s.mu.RUnlock()
+	if retry {
+		s.postReadReleaseRetry(retry)
+	}
+}
+
+func (s *RecursiveReadLifecycleStore) postReadReleaseRetry(retry bool) {
+	for range []int{1} {
+		s.finishReadRetry(retry)
+		return
+	}
+}
+
+func (s *RecursiveReadLifecycleStore) finishReadRetry(retry bool) {
+	if retry {
+		s.postReadReleaseRetry(false)
+	}
+}
+
+func (s *RecursiveReadLifecycleStore) GoodMutualRecursiveReadLifecycleRelease(retry bool) {
+	s.mu.RLock()
+	s.releaseReadAndMaybeRetry(retry)
+}
+
+func (m *ClosureReleaseManager) GoodLocalClosureReleasesLocks(err error) error {
+	m.mu.Lock()
+	rec := &ClosureReleaseRecord{}
+	rec.mu.Lock()
+
+	releaseLocks := func() {
+		rec.mu.Unlock()
+		m.mu.Unlock()
+	}
+
+	if err != nil {
+		releaseLocks()
+		return err
+	}
+
+	rec.mu.Unlock()
+	m.mu.Unlock()
+	return nil
+}
+
+func GoodRecursiveClosureGuardDoesNotHang() {
+	var mu sync.Mutex
+	var f func()
+	f = func() {
+		mu.Lock()
+		mu.Unlock()
+		f()
+	}
+	f()
+}
+
+func GoodLoopCarriesLocksForLaterRelease(records []*ClosureReleaseRecord) {
+	var locked []*ClosureReleaseRecord
+	for _, rec := range records {
+		rec.mu.Lock()
+		if rec.keep {
+			locked = append(locked, rec)
+			continue
+		}
+		rec.mu.Unlock()
+	}
+
+	for _, rec := range locked {
+		rec.mu.Unlock()
+	}
+}
+
+func BadLoopNoCarrySpuriousRelease(records []*ClosureReleaseRecord) {
+	var carried []*ClosureReleaseRecord
+	// Unlike GoodLoopCarriesLocksForLaterRelease, this loop always unlocks before continue:
+	// loopMayCarryMutexPastIteration returns false, so isCarriedLoopUnlock must not suppress
+	// the spurious release below.
+	for _, rec := range records {
+		rec.mu.Lock()
+		if rec.keep {
+			rec.mu.Unlock()
+			carried = append(carried, rec)
+			continue
+		}
+		rec.mu.Unlock()
+	}
+	for _, rec := range carried {
+		rec.mu.Unlock() // want "mutex 'rec.mu' is unlocked but not locked"
+	}
 }
 
 func (cc *ResolverLikeClient) updateAndUnlock() {
@@ -886,6 +1027,15 @@ func (s *iteratorLifecycleStore) GoodIteratorReturnsLockedHandle() *iteratorLife
 
 func (t *iteratorLifecycleToken) Close() {
 	t.owner.mu.Unlock()
+}
+
+func (s *positionalLifecycleStore) GoodAcquirePositionalLifecycleToken() *positionalLifecycleToken {
+	s.mu.Lock()
+	return &positionalLifecycleToken{s}
+}
+
+func (t *positionalLifecycleToken) Release() {
+	t.mu.Unlock()
 }
 
 // ========== COMMENT FILTERING TESTS ==========

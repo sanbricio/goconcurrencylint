@@ -76,6 +76,9 @@ func (wga *Analyzer) traverseWithContext(n ast.Node, forStack []*ast.ForStmt, st
 	case *ast.IfStmt:
 		wga.handleIfStatement(node, forStack, stats, alreadyReported)
 	case *ast.ExprStmt:
+		if wga.handleImmediatelyInvokedFunction(node, forStack, stats, alreadyReported) {
+			return
+		}
 		wga.handleExpressionStatement(node, stats)
 	}
 }
@@ -167,6 +170,23 @@ func (wga *Analyzer) handleExpressionStatement(stmt *ast.ExprStmt, stats map[str
 	}
 }
 
+func (wga *Analyzer) handleImmediatelyInvokedFunction(stmt *ast.ExprStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) bool {
+	call, ok := stmt.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	fnLit, ok := call.Fun.(*ast.FuncLit)
+	if !ok || fnLit.Body == nil {
+		return false
+	}
+
+	for _, nestedStmt := range fnLit.Body.List {
+		wga.traverseWithReportMap(nestedStmt, forStack, stats, alreadyReported)
+	}
+	return true
+}
+
 // traverseWithReportMap is a helper for avoiding multiple diagnostics per loop
 func (wga *Analyzer) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	switch node := n.(type) {
@@ -179,6 +199,9 @@ func (wga *Analyzer) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, 
 	case *ast.IfStmt:
 		wga.handleIfStatement(node, forStack, stats, alreadyReported)
 	case *ast.ExprStmt:
+		if wga.handleImmediatelyInvokedFunction(node, forStack, stats, alreadyReported) {
+			return
+		}
 		wga.handleExpressionStatement(node, stats)
 	}
 }

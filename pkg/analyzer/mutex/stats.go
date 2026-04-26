@@ -64,6 +64,10 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 		return
 	}
 
+	if ma.applyLocalFunctionLiteralLifecycleEffects(call, stats) {
+		return
+	}
+
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return
@@ -117,6 +121,9 @@ func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, s
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
+			if ma.isCarriedLoopUnlock(varName, pos, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
+				return
+			}
 			stats[varName].borrowedLock++
 			stats[varName].borrowedUnlockPos = append(stats[varName].borrowedUnlockPos, pos)
 		} else {
@@ -154,6 +161,9 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
+			if ma.isCarriedLoopUnlock(varName, pos, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
+				return
+			}
 			stats[varName].borrowedLock++
 			stats[varName].borrowedUnlockPos = append(stats[varName].borrowedUnlockPos, pos)
 		} else {
@@ -170,6 +180,9 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 		stats[varName].rlockPos = append(stats[varName].rlockPos, pos)
 	case "RUnlock":
 		if stats[varName].rlock == 0 {
+			if ma.isCarriedLoopUnlock(varName, pos, []string{"RLock", "TryRLock"}, []string{"RUnlock"}) {
+				return
+			}
 			stats[varName].borrowedRLock++
 			stats[varName].borrowedRUnlockPos = append(stats[varName].borrowedRUnlockPos, pos)
 		} else {
@@ -193,7 +206,9 @@ func (ma *Analyzer) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[strin
 		ma.handleDeferFunctionLiteral(fnlit, stmt.Pos(), stats)
 	}
 
-	ma.reportUnmatchedLocks(stats)
+	if !ma.rawBodyEffects {
+		ma.reportUnmatchedLocks(stats)
+	}
 }
 
 // analyzeDeferStatement handles defer statements

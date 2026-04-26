@@ -139,6 +139,15 @@ func (wga *Analyzer) countGuaranteedDoneInStatements(stmts []ast.Stmt, wgName st
 				}
 			}
 
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if fnLit, ok := call.Fun.(*ast.FuncLit); ok && fnLit.Body != nil {
+				count += wga.countGuaranteedDoneInStatements(fnLit.Body.List, wgName, multiplier)
+			}
+
 		case *ast.BlockStmt:
 			count += wga.countGuaranteedDoneInStatements(s.List, wgName, multiplier)
 

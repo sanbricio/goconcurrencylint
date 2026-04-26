@@ -24,6 +24,14 @@ type Analyzer struct {
 	rawBodyEffects  bool
 	receiverMethods map[string]map[string]*ast.FuncDecl
 	functions       []*ast.FuncDecl
+	simulationStack map[methodSimulationKey]bool
+	localFuncStack  map[*ast.FuncLit]bool
+}
+
+type methodSimulationKey struct {
+	fn        *ast.FuncDecl
+	varName   string
+	isRWMutex bool
 }
 
 // Stats tracks the state of a mutex within a block
@@ -429,6 +437,27 @@ func compositeLiteralFieldVarName(lit *ast.CompositeLit, fieldName string) strin
 	return ""
 }
 
+func compositeLiteralUnkeyedVarNames(lit *ast.CompositeLit) []string {
+	if lit == nil {
+		return nil
+	}
+
+	var names []string
+	for _, elt := range lit.Elts {
+		if _, ok := elt.(*ast.KeyValueExpr); ok {
+			continue
+		}
+
+		name := common.GetVarName(elt)
+		if name == "" || name == "?" {
+			continue
+		}
+		names = append(names, name)
+	}
+
+	return names
+}
+
 func (ma *Analyzer) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.CompositeLit {
 	if fn == nil || fn.Body == nil {
 		return nil
@@ -493,7 +522,10 @@ func (ma *Analyzer) lifecycleReleaseMethodUnlocks(returnedType, fieldName, suffi
 			continue
 		}
 
-		targetVar := recv + "." + fieldName + "." + suffix
+		targetVar := recv + "." + suffix
+		if fieldName != "" {
+			targetVar = recv + "." + fieldName + "." + suffix
+		}
 		if functionBodyContainsFieldCall(fn.Body, targetVar, methodNames) {
 			return true
 		}
@@ -533,6 +565,12 @@ func (ma *Analyzer) functionReturnsLifecycleHandleFor(mutexName string, methodNa
 				return true
 			}
 		}
+
+		for _, sourceVar := range compositeLiteralUnkeyedVarNames(lit) {
+			if sourceVar == baseVar && ma.lifecycleReleaseMethodUnlocks(returnedType, "", suffix, methodNames) {
+				return true
+			}
+		}
 	}
 
 	return false
@@ -556,12 +594,6 @@ func (ma *Analyzer) functionIsLifecycleReleaseFor(mutexName string, methodNames 
 
 	path := strings.TrimPrefix(mutexName, prefix)
 	parts := strings.Split(path, ".")
-	if len(parts) < 2 {
-		return false
-	}
-
-	fieldName := parts[0]
-	suffix := strings.Join(parts[1:], ".")
 
 	for _, fn := range ma.functions {
 		if fn == nil || fn.Body == nil || fn == ma.function {
@@ -573,6 +605,18 @@ func (ma *Analyzer) functionIsLifecycleReleaseFor(mutexName string, methodNames 
 				continue
 			}
 
+			if len(parts) == 1 {
+				for _, sourceVar := range compositeLiteralUnkeyedVarNames(lit) {
+					targetVar := sourceVar + "." + path
+					if functionBodyContainsFieldCall(fn.Body, targetVar, methodNames) {
+						return true
+					}
+				}
+				continue
+			}
+
+			fieldName := parts[0]
+			suffix := strings.Join(parts[1:], ".")
 			sourceVar := compositeLiteralFieldVarName(lit, fieldName)
 			if sourceVar == "" || sourceVar == "?" {
 				continue
@@ -772,10 +816,32 @@ func (ma *Analyzer) clearStats(stats map[string]*Stats) {
 	}
 }
 
+func (ma *Analyzer) emptyStatsLike(stats map[string]*Stats) map[string]*Stats {
+	empty := make(map[string]*Stats, len(stats))
+	for name := range stats {
+		empty[name] = &Stats{}
+	}
+	return empty
+}
+
 func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
 	if fn == nil || fn.Body == nil {
 		return nil
 	}
+
+	stack := ma.simulationStack
+	if stack == nil {
+		stack = make(map[methodSimulationKey]bool)
+		ma.simulationStack = stack
+	}
+
+	key := methodSimulationKey{fn: fn, varName: varName, isRWMutex: isRWMutex}
+	if stack[key] {
+		return cloneStats(initial)
+	}
+
+	stack[key] = true
+	defer delete(stack, key)
 
 	mutexNames := map[string]bool{}
 	rwMutexNames := map[string]bool{}
@@ -795,6 +861,8 @@ func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWM
 		rawBodyEffects:  true,
 		receiverMethods: ma.receiverMethods,
 		functions:       ma.functions,
+		simulationStack: stack,
+		localFuncStack:  ma.localFuncStack,
 		deferErrors: &deferErrorCollector{
 			badDeferUnlock:  make(map[string]bool),
 			badDeferRUnlock: make(map[string]bool),
@@ -804,6 +872,107 @@ func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWM
 	start := map[string]*Stats{varName: cloneStats(initial)}
 	final := simulated.analyzeBlock(fn.Body, start)
 	return cloneStats(final[varName])
+}
+
+func (ma *Analyzer) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return false
+	}
+
+	fnlit := ma.localFunctionLiteralBefore(ident.Name, call.Pos())
+	if fnlit == nil || fnlit.Body == nil {
+		return false
+	}
+
+	stack := ma.localFuncStack
+	if stack == nil {
+		stack = make(map[*ast.FuncLit]bool)
+		ma.localFuncStack = stack
+	}
+	if stack[fnlit] {
+		return false
+	}
+
+	stack[fnlit] = true
+	defer delete(stack, fnlit)
+
+	simulated := &Analyzer{
+		mutexNames:      ma.mutexNames,
+		rwMutexNames:    ma.rwMutexNames,
+		errorCollector:  &report.ErrorCollector{},
+		commentFilter:   ma.commentFilter,
+		function:        ma.function,
+		typesInfo:       ma.typesInfo,
+		rawBodyEffects:  true,
+		receiverMethods: ma.receiverMethods,
+		functions:       ma.functions,
+		simulationStack: ma.simulationStack,
+		localFuncStack:  stack,
+		deferErrors: &deferErrorCollector{
+			badDeferUnlock:  make(map[string]bool),
+			badDeferRUnlock: make(map[string]bool),
+		},
+	}
+
+	final := simulated.analyzeBlock(fnlit.Body, stats)
+	simulated.applyFunctionExitDefers(final)
+	ma.replaceStats(stats, final)
+	return true
+}
+
+func (ma *Analyzer) localFunctionLiteralBefore(name string, before token.Pos) *ast.FuncLit {
+	if ma.function == nil || ma.function.Body == nil {
+		return nil
+	}
+
+	var found *ast.FuncLit
+	ast.Inspect(ma.function.Body, func(n ast.Node) bool {
+		if n == nil || n.Pos() >= before {
+			return false
+		}
+
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || ident.Name != name || i >= len(node.Rhs) {
+					continue
+				}
+				if fnlit, ok := node.Rhs[i].(*ast.FuncLit); ok {
+					found = fnlit
+				}
+			}
+		case *ast.ValueSpec:
+			for i, ident := range node.Names {
+				if ident.Name != name || i >= len(node.Values) {
+					continue
+				}
+				if fnlit, ok := node.Values[i].(*ast.FuncLit); ok {
+					found = fnlit
+				}
+			}
+		}
+
+		return true
+	})
+
+	return found
+}
+
+func (ma *Analyzer) applyFunctionExitDefers(stats map[string]*Stats) {
+	for _, st := range stats {
+		for st.deferUnlock > 0 && st.lock > 0 {
+			st.deferUnlock--
+			st.lock--
+			ma.removeFirstLockPos(st)
+		}
+		for st.deferRUnlock > 0 && st.rlock > 0 {
+			st.deferRUnlock--
+			st.rlock--
+			ma.removeFirstRLockPos(st)
+		}
+	}
 }
 
 func (ma *Analyzer) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
