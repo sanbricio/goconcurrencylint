@@ -92,6 +92,73 @@ func TestGetAddValue(t *testing.T) {
 	assert.Equal(t, 1, GetAddValue(callBadLit))
 }
 
+func TestIntegerLiteralValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		expr  ast.Expr
+		value int
+		ok    bool
+	}{
+		{
+			name:  "positive",
+			expr:  &ast.BasicLit{Kind: token.INT, Value: "5"},
+			value: 5,
+			ok:    true,
+		},
+		{
+			name: "explicit plus",
+			expr: &ast.UnaryExpr{
+				Op: token.ADD,
+				X:  &ast.BasicLit{Kind: token.INT, Value: "5"},
+			},
+			value: 5,
+			ok:    true,
+		},
+		{
+			name: "negative",
+			expr: &ast.UnaryExpr{
+				Op: token.SUB,
+				X:  &ast.BasicLit{Kind: token.INT, Value: "3"},
+			},
+			value: -3,
+			ok:    true,
+		},
+		{
+			name: "nested unary",
+			expr: &ast.UnaryExpr{
+				Op: token.SUB,
+				X: &ast.UnaryExpr{
+					Op: token.SUB,
+					X:  &ast.BasicLit{Kind: token.INT, Value: "3"},
+				},
+			},
+			value: 3,
+			ok:    true,
+		},
+		{
+			name: "unsupported unary",
+			expr: &ast.UnaryExpr{
+				Op: token.XOR,
+				X:  &ast.BasicLit{Kind: token.INT, Value: "3"},
+			},
+			ok: false,
+		},
+		{
+			name: "non-integer literal",
+			expr: &ast.BasicLit{Kind: token.STRING, Value: `"3"`},
+			ok:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value, ok := IntegerLiteralValue(tt.expr)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.value, value)
+		})
+	}
+}
+
 func TestConstantBoolValue(t *testing.T) {
 	trueExpr := &ast.Ident{Name: "always"}
 	falseExpr := &ast.Ident{Name: "never"}

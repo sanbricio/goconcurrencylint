@@ -134,12 +134,43 @@ func GoodForLoopLockUnlock() {
 	}
 }
 
-// Good: Lock with defer Unlock in for loop (defers stack per iteration)
-func GoodForLoopDeferUnlock() {
+// Bad: Lock with defer Unlock in a loop stacks defers until the function returns.
+func BadForLoopDeferUnlock() {
 	var mu sync.Mutex
 	for i := 0; i < 10; i++ {
 		mu.Lock()
-		defer mu.Unlock()
+		defer mu.Unlock() // want "mutex 'mu' defers unlock inside loop"
+	}
+}
+
+// Good: the defer belongs to a per-iteration helper frame, not the outer loop.
+func GoodForLoopHelperFrameDeferUnlock() {
+	var mu sync.Mutex
+	for i := 0; i < 10; i++ {
+		func() {
+			mu.Lock()
+			defer mu.Unlock()
+		}()
+	}
+}
+
+// Bad: range loops have the same stacked-defer issue.
+func BadRangeLoopDeferUnlock() {
+	var mu sync.Mutex
+	for range []int{1, 2, 3} {
+		mu.Lock()
+		defer mu.Unlock() // want "mutex 'mu' defers unlock inside loop"
+	}
+}
+
+// Bad: nested loops must inherit the lock state from the outer loop body.
+func BadNestedLoopDeferUnlockUsesOuterLock() {
+	var mu sync.Mutex
+	for i := 0; i < 2; i++ {
+		mu.Lock()
+		for j := 0; j < 1; j++ {
+			defer mu.Unlock() // want "mutex 'mu' defers unlock inside loop"
+		}
 	}
 }
 
@@ -228,6 +259,26 @@ func GoodRWForLoopRLock() {
 	}
 }
 
+// Bad: RLock with defer RUnlock in a loop also keeps each read lock until return.
+func BadRWForLoopDeferRUnlock() {
+	var rwmu sync.RWMutex
+	for i := 0; i < 10; i++ {
+		rwmu.RLock()
+		defer rwmu.RUnlock() // want "rwmutex 'rwmu' defers runlock inside loop"
+	}
+}
+
+// Bad: nested ranges must inherit the read-lock state too.
+func BadNestedRangeDeferRUnlockUsesOuterRLock() {
+	var rwmu sync.RWMutex
+	for i := 0; i < 2; i++ {
+		rwmu.RLock()
+		for range []int{1} {
+			defer rwmu.RUnlock() // want "rwmutex 'rwmu' defers runlock inside loop"
+		}
+	}
+}
+
 // Good: a labeled statement before RLock should still be analyzed.
 // Regression for real-world code like consul/agent/cache getWithIndex.
 func GoodLabeledRLockRUnlock(retry bool) {
@@ -298,6 +349,90 @@ func GoodRWMutexParameter(rw *sync.RWMutex) {
 // Bad: function receives rwmutex parameter, rlocks but forgets to runlock
 func BadRWMutexParameter(rw *sync.RWMutex) {
 	rw.RLock() // want "rwmutex 'rw' is rlocked but not runlocked"
+}
+
+// ========== COPY-BY-VALUE TESTS ==========
+
+func takesMutexByValue(mu sync.Mutex) { // want "mutex 'mu' is copied by value"
+	mu.Lock()
+	mu.Unlock()
+}
+
+func takesRWMutexByValue(rw sync.RWMutex) { // want "rwmutex 'rw' is copied by value"
+	rw.RLock()
+	rw.RUnlock()
+}
+
+func takesMutexByPointer(mu *sync.Mutex) {
+	mu.Lock()
+	mu.Unlock()
+}
+
+func GoodMutexPointerPass() {
+	var mu sync.Mutex
+	takesMutexByPointer(&mu)
+}
+
+func BadMutexPassedByValue() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Unlock()
+	takesMutexByValue(mu) // want "mutex 'mu' is copied by value"
+}
+
+func BadMutexAssignedByValue() {
+	var mu sync.Mutex
+	mu.Lock()
+	copied := mu // want "mutex 'mu' is copied by value"
+	mu.Unlock()
+	copied.Lock()
+	copied.Unlock()
+}
+
+func BadMutexVarCopiedByValue() {
+	var mu sync.Mutex
+	mu.Lock()
+	var copied = mu // want "mutex 'mu' is copied by value"
+	mu.Unlock()
+	copied.Lock()
+	copied.Unlock()
+}
+
+func BadMutexMultiVarCopiedByValue() {
+	var muA, muB sync.Mutex
+	muA.Lock()
+	muB.Lock()
+	var copiedA, copiedB = muA, muB // want "mutex 'muA' is copied by value" "mutex 'muB' is copied by value"
+	muA.Unlock()
+	muB.Unlock()
+	copiedA.Lock()
+	copiedA.Unlock()
+	copiedB.Lock()
+	copiedB.Unlock()
+}
+
+func BadMutexFuncLiteralParamByValue() {
+	_ = func(mu sync.Mutex) { // want "mutex 'mu' is copied by value"
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+func BadRWMutexPassedByValue() {
+	var rw sync.RWMutex
+	rw.RLock()
+	rw.RUnlock()
+	takesRWMutexByValue(rw) // want "rwmutex 'rw' is copied by value"
+}
+
+func GoodMutexZeroValueAssignments() {
+	var mu sync.Mutex
+	mu = sync.Mutex{}
+	rw := sync.RWMutex{}
+	mu.Lock()
+	mu.Unlock()
+	rw.RLock()
+	rw.RUnlock()
 }
 
 // ========== PACKAGE-LEVEL VARIABLE TESTS ==========

@@ -113,6 +113,34 @@ func BadPanicWithoutRecover() {
 	wg.Wait()
 }
 
+// Non-deferred Done after a possible panic is not guaranteed to run.
+func BadDoneAfterConditionalPanic() {
+	var wg sync.WaitGroup
+	shouldPanic := true
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		if shouldPanic {
+			panic("error")
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// Defer keeps Done guaranteed even if work panics.
+func GoodDeferDoneBeforeConditionalPanic() {
+	var wg sync.WaitGroup
+	shouldPanic := true
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if shouldPanic {
+			panic("error")
+		}
+	}()
+	wg.Wait()
+}
+
 // Add without Done in a goroutine with a conditional return
 func BadDeferWithConditionalReturn() {
 	var wg sync.WaitGroup

@@ -12,12 +12,61 @@ func GoodWaitGroupPassedToGoroutine() {
 	wg.Wait()
 }
 
-// WaitGroup passed as value
-func GoodWaitGroupPassedAsValue() {
+// WaitGroup passed as value copies the counter and does not release the original.
+func BadWaitGroupPassedAsValue() {
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go processWork(wg) // Passed as value, not pointer
+	go processWork(wg) // want "waitgroup 'wg' is copied by value"
 	wg.Wait()
+}
+
+func BadWaitGroupAssignedByValue() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	copied := wg // want "waitgroup 'wg' is copied by value"
+	go func() {
+		defer copied.Done()
+	}()
+	copied.Wait()
+	wg.Done()
+	wg.Wait()
+}
+
+func BadWaitGroupVarCopiedByValue() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var copied = wg // want "waitgroup 'wg' is copied by value"
+	go func() {
+		defer copied.Done()
+	}()
+	copied.Wait()
+	wg.Done()
+	wg.Wait()
+}
+
+func BadWaitGroupMultiVarCopiedByValue() {
+	var wgA, wgB sync.WaitGroup
+	wgA.Add(1)
+	wgB.Add(1)
+	var copiedA, copiedB = wgA, wgB // want "waitgroup 'wgA' is copied by value" "waitgroup 'wgB' is copied by value"
+	go func() {
+		defer copiedA.Done()
+	}()
+	go func() {
+		defer copiedB.Done()
+	}()
+	copiedA.Wait()
+	copiedB.Wait()
+	wgA.Done()
+	wgB.Done()
+	wgA.Wait()
+	wgB.Wait()
+}
+
+func BadWaitGroupFuncLiteralParamByValue() {
+	_ = func(wg sync.WaitGroup) { // want "waitgroup 'wg' is copied by value"
+		wg.Done()
+	}
 }
 
 // WaitGroup method passed as function

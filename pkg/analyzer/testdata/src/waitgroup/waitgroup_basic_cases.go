@@ -82,6 +82,26 @@ func BadExtraDone() {
 	wg.Wait()
 }
 
+// Negative Add is a fragile Done substitute and should be called out directly.
+func BadNegativeAddAsDone() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	wg.Add(-1) // want "waitgroup 'wg' has negative Add"
+	wg.Wait()
+}
+
+// Negative Add without prior work can drive the counter below zero.
+func BadNegativeAddWithoutPositiveAdd() {
+	var wg sync.WaitGroup
+	wg.Add(-1) // want "waitgroup 'wg' has negative Add"
+}
+
+func BadNegativeConstAdd() {
+	const negativeAdd = -1
+	var wg sync.WaitGroup
+	wg.Add(negativeAdd) // want "waitgroup 'wg' has negative Add"
+}
+
 // ---------- Wait Ordering Patterns ----------
 
 // Add after Wait (illegal, Wait should be called after all Adds)
@@ -107,6 +127,22 @@ func EdgeCaseAddAfterWaitMainFlow() {
 func EdgeCaseNoAddNoDoneNoGoroutine() {
 	var wg sync.WaitGroup
 	wg.Wait() // legal, returns immediately
+}
+
+// Waiting in the same goroutine before any separate Done can run deadlocks.
+func BadWaitBeforeDoneSameGoroutine() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	wg.Wait() // want "waitgroup 'wg' waits with pending Add in the same goroutine"
+	wg.Done()
+}
+
+// Main-flow Done before Wait drains the counter and is legal.
+func GoodDoneBeforeWaitSameGoroutine() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	wg.Done()
+	wg.Wait()
 }
 
 // Edge case where Wait is called multiple times

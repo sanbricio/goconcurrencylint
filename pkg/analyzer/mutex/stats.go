@@ -96,7 +96,18 @@ func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, s
 	}
 
 	switch methodName {
-	case "Lock", "TryLock":
+	case "Lock":
+		if stats[varName].lock > 0 {
+			ma.errorCollector.AddError(pos, "mutex '"+varName+"' is re-locked before unlock")
+		}
+		if stats[varName].borrowedLock > 0 {
+			stats[varName].borrowedLock--
+			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			return
+		}
+		stats[varName].lock++
+		stats[varName].lockPos = append(stats[varName].lockPos, pos)
+	case "TryLock":
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
 			ma.removeFirstBorrowedUnlockPos(stats[varName])
@@ -122,7 +133,18 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 	}
 
 	switch methodName {
-	case "Lock", "TryLock":
+	case "Lock":
+		if stats[varName].rlock > 0 {
+			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' attempts write Lock while read lock is held")
+		}
+		if stats[varName].borrowedLock > 0 {
+			stats[varName].borrowedLock--
+			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			return
+		}
+		stats[varName].lock++
+		stats[varName].lockPos = append(stats[varName].lockPos, pos)
+	case "TryLock":
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
 			ma.removeFirstBorrowedUnlockPos(stats[varName])

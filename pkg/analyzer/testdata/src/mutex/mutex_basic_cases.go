@@ -39,7 +39,7 @@ func BadLockWithoutUnlock() {
 func BadDoubleLock() {
 	mu := sync.Mutex{}
 	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
-	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked" "mutex 'mu' is re-locked before unlock"
 }
 
 // Double lock with direct assignment
@@ -47,14 +47,32 @@ func BadDoubleLockDirectAssign() {
 	var mu sync.Mutex
 	mu = sync.Mutex{} // direct assignment
 	mu.Lock()         // want "mutex 'mu' is locked but not unlocked"
-	mu.Lock()         // want "mutex 'mu' is locked but not unlocked"
+	mu.Lock()         // want "mutex 'mu' is locked but not unlocked" "mutex 'mu' is re-locked before unlock"
 }
 
 // Imbalanced lock/unlock (more locks than unlocks)
 func BadImbalancedLockUnlock() {
 	var mu sync.Mutex
 	mu.Lock()
-	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked" "mutex 'mu' is re-locked before unlock"
+	mu.Unlock()
+}
+
+// Re-entrant lock deadlocks even if the code later unlocks twice.
+func BadReentrantLockEventuallyBalanced() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Lock() // want "mutex 'mu' is re-locked before unlock"
+	mu.Unlock()
+	mu.Unlock()
+}
+
+// Sequential lock/unlock pairs are fine.
+func GoodSequentialRelock() {
+	var mu sync.Mutex
+	mu.Lock()
+	mu.Unlock()
+	mu.Lock()
 	mu.Unlock()
 }
 
@@ -89,6 +107,43 @@ func GoodDeferUnlock() {
 	var mu sync.Mutex
 	mu.Lock()
 	defer mu.Unlock()
+}
+
+// TryLock success branch owns the lock and may unlock it.
+func GoodTryLockUnlocksOnlyOnSuccess() {
+	var mu sync.Mutex
+	if mu.TryLock() {
+		defer mu.Unlock()
+	}
+}
+
+// TryLock false branch does not own the lock.
+func BadTryLockFalseBranchUnlock() {
+	var mu sync.Mutex
+	if mu.TryLock() {
+		mu.Unlock()
+	} else {
+		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+	}
+}
+
+// Negated TryLock: the fallthrough path owns the lock.
+func GoodNegatedTryLockFallthroughUnlock() {
+	var mu sync.Mutex
+	if !mu.TryLock() {
+		return
+	}
+	mu.Unlock()
+}
+
+// Negated TryLock: the true branch is the failed lock path.
+func BadNegatedTryLockFalsePathUnlock() {
+	var mu sync.Mutex
+	if !mu.TryLock() {
+		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+		return
+	}
+	mu.Unlock()
 }
 
 // Lock/unlock with panic recovery

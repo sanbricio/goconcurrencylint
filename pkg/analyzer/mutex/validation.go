@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
@@ -33,6 +34,7 @@ func (ma *Analyzer) handleDeferRUnlock(varName string, pos token.Pos, stats map[
 
 // analyzeRangeStatement handles range statements
 func (ma *Analyzer) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
+	ma.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.replaceStats(stats, rangeStats)
 }
@@ -116,11 +118,19 @@ func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats
 	}
 
 	ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
+	if ma.blockAlwaysTerminates(stmt.Body) {
+		ma.replaceStats(stats, elseBase)
+	}
 }
 
 func (ma *Analyzer) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
 	thenStats := ma.copyStats(stats)
 	elseStats := ma.copyStats(stats)
+
+	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		negatedThen, negatedElse := ma.branchInitialStatsForCondition(unary.X, stats)
+		return negatedElse, negatedThen
+	}
 
 	call, ok := cond.(*ast.CallExpr)
 	if !ok {
@@ -213,6 +223,7 @@ func (ma *Analyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Sta
 		return
 	}
 
+	ma.reportDeferredUnlocksInLoop(stmt.Body)
 	forStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.applyLoopExitLocks(stmt, stats, forStats)
 	if stmt.Cond == nil && ma.blockContainsReturn(stmt.Body) && !ma.blockContainsBreak(stmt.Body) {
@@ -245,6 +256,161 @@ func (ma *Analyzer) blockContainsBreak(block *ast.BlockStmt) bool {
 		return true
 	})
 	return found
+}
+
+func (ma *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
+	if block == nil {
+		return false
+	}
+
+	for _, stmt := range block.List {
+		switch s := stmt.(type) {
+		case *ast.ReturnStmt:
+			return true
+		case *ast.BranchStmt:
+			return s.Tok == token.BREAK || s.Tok == token.GOTO
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "panic" {
+				return true
+			}
+		case *ast.IfStmt:
+			if s.Else == nil {
+				continue
+			}
+			if !ma.blockAlwaysTerminates(s.Body) {
+				continue
+			}
+			switch elseNode := s.Else.(type) {
+			case *ast.BlockStmt:
+				if ma.blockAlwaysTerminates(elseNode) {
+					return true
+				}
+			case *ast.IfStmt:
+				if ma.blockAlwaysTerminates(&ast.BlockStmt{List: []ast.Stmt{elseNode}}) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (ma *Analyzer) reportDeferredUnlocksInLoop(body *ast.BlockStmt) {
+	if body == nil {
+		return
+	}
+
+	locked := make(map[string]bool)
+	rlocked := make(map[string]bool)
+	ma.reportDeferredUnlocksInLoopStatements(body.List, locked, rlocked)
+}
+
+func (ma *Analyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, locked, rlocked map[string]bool) {
+	for _, stmt := range stmts {
+		if ma.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if !ok || ma.commentFilter.ShouldSkipCall(call) {
+				continue
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			varName := common.GetVarName(sel.X)
+			switch sel.Sel.Name {
+			case "Lock":
+				if ma.mutexNames[varName] || ma.rwMutexNames[varName] {
+					locked[varName] = true
+				}
+			case "RLock":
+				if ma.rwMutexNames[varName] {
+					rlocked[varName] = true
+				}
+			case "Unlock":
+				delete(locked, varName)
+			case "RUnlock":
+				delete(rlocked, varName)
+			}
+
+		case *ast.DeferStmt:
+			if ma.commentFilter.ShouldSkipCall(s.Call) {
+				continue
+			}
+			sel, ok := s.Call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			varName := common.GetVarName(sel.X)
+			switch sel.Sel.Name {
+			case "Unlock":
+				if locked[varName] {
+					mutexType := "mutex"
+					if ma.rwMutexNames[varName] {
+						mutexType = "rwmutex"
+					}
+					ma.errorCollector.AddError(s.Pos(), mutexType+" '"+varName+"' defers unlock inside loop")
+				}
+			case "RUnlock":
+				if rlocked[varName] {
+					ma.errorCollector.AddError(s.Pos(), "rwmutex '"+varName+"' defers runlock inside loop")
+				}
+			}
+
+		case *ast.BlockStmt:
+			ma.reportDeferredUnlocksInLoopStatements(s.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+		case *ast.LabeledStmt:
+			ma.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s.Stmt}, cloneBoolMap(locked), cloneBoolMap(rlocked))
+		case *ast.IfStmt:
+			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+			if s.Else != nil {
+				ma.reportDeferredUnlocksInLoopElse(s.Else, cloneBoolMap(locked), cloneBoolMap(rlocked))
+			}
+		case *ast.ForStmt:
+			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+		case *ast.RangeStmt:
+			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+		case *ast.SwitchStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok {
+					ma.reportDeferredUnlocksInLoopStatements(cc.Body, cloneBoolMap(locked), cloneBoolMap(rlocked))
+				}
+			}
+		case *ast.TypeSwitchStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok {
+					ma.reportDeferredUnlocksInLoopStatements(cc.Body, cloneBoolMap(locked), cloneBoolMap(rlocked))
+				}
+			}
+		case *ast.SelectStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CommClause); ok {
+					ma.reportDeferredUnlocksInLoopStatements(cc.Body, cloneBoolMap(locked), cloneBoolMap(rlocked))
+				}
+			}
+		}
+	}
+}
+
+func (ma *Analyzer) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, locked, rlocked map[string]bool) {
+	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		ma.reportDeferredUnlocksInLoopStatements(s.List, locked, rlocked)
+	case *ast.IfStmt:
+		ma.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s}, locked, rlocked)
+	}
+}
+
+func cloneBoolMap(src map[string]bool) map[string]bool {
+	return maps.Clone(src)
 }
 
 func (ma *Analyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[string]*Stats) {

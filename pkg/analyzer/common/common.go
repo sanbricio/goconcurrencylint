@@ -63,13 +63,61 @@ func GetAddValue(call *ast.CallExpr) int {
 	if len(call.Args) == 0 {
 		return 1
 	}
-	if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.INT {
-		if val, err := strconv.Atoi(lit.Value); err == nil {
-			return val
-		}
+	if val, ok := IntegerLiteralValue(call.Args[0]); ok {
+		return val
 	}
 	// If the argument is not a literal integer, default to 1.
 	return 1
+}
+
+// ConstantIntValue returns the integer value of expr when it is a literal or a
+// typed constant available through go/types.
+func ConstantIntValue(expr ast.Expr, info *types.Info) (int, bool) {
+	if val, ok := IntegerLiteralValue(expr); ok {
+		return val, true
+	}
+	if expr == nil || info == nil {
+		return 0, false
+	}
+
+	tv, ok := info.Types[expr]
+	if !ok || tv.Value == nil || tv.Value.Kind() != constant.Int {
+		return 0, false
+	}
+
+	value, ok := constant.Int64Val(tv.Value)
+	if !ok {
+		return 0, false
+	}
+	return int(value), true
+}
+
+// IntegerLiteralValue extracts a signed integer literal value when expr is a
+// basic integer literal or a unary +/- integer literal.
+func IntegerLiteralValue(expr ast.Expr) (int, bool) {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.INT {
+			return 0, false
+		}
+		val, err := strconv.Atoi(e.Value)
+		if err != nil {
+			return 0, false
+		}
+		return val, true
+	case *ast.UnaryExpr:
+		val, ok := IntegerLiteralValue(e.X)
+		if !ok {
+			return 0, false
+		}
+		switch e.Op {
+		case token.ADD:
+			return val, true
+		case token.SUB:
+			return -val, true
+		}
+	}
+	return 0, false
 }
 
 // ConstantBoolValue returns the constant boolean value of expr when one is
