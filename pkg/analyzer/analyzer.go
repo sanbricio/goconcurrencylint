@@ -342,7 +342,7 @@ func reportCopyByValueArgs(call *ast.CallExpr, pass *analysis.Pass, errorCollect
 }
 
 func copiedSyncPrimitive(expr ast.Expr, pass *analysis.Pass) (string, string, bool) {
-	if expr == nil || isFreshSyncPrimitiveValue(expr) {
+	if expr == nil || isTypeExpression(expr, pass.TypesInfo) || isFreshSyncPrimitiveValue(expr) {
 		return "", "", false
 	}
 
@@ -356,6 +356,14 @@ func copiedSyncPrimitive(expr ast.Expr, pass *analysis.Pass) (string, string, bo
 		return "", "", false
 	}
 	return kind, name, true
+}
+
+func isTypeExpression(expr ast.Expr, info *types.Info) bool {
+	if expr == nil || info == nil {
+		return false
+	}
+	tv, ok := info.Types[expr]
+	return ok && tv.IsType()
 }
 
 func isFreshSyncPrimitiveValue(expr ast.Expr) bool {

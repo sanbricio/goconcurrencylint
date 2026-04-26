@@ -237,6 +237,9 @@ func (ma *Analyzer) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos
 	// Check for mutex unlocks in function literal
 	for mutexName := range ma.mutexNames {
 		if ma.containsUnlock(fnlit.Body, mutexName) && !ma.containsLock(fnlit.Body, mutexName) {
+			if stats[mutexName].lock == 0 && ma.unlocksOnlyInRecoverGuard(fnlit.Body, mutexName, "Unlock") {
+				continue
+			}
 			ma.handleDeferUnlock(mutexName, pos, stats, false)
 		}
 	}
@@ -244,12 +247,174 @@ func (ma *Analyzer) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos
 	// Check for rwmutex unlocks in function literal
 	for rwMutexName := range ma.rwMutexNames {
 		if ma.containsUnlock(fnlit.Body, rwMutexName) && !ma.containsLock(fnlit.Body, rwMutexName) {
+			if stats[rwMutexName].lock == 0 && ma.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "Unlock") {
+				continue
+			}
 			ma.handleDeferUnlock(rwMutexName, pos, stats, true)
 		}
 		if ma.containsRUnlock(fnlit.Body, rwMutexName) && !ma.containsRLock(fnlit.Body, rwMutexName) {
+			if stats[rwMutexName].rlock == 0 && ma.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "RUnlock") {
+				continue
+			}
 			ma.handleDeferRUnlock(rwMutexName, pos, stats)
 		}
 	}
+}
+
+// unlocksOnlyInRecoverGuard reports whether the block contains at least one
+// target unlock and every target unlock is guarded by a recover() check.
+func (ma *Analyzer) unlocksOnlyInRecoverGuard(block *ast.BlockStmt, mutexName, methodName string) bool {
+	foundUnlock := false
+	foundUnguardedUnlock := false
+
+	var (
+		visitStmt  func(ast.Stmt, bool)
+		visitBlock func(*ast.BlockStmt, bool)
+		visitExpr  func(ast.Expr, bool)
+	)
+
+	visitExpr = func(expr ast.Expr, recoverGuarded bool) {
+		if expr == nil || foundUnguardedUnlock {
+			return
+		}
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if foundUnguardedUnlock {
+				return false
+			}
+			if fnlit, ok := n.(*ast.FuncLit); ok && fnlit != expr {
+				return false
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok || ma.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != methodName || common.GetVarName(sel.X) != mutexName {
+				return true
+			}
+			foundUnlock = true
+			if !recoverGuarded {
+				foundUnguardedUnlock = true
+			}
+			return false
+		})
+	}
+
+	visitBlock = func(block *ast.BlockStmt, recoverGuarded bool) {
+		if block == nil || foundUnguardedUnlock {
+			return
+		}
+		for _, stmt := range block.List {
+			visitStmt(stmt, recoverGuarded)
+			if foundUnguardedUnlock {
+				return
+			}
+		}
+	}
+
+	visitStmt = func(stmt ast.Stmt, recoverGuarded bool) {
+		if stmt == nil || foundUnguardedUnlock {
+			return
+		}
+		switch s := stmt.(type) {
+		case *ast.BlockStmt:
+			visitBlock(s, recoverGuarded)
+		case *ast.LabeledStmt:
+			visitStmt(s.Stmt, recoverGuarded)
+		case *ast.IfStmt:
+			bodyGuarded := recoverGuarded || containsRecoverCall(s.Init) || containsRecoverCall(s.Cond)
+			visitBlock(s.Body, bodyGuarded)
+			if s.Else != nil {
+				visitStmt(s.Else, recoverGuarded)
+			}
+		case *ast.ForStmt:
+			visitStmt(s.Init, recoverGuarded)
+			visitExpr(s.Cond, recoverGuarded)
+			visitStmt(s.Post, recoverGuarded)
+			visitBlock(s.Body, recoverGuarded)
+		case *ast.RangeStmt:
+			visitExpr(s.X, recoverGuarded)
+			visitBlock(s.Body, recoverGuarded)
+		case *ast.SwitchStmt:
+			visitStmt(s.Init, recoverGuarded)
+			visitExpr(s.Tag, recoverGuarded)
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					visitBlock(&ast.BlockStmt{List: cc.Body}, recoverGuarded)
+				}
+			}
+		case *ast.TypeSwitchStmt:
+			visitStmt(s.Init, recoverGuarded)
+			visitStmt(s.Assign, recoverGuarded)
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					visitBlock(&ast.BlockStmt{List: cc.Body}, recoverGuarded)
+				}
+			}
+		case *ast.SelectStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CommClause); ok {
+					visitStmt(cc.Comm, recoverGuarded)
+					visitBlock(&ast.BlockStmt{List: cc.Body}, recoverGuarded)
+				}
+			}
+		case *ast.ExprStmt:
+			visitExpr(s.X, recoverGuarded)
+		case *ast.DeferStmt:
+			visitExpr(s.Call, recoverGuarded)
+		case *ast.GoStmt:
+			visitExpr(s.Call, recoverGuarded)
+		case *ast.AssignStmt:
+			for _, expr := range s.Rhs {
+				visitExpr(expr, recoverGuarded)
+			}
+		case *ast.DeclStmt:
+			if gen, ok := s.Decl.(*ast.GenDecl); ok {
+				for _, spec := range gen.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, expr := range vs.Values {
+							visitExpr(expr, recoverGuarded)
+						}
+					}
+				}
+			}
+		case *ast.ReturnStmt:
+			for _, expr := range s.Results {
+				visitExpr(expr, recoverGuarded)
+			}
+		}
+	}
+
+	visitBlock(block, false)
+	return foundUnlock && !foundUnguardedUnlock
+}
+
+// containsRecoverCall reports whether node contains a recover() call, ignoring
+// nested function literals that execute in a different frame.
+func containsRecoverCall(node ast.Node) bool {
+	if node == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if fnlit, ok := n.(*ast.FuncLit); ok && fnlit != node {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if ok && ident.Name == "recover" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // containsUnlock checks if a block contains an unlock call for a specific mutex

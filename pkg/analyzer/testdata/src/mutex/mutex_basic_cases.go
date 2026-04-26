@@ -158,6 +158,32 @@ func GoodRecoverWithUnlock() {
 	panic("fail")
 }
 
+func GoodRecoverRUnlockAfterLaterRLock(shouldPanic bool) {
+	var mu sync.RWMutex
+	defer func() {
+		if r := recover(); r != nil {
+			mu.RUnlock()
+		}
+	}()
+	mu.RLock()
+	if shouldPanic {
+		panic("fail")
+	}
+	mu.RUnlock()
+}
+
+func BadRecoverInNestedConditionDoesNotGuardRUnlock(cond bool) {
+	var mu sync.RWMutex
+	defer func() { // want "rwmutex 'mu' has defer runlock but no corresponding rlock"
+		if func() bool {
+			_ = recover()
+			return cond
+		}() {
+			mu.RUnlock()
+		}
+	}()
+}
+
 // Defer unlock without prior lock
 func BadDeferUnlockWithoutLock() {
 	var mu sync.Mutex

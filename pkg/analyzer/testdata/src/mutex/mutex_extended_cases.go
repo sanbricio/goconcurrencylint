@@ -163,6 +163,39 @@ func BadRangeLoopDeferUnlock() {
 	}
 }
 
+// Good: the defer is followed by a return on the same loop path, so it cannot
+// accumulate across iterations.
+func GoodForLoopDeferUnlockBeforeReturn(done bool) {
+	var mu sync.Mutex
+	for {
+		mu.Lock()
+		if done {
+			defer mu.Unlock()
+			return
+		}
+		mu.Unlock()
+		done = true
+	}
+}
+
+func GoodForLoopDeferUnlockBeforePanic() {
+	var mu sync.Mutex
+	for {
+		mu.Lock()
+		defer mu.Unlock()
+		panic("fail")
+	}
+}
+
+func GoodForLoopDeferUnlockBeforeBreak() {
+	var mu sync.Mutex
+	for {
+		mu.Lock()
+		defer mu.Unlock()
+		break
+	}
+}
+
 // Bad: nested loops must inherit the lock state from the outer loop body.
 func BadNestedLoopDeferUnlockUsesOuterLock() {
 	var mu sync.Mutex
@@ -265,6 +298,19 @@ func BadRWForLoopDeferRUnlock() {
 	for i := 0; i < 10; i++ {
 		rwmu.RLock()
 		defer rwmu.RUnlock() // want "rwmutex 'rwmu' defers runlock inside loop"
+	}
+}
+
+func GoodRWForLoopDeferUnlockBeforeReturn(done bool) {
+	var rwmu sync.RWMutex
+	for {
+		rwmu.Lock()
+		if done {
+			defer rwmu.Unlock()
+			return
+		}
+		rwmu.Unlock()
+		done = true
 	}
 }
 
@@ -431,6 +477,18 @@ func GoodMutexZeroValueAssignments() {
 	rw := sync.RWMutex{}
 	mu.Lock()
 	mu.Unlock()
+	rw.RLock()
+	rw.RUnlock()
+}
+
+func GoodMutexNewAllocation() {
+	mu := new(sync.Mutex)
+	mu.Lock()
+	mu.Unlock()
+}
+
+func GoodRWMutexNewAllocation() {
+	rw := new(sync.RWMutex)
 	rw.RLock()
 	rw.RUnlock()
 }
