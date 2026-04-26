@@ -310,7 +310,7 @@ func (ma *Analyzer) reportDeferredUnlocksInLoop(body *ast.BlockStmt) {
 }
 
 func (ma *Analyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, locked, rlocked map[string]bool) {
-	for _, stmt := range stmts {
+	for i, stmt := range stmts {
 		if ma.commentFilter.ShouldSkipStatement(stmt) {
 			continue
 		}
@@ -343,6 +343,9 @@ func (ma *Analyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, lock
 
 		case *ast.DeferStmt:
 			if ma.commentFilter.ShouldSkipCall(s.Call) {
+				continue
+			}
+			if ma.blockAlwaysTerminates(&ast.BlockStmt{List: stmts[i+1:]}) {
 				continue
 			}
 			sel, ok := s.Call.Fun.(*ast.SelectorExpr)

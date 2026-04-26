@@ -69,6 +69,15 @@ func BadWaitGroupFuncLiteralParamByValue() {
 	}
 }
 
+func GoodWaitGroupNewAllocation() {
+	wg := new(sync.WaitGroup)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
 // WaitGroup method passed as function
 func GoodWaitGroupMethodPassed() {
 	var wg sync.WaitGroup
