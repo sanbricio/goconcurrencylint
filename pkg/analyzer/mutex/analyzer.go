@@ -71,6 +71,7 @@ func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *repor
 func (ma *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.function = fn
 	ma.initializeStats()
+	ma.checkLockOrderCycles(fn.Body)
 	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
 	ma.reportUnmatchedLocks(finalStats)
 }
@@ -659,10 +660,11 @@ func (ma *Analyzer) explicitTransferCallPositions(body *ast.BlockStmt) map[token
 	if body == nil {
 		return positions
 	}
-
-	var visitStmt func(ast.Stmt)
-	var visitStmtList func([]ast.Stmt)
-	var visitElse func(ast.Stmt)
+	var (
+		visitStmt     func(ast.Stmt)
+		visitStmtList func([]ast.Stmt)
+		visitElse     func(ast.Stmt)
+	)
 
 	recordCall := func(call *ast.CallExpr) {
 		if call != nil {

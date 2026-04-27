@@ -173,3 +173,42 @@ func BadWaitGroupGoAfterWait() {
 		doSomething()
 	})
 }
+
+func GoodWaitGroupGoRecoveredPanic() {
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer func() {
+			_ = recover()
+		}()
+		panic("handled")
+	})
+	wg.Wait()
+}
+
+func BadWaitGroupGoPanic() {
+	var wg sync.WaitGroup
+	wg.Go(func() { // want "waitgroup 'wg' Go function may panic"
+		panic("boom")
+	})
+	wg.Wait()
+}
+
+func BadWaitGroupGoRecoverOutsideDefer() {
+	var wg sync.WaitGroup
+	wg.Go(func() { // want "waitgroup 'wg' Go function may panic"
+		_ = recover()
+		panic("boom")
+	})
+	wg.Wait()
+}
+
+func BadWaitGroupGoRecoverInNestedFunction() {
+	var wg sync.WaitGroup
+	wg.Go(func() { // want "waitgroup 'wg' Go function may panic"
+		go func() {
+			_ = recover()
+		}()
+		panic("boom")
+	})
+	wg.Wait()
+}
