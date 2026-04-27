@@ -660,10 +660,11 @@ func (ma *Analyzer) explicitTransferCallPositions(body *ast.BlockStmt) map[token
 	if body == nil {
 		return positions
 	}
-
-	var visitStmt func(ast.Stmt)
-	var visitStmtList func([]ast.Stmt)
-	var visitElse func(ast.Stmt)
+	var (
+		visitStmt     func(ast.Stmt)
+		visitStmtList func([]ast.Stmt)
+		visitElse     func(ast.Stmt)
+	)
 
 	recordCall := func(call *ast.CallExpr) {
 		if call != nil {

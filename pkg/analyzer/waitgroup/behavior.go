@@ -214,8 +214,10 @@ func (wga *Analyzer) checkDoneOutsideWorkerForWaitGroup(wgName string) {
 	recentPositiveAdd := false
 	workerGoroutinesWithoutDone := 0
 
-	var visitStmt func(ast.Stmt)
-	var visitStmts func([]ast.Stmt)
+	var (
+		visitStmt  func(ast.Stmt)
+		visitStmts func([]ast.Stmt)
+	)
 
 	visitStmts = func(stmts []ast.Stmt) {
 		for _, stmt := range stmts {
