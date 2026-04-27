@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"go/types"
 	"maps"
+	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
@@ -290,6 +291,9 @@ func reportCopyByValueParams(fn *ast.FuncDecl, pass *analysis.Pass, errorCollect
 		return
 	}
 
+	if fn.Recv != nil {
+		reportCopyByValueFieldList(fn.Recv, pass, errorCollector)
+	}
 	reportCopyByValueFieldList(fn.Type.Params, pass, errorCollector)
 }
 
@@ -322,7 +326,10 @@ func reportCopyByValueAssignments(assign *ast.AssignStmt, pass *analysis.Pass, e
 		return
 	}
 
-	for _, rhs := range assign.Rhs {
+	for i, rhs := range assign.Rhs {
+		if i < len(assign.Lhs) && isBlankIdentifier(assign.Lhs[i]) {
+			continue
+		}
 		if kind, name, ok := copiedSyncPrimitive(rhs, pass); ok {
 			errorCollector.AddError(rhs.Pos(), copyByValueMessage(kind, name))
 		}
@@ -358,6 +365,11 @@ func copiedSyncPrimitive(expr ast.Expr, pass *analysis.Pass) (string, string, bo
 	return kind, name, true
 }
 
+func isBlankIdentifier(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	return ok && ident.Name == "_"
+}
+
 func isTypeExpression(expr ast.Expr, info *types.Info) bool {
 	if expr == nil || info == nil {
 		return false
@@ -377,6 +389,16 @@ func isFreshSyncPrimitiveValue(expr ast.Expr) bool {
 }
 
 func syncPrimitiveValueKind(typ types.Type) string {
+	if kind := directSyncPrimitiveValueKind(typ); kind != "" {
+		return kind
+	}
+	if kind := containedSyncPrimitiveValueKind(typ, make(map[types.Type]bool)); kind != "" {
+		return "struct containing " + kind
+	}
+	return ""
+}
+
+func directSyncPrimitiveValueKind(typ types.Type) string {
 	if typ == nil {
 		return ""
 	}
@@ -398,5 +420,43 @@ func syncPrimitiveValueKind(typ types.Type) string {
 }
 
 func copyByValueMessage(kind, name string) string {
+	if contained, ok := strings.CutPrefix(kind, "struct containing "); ok {
+		return "struct '" + name + "' containing " + contained + " is copied by value"
+	}
 	return kind + " '" + name + "' is copied by value"
+}
+
+func containedSyncPrimitiveValueKind(typ types.Type, visited map[types.Type]bool) string {
+	if typ == nil {
+		return ""
+	}
+
+	typ = types.Unalias(typ)
+	if visited[typ] {
+		return ""
+	}
+	visited[typ] = true
+
+	switch t := typ.(type) {
+	case *types.Named:
+		if kind := directSyncPrimitiveValueKind(t); kind != "" {
+			return kind
+		}
+		return containedSyncPrimitiveValueKind(t.Underlying(), visited)
+	case *types.Struct:
+		for i := 0; i < t.NumFields(); i++ {
+			fieldType := types.Unalias(t.Field(i).Type())
+			if _, ok := fieldType.(*types.Pointer); ok {
+				continue
+			}
+			if kind := directSyncPrimitiveValueKind(fieldType); kind != "" {
+				return kind
+			}
+			if kind := containedSyncPrimitiveValueKind(fieldType, visited); kind != "" {
+				return kind
+			}
+		}
+	}
+
+	return ""
 }

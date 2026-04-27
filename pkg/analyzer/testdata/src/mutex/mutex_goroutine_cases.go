@@ -23,6 +23,22 @@ func GoodGoroutineLocksAfterParentReleases() {
 	mu.Unlock()
 }
 
+func GoodConsistentLockOrderAcrossGoroutines() {
+	var muA, muB sync.Mutex
+	go func() {
+		muA.Lock()
+		muB.Lock()
+		muB.Unlock()
+		muA.Unlock()
+	}()
+	go func() {
+		muA.Lock()
+		muB.Lock()
+		muB.Unlock()
+		muA.Unlock()
+	}()
+}
+
 type borrowedLockManager struct {
 	mu sync.Mutex
 }
@@ -94,6 +110,57 @@ func BadGoroutineLockWithoutUnlockAfterParentReleases() {
 		mu.Lock() // want "mutex 'mu' is locked but not unlocked in goroutine"
 	}()
 	mu.Unlock()
+}
+
+func BadCrossGoroutineUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	go func() {
+		mu.Unlock() // want "mutex 'mu' is unlocked in a different goroutine than it was locked"
+	}()
+}
+
+func BadCrossGoroutineUnlockThenParentUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	go func() {
+		mu.Unlock() // want "mutex 'mu' is unlocked in a different goroutine than it was locked"
+	}()
+	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+}
+
+func BadGoroutineLockOrderCycle() {
+	var muA, muB sync.Mutex
+	go func() {
+		muA.Lock()
+		muB.Lock()
+		muB.Unlock()
+		muA.Unlock()
+	}()
+	go func() {
+		muB.Lock()
+		muA.Lock() // want "mutex lock order cycle between 'muA' and 'muB'"
+		muA.Unlock()
+		muB.Unlock()
+	}()
+}
+
+func BadTryRLockOrderCycle() {
+	var mu sync.Mutex
+	var rw sync.RWMutex
+	go func() {
+		if rw.TryRLock() {
+			mu.Lock()
+			mu.Unlock()
+			rw.RUnlock()
+		}
+	}()
+	go func() {
+		mu.Lock()
+		rw.Lock() // want "mutex lock order cycle between 'mu' and 'rw'"
+		rw.Unlock()
+		mu.Unlock()
+	}()
 }
 
 // Goroutine defer unlock without lock

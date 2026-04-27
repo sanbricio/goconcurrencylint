@@ -319,6 +319,11 @@ type WorkerPool struct {
 	wg sync.WaitGroup
 }
 
+type GenericWorkerPool[T any] struct {
+	wg    sync.WaitGroup
+	value T
+}
+
 type EmbeddedWorkerPool struct {
 	sync.WaitGroup
 }
@@ -357,6 +362,53 @@ func (wp *WorkerPool) GoodMethodWaitGroup() {
 func (wp *WorkerPool) BadMethodWaitGroup() {
 	wp.wg.Add(1) // want "waitgroup 'wp.wg' has Add without corresponding Done"
 	wp.wg.Wait()
+}
+
+func takesWorkerPoolByValue(wp WorkerPool) { // want "struct 'wp' containing waitgroup is copied by value"
+	wp.wg.Add(1)
+	wp.wg.Done()
+	wp.wg.Wait()
+}
+
+func takesGenericWorkerPoolByValue[T any](wp GenericWorkerPool[T]) { // want "struct 'wp' containing waitgroup is copied by value"
+	wp.wg.Add(1)
+	wp.wg.Done()
+	wp.wg.Wait()
+}
+
+func BadStructContainingWaitGroupPassedByValue() {
+	var wp WorkerPool
+	takesWorkerPoolByValue(wp) // want "struct 'wp' containing waitgroup is copied by value"
+}
+
+func BadStructContainingWaitGroupAssignedByValue() {
+	var wp WorkerPool
+	copied := wp // want "struct 'wp' containing waitgroup is copied by value"
+	copied.wg.Wait()
+}
+
+func BadGenericStructContainingWaitGroupPassedByValue() {
+	wp := GenericWorkerPool[int]{}
+	takesGenericWorkerPoolByValue(wp) // want "struct 'wp' containing waitgroup is copied by value"
+}
+
+func BadWaitAndDoneInSameGoroutine() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		wg.Wait() // want "waitgroup 'wg' Wait will deadlock: same goroutine has pending Done"
+	}()
+}
+
+func BadParentDoneForWorkerGoroutine() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		doSomething()
+	}()
+	wg.Done() // want "waitgroup 'wg' Done called outside worker goroutine"
+	wg.Wait()
 }
 
 // Good: barrier-style waitgroup where goroutines wait and the main loop releases them with Done.

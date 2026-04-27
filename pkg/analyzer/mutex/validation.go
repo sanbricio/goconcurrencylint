@@ -209,9 +209,12 @@ func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats
 	}
 
 	if fnLit, ok := stmt.Call.Fun.(*ast.FuncLit); ok {
+		crossReleases := ma.reportCrossGoroutineReleases(fnLit.Body, stats)
 		goInitial := ma.emptyStatsLike(stats)
 		goStats := ma.analyzeBlock(fnLit.Body, goInitial)
+		ma.suppressCrossGoroutineBorrowedReleases(goStats, crossReleases)
 		ma.reportUnmatchedLocksInBranch(goInitial, goStats, "goroutine")
+		ma.applyCrossGoroutineReleases(stats, crossReleases)
 		return
 	}
 

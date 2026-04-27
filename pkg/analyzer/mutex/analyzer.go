@@ -71,6 +71,7 @@ func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *repor
 func (ma *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.function = fn
 	ma.initializeStats()
+	ma.checkLockOrderCycles(fn.Body)
 	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
 	ma.reportUnmatchedLocks(finalStats)
 }

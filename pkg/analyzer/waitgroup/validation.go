@@ -14,6 +14,9 @@ import (
 func (wga *Analyzer) validateUsage(stats map[string]*Stats) {
 	wga.checkAddAfterWait(stats)
 	wga.checkWaitBeforeDoneSameGoroutine(stats)
+	wga.checkWaitAndDoneInSameGoroutine()
+	wga.checkDoneOutsideWorkerGoroutine()
+	wga.checkWaitGroupGoPanic()
 	wga.checkLoopAddDoneBalance()
 	wga.checkUnreachableDone()
 	wga.checkWaitGroupBalance(stats)

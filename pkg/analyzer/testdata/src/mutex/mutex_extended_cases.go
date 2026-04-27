@@ -605,6 +605,11 @@ type SafeMap struct {
 	data map[string]string
 }
 
+type GenericSafeMap[T any] struct {
+	mu    sync.Mutex
+	value T
+}
+
 type InstrumentedMutex struct {
 	realLock    sync.Mutex
 	waitersLock sync.Mutex
@@ -712,6 +717,33 @@ func GoodStructFieldMutexDefer() {
 	var sm SafeMap
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+}
+
+func takesSafeMapByValue(sm SafeMap) { // want "struct 'sm' containing mutex is copied by value"
+	sm.mu.Lock()
+	sm.mu.Unlock()
+}
+
+func takesGenericSafeMapByValue[T any](sm GenericSafeMap[T]) { // want "struct 'sm' containing mutex is copied by value"
+	sm.mu.Lock()
+	sm.mu.Unlock()
+}
+
+func BadStructContainingMutexPassedByValue() {
+	var sm SafeMap
+	takesSafeMapByValue(sm) // want "struct 'sm' containing mutex is copied by value"
+}
+
+func BadStructContainingMutexAssignedByValue() {
+	var sm SafeMap
+	copied := sm // want "struct 'sm' containing mutex is copied by value"
+	copied.mu.Lock()
+	copied.mu.Unlock()
+}
+
+func BadGenericStructContainingMutexPassedByValue() {
+	sm := GenericSafeMap[int]{}
+	takesGenericSafeMapByValue(sm) // want "struct 'sm' containing mutex is copied by value"
 }
 
 // Bad: struct field mutex locked but not unlocked
