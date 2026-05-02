@@ -639,3 +639,69 @@ func main() {
 		return true
 	})
 }
+
+func TestCommentFilter_IgnoreDirectiveOnSameLine(t *testing.T) {
+	src := `package main
+
+func main() {
+	wg.Wait() // goconcurrencylint:ignore wait-without-add
+	wg.Wait()
+}
+`
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
+	require.NoError(t, err)
+
+	cf := NewCommentFilter(fset, file)
+	var skipped, reported int
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if cf.ShouldSkipCall(call) {
+			skipped++
+			return true
+		}
+		reported++
+		return true
+	})
+
+	assert.Equal(t, 1, skipped)
+	assert.Equal(t, 1, reported)
+}
+
+func TestCommentFilter_IgnoreDirectiveRequiresBoundary(t *testing.T) {
+	src := `package main
+
+func main() {
+	wg.Wait() // see goconcurrencylint:ignore-rationale
+	wg.Wait() // goconcurrencylint:ignored-list
+	wg.Wait() // goconcurrencylint:ignore
+	wg.Wait()
+}
+`
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
+	require.NoError(t, err)
+
+	cf := NewCommentFilter(fset, file)
+	var skipped, reported int
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if cf.ShouldSkipCall(call) {
+			skipped++
+			return true
+		}
+		reported++
+		return true
+	})
+
+	assert.Equal(t, 1, skipped)
+	assert.Equal(t, 3, reported)
+}

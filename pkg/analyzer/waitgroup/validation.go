@@ -12,6 +12,12 @@ import (
 
 // validateUsage performs validation checks on collected statistics
 func (wga *Analyzer) validateUsage(stats map[string]*Stats) {
+	wga.checkAddInsideGoroutine()
+	wga.checkDoneNotDeferredInWorker()
+	wga.checkLiteralAddLoopGoroutineMismatch(stats)
+	wga.checkWaitWithoutAdd(stats)
+	wga.checkMultipleDoneSameWorkerBranch()
+	wga.checkNestedWaitGroupDeadlock()
 	wga.checkAddAfterWait(stats)
 	wga.checkWaitBeforeDoneSameGoroutine(stats)
 	wga.checkWaitAndDoneInSameGoroutine()
@@ -25,12 +31,7 @@ func (wga *Analyzer) validateUsage(stats map[string]*Stats) {
 // validateBalance performs the actual balance validation for a WaitGroup
 func (wga *Analyzer) validateBalance(wgName string, stats *Stats) {
 	// Count Done calls from main flow (not in goroutines)
-	mainFlowDoneCount := 0
-	for _, donePos := range stats.doneCalls {
-		if !wga.isInGoroutine(donePos) {
-			mainFlowDoneCount++
-		}
-	}
+	mainFlowDoneCount := wga.countMainFlowDoneCalls(wgName)
 
 	totalDone := mainFlowDoneCount
 
@@ -51,6 +52,74 @@ func (wga *Analyzer) validateBalance(wgName string, stats *Stats) {
 
 	if totalDone > stats.totalAdd {
 		wga.reportExcessDones(wgName, stats, totalDone, mainFlowDoneCount)
+	}
+}
+
+func (wga *Analyzer) countMainFlowDoneCalls(wgName string) int {
+	if wga.function == nil || wga.function.Body == nil {
+		return 0
+	}
+	return wga.countMainFlowDoneInStatements(wga.function.Body.List, wgName, 1)
+}
+
+func (wga *Analyzer) countMainFlowDoneInStatements(stmts []ast.Stmt, wgName string, multiplier int) int {
+	count := 0
+	for _, stmt := range stmts {
+		if stmt == nil || wga.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if ok && wga.callInvokesDone(call, wgName) {
+				count += multiplier
+			}
+		case *ast.GoStmt:
+			continue
+		case *ast.BlockStmt:
+			count += wga.countMainFlowDoneInStatements(s.List, wgName, multiplier)
+		case *ast.IfStmt:
+			count += wga.countMainFlowDoneInStatements(s.Body.List, wgName, multiplier)
+			if s.Else != nil {
+				count += wga.countMainFlowDoneInElse(s.Else, wgName, multiplier)
+			}
+		case *ast.ForStmt:
+			count += wga.countMainFlowDoneInStatements(s.Body.List, wgName, multiplier*wga.estimateForIterations(s))
+		case *ast.RangeStmt:
+			count += wga.countMainFlowDoneInStatements(s.Body.List, wgName, multiplier*wga.estimateRangeIterations(s))
+		case *ast.SwitchStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					count += wga.countMainFlowDoneInStatements(cc.Body, wgName, multiplier)
+				}
+			}
+		case *ast.TypeSwitchStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					count += wga.countMainFlowDoneInStatements(cc.Body, wgName, multiplier)
+				}
+			}
+		case *ast.SelectStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CommClause); ok {
+					count += wga.countMainFlowDoneInStatements(cc.Body, wgName, multiplier)
+				}
+			}
+		case *ast.LabeledStmt:
+			count += wga.countMainFlowDoneInStatements([]ast.Stmt{s.Stmt}, wgName, multiplier)
+		}
+	}
+	return count
+}
+
+func (wga *Analyzer) countMainFlowDoneInElse(stmt ast.Stmt, wgName string, multiplier int) int {
+	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		return wga.countMainFlowDoneInStatements(s.List, wgName, multiplier)
+	case *ast.IfStmt:
+		return wga.countMainFlowDoneInStatements([]ast.Stmt{s}, wgName, multiplier)
+	default:
+		return 0
 	}
 }
 

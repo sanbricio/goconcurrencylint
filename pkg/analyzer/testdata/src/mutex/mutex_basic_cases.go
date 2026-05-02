@@ -146,6 +146,35 @@ func BadNegatedTryLockFalsePathUnlock() {
 	mu.Unlock()
 }
 
+// TryLock used as a plain statement ignores whether the lock was acquired.
+func BadTryLockIgnoredReturn() {
+	var mu sync.Mutex
+	mu.TryLock() // want "mutex 'mu' TryLock return value not checked, lock may not be held"
+	mu.Unlock()  // want "mutex 'mu' is unlocked but not locked"
+}
+
+// Assigning TryLock to blank is still an unchecked result.
+func BadTryLockAssignedToBlank() {
+	var mu sync.Mutex
+	_ = mu.TryLock() // want "mutex 'mu' TryLock return value not checked, lock may not be held"
+	mu.Unlock()      // want "mutex 'mu' is unlocked but not locked"
+}
+
+func BadTryLockStoredResultDiscarded() {
+	var mu sync.Mutex
+	ok := mu.TryLock() // want "mutex 'mu' TryLock return value not checked, lock may not be held"
+	_ = ok
+}
+
+// Storing and checking TryLock is fine.
+func GoodTryLockStoredResultChecked() {
+	var mu sync.Mutex
+	ok := mu.TryLock()
+	if ok {
+		mu.Unlock()
+	}
+}
+
 // Lock/unlock with panic recovery
 func GoodRecoverWithUnlock() {
 	var mu sync.Mutex
@@ -199,6 +228,18 @@ func BadDeferUnlockAfterPanic() {
 	mu.Lock()
 }
 
+// Defer Lock is almost always a typo for defer Unlock.
+func BadDeferLockInsteadOfUnlock() {
+	var mu sync.Mutex
+	mu.Lock()       // want "mutex 'mu' is locked but not unlocked"
+	defer mu.Lock() // want "mutex 'mu' defer calls Lock instead of Unlock, will deadlock on return"
+}
+
+func BadDeferLockWithoutPriorLock() {
+	var mu sync.Mutex
+	defer mu.Lock() // want "mutex 'mu' defer calls Lock instead of Unlock, will deadlock on return"
+}
+
 // ---------- Conditional Logic ----------
 
 // RLock + early-return-with-RUnlock in one branch + defer RUnlock in the other
@@ -236,6 +277,30 @@ func GoodRLockMutuallyExclusiveRUnlock(flush bool, p []byte) (int, error) {
 	}
 	mu.RUnlock()
 	return 0, nil
+}
+
+func BadConditionalUnlockAfterUnconditionalLock(cond bool) {
+	var mu sync.Mutex
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	if cond {
+		mu.Unlock()
+	}
+}
+
+func BadIndexPanicBeforeUnlock() {
+	items := []int{1}
+	var mu sync.Mutex
+	mu.Lock()
+	_ = items[1] // want "mutex 'mu' may remain locked if index expression panics before unlock"
+	mu.Unlock()
+}
+
+func GoodIndexPanicProtectedByDeferUnlock() {
+	items := []int{1}
+	var mu sync.Mutex
+	mu.Lock()
+	defer mu.Unlock()
+	_ = items[1]
 }
 
 // Lock + early-return-Unlock + later Unlock (mutually exclusive, no defer)

@@ -7,18 +7,28 @@ import (
 	"strings"
 )
 
+const ignoreDirective = "goconcurrencylint:ignore"
+
 // CommentFilter helps filter out code that is within comments
 type CommentFilter struct {
-	fileSet  *token.FileSet
-	comments []*ast.CommentGroup
+	fileSet              *token.FileSet
+	comments             []*ast.CommentGroup
+	ignoreDirectiveLines map[int]bool
 }
 
 // NewCommentFilter creates a new comment filter
 func NewCommentFilter(fset *token.FileSet, file *ast.File) *CommentFilter {
-	return &CommentFilter{
-		fileSet:  fset,
-		comments: file.Comments,
+	var comments []*ast.CommentGroup
+	if file != nil {
+		comments = file.Comments
 	}
+	cf := &CommentFilter{
+		fileSet:              fset,
+		comments:             comments,
+		ignoreDirectiveLines: make(map[int]bool),
+	}
+	cf.indexIgnoreDirectiveLines()
+	return cf
 }
 
 // IsInComment checks if a position is within a comment
@@ -43,12 +53,56 @@ func (cf *CommentFilter) IsInComment(pos token.Pos) bool {
 
 // ShouldSkipCall checks if a call expression should be skipped
 func (cf *CommentFilter) ShouldSkipCall(call *ast.CallExpr) bool {
-	return cf.IsInComment(call.Pos())
+	return cf.IsInComment(call.Pos()) || cf.HasIgnoreDirective(call.Pos())
 }
 
 // ShouldSkipStatement checks if an entire statement should be skipped
 func (cf *CommentFilter) ShouldSkipStatement(stmt ast.Stmt) bool {
-	return cf.IsInComment(stmt.Pos())
+	return cf.IsInComment(stmt.Pos()) || cf.HasIgnoreDirective(stmt.Pos())
+}
+
+// HasIgnoreDirective checks whether a goconcurrencylint ignore directive is on
+// the same line as the given position.
+func (cf *CommentFilter) HasIgnoreDirective(pos token.Pos) bool {
+	if pos == token.NoPos || cf.fileSet == nil {
+		return false
+	}
+
+	position := cf.fileSet.Position(pos)
+	return cf.ignoreDirectiveLines[position.Line]
+}
+
+func (cf *CommentFilter) indexIgnoreDirectiveLines() {
+	if cf.fileSet == nil {
+		return
+	}
+
+	for _, group := range cf.comments {
+		for _, comment := range group.List {
+			commentStart := cf.fileSet.Position(comment.Pos())
+			for lineOffset, textLine := range strings.Split(comment.Text, "\n") {
+				if hasIgnoreDirective(textLine) {
+					cf.ignoreDirectiveLines[commentStart.Line+lineOffset] = true
+				}
+			}
+		}
+	}
+}
+
+func hasIgnoreDirective(textLine string) bool {
+	start := 0
+	for {
+		idx := strings.Index(textLine[start:], ignoreDirective)
+		if idx < 0 {
+			return false
+		}
+
+		after := textLine[start+idx+len(ignoreDirective):]
+		if after == "" || after[0] == ' ' || after[0] == '\t' || strings.HasPrefix(after, "*/") {
+			return true
+		}
+		start += idx + len(ignoreDirective)
+	}
 }
 
 // positionInComment checks if a position is within a specific comment

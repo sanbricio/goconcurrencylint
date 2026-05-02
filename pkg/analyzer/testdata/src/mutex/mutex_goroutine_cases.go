@@ -23,6 +23,58 @@ func GoodGoroutineLocksAfterParentReleases() {
 	mu.Unlock()
 }
 
+func BadGoroutineDeadlockParentNeverUnlocks() {
+	var mu sync.Mutex
+	mu.Lock()   // want "mutex 'mu' is locked but not unlocked"
+	go func() { // want "mutex 'mu' goroutine started while lock is held and also tries to acquire it, will deadlock if parent never releases"
+		mu.Lock()
+		mu.Unlock()
+	}()
+}
+
+func BadGoroutineWaitsBeforeParentUnlocks() {
+	var mu sync.Mutex
+	done := make(chan struct{})
+	mu.Lock()
+	go func() { // want "mutex 'mu' goroutine started while lock is held and also tries to acquire it before parent unlocks"
+		mu.Lock()
+		mu.Unlock()
+		close(done)
+	}()
+	<-done
+	mu.Unlock()
+}
+
+func BadGoroutineWaitGroupWaitsBeforeParentUnlocks() {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(1)
+	mu.Lock()
+	go func() { // want "mutex 'mu' goroutine started while lock is held and also tries to acquire it before parent unlocks"
+		defer wg.Done()
+		mu.Lock()
+		mu.Unlock()
+	}()
+	wg.Wait()
+	mu.Unlock()
+}
+
+type customWaiter struct{}
+
+func (customWaiter) Wait() {}
+
+func GoodGoroutineParentCallsCustomWaitBeforeUnlock() {
+	var mu sync.Mutex
+	var waiter customWaiter
+	mu.Lock()
+	go func() {
+		mu.Lock()
+		mu.Unlock()
+	}()
+	waiter.Wait()
+	mu.Unlock()
+}
+
 func GoodConsistentLockOrderAcrossGoroutines() {
 	var muA, muB sync.Mutex
 	go func() {

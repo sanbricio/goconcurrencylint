@@ -134,6 +134,48 @@ func GoodForLoopLockUnlock() {
 	}
 }
 
+func BadMutexDeclaredInForLoop() {
+	for i := 0; i < 10; i++ {
+		var mu sync.Mutex // want "mutex 'mu' declared inside loop, each iteration creates a new mutex that cannot protect shared state"
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+func BadMutexDeclaredInRangeLoop() {
+	for range []int{1, 2, 3} {
+		mu := sync.Mutex{} // want "mutex 'mu' declared inside loop, each iteration creates a new mutex that cannot protect shared state"
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+func BadMutexPointerInLoop() {
+	for i := 0; i < 10; i++ {
+		mu := &sync.Mutex{} // want "mutex 'mu' declared inside loop, each iteration creates a new mutex that cannot protect shared state"
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+func GoodMutexOutsideLoop() {
+	var mu sync.Mutex
+	for i := 0; i < 10; i++ {
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
+func GoodMutexInFuncLiteralInsideLoop() {
+	for i := 0; i < 3; i++ {
+		func() {
+			var mu sync.Mutex
+			mu.Lock()
+			mu.Unlock()
+		}()
+	}
+}
+
 // Bad: Lock with defer Unlock in a loop stacks defers until the function returns.
 func BadForLoopDeferUnlock() {
 	var mu sync.Mutex
@@ -366,6 +408,14 @@ func GoodRWForLoopRLock() {
 	for i := 0; i < 10; i++ {
 		rwmu.RLock()
 		rwmu.RUnlock()
+	}
+}
+
+func BadRWMutexDeclaredInForLoop() {
+	for i := 0; i < 5; i++ {
+		var rw sync.RWMutex // want "rwmutex 'rw' declared inside loop, each iteration creates a new mutex that cannot protect shared state"
+		rw.Lock()
+		rw.Unlock()
 	}
 }
 
@@ -744,6 +794,23 @@ func BadStructContainingMutexAssignedByValue() {
 func BadGenericStructContainingMutexPassedByValue() {
 	sm := GenericSafeMap[int]{}
 	takesGenericSafeMapByValue(sm) // want "struct 'sm' containing mutex is copied by value"
+}
+
+type ValueReceiverCounterWithMutex struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c ValueReceiverCounterWithMutex) BadValueReceiverWithMutex() { // want "struct 'c' containing mutex is copied by value"
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *ValueReceiverCounterWithMutex) GoodPointerReceiverWithMutex() {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
 }
 
 // Bad: struct field mutex locked but not unlocked

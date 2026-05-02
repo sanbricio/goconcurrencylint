@@ -92,6 +92,25 @@ func BadRWUnlockWithoutLock() {
 	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
 }
 
+func BadTryRLockIgnoredReturn() {
+	var mu sync.RWMutex
+	mu.TryRLock() // want "rwmutex 'mu' TryRLock return value not checked, lock may not be held"
+	mu.RUnlock()  // want "rwmutex 'mu' is runlocked but not rlocked"
+}
+
+func BadRWTryLockIgnoredReturn() {
+	var mu sync.RWMutex
+	mu.TryLock() // want "rwmutex 'mu' TryLock return value not checked, lock may not be held"
+	mu.Unlock()  // want "rwmutex 'mu' is unlocked but not locked"
+}
+
+func GoodTryRLockIfCondition() {
+	var mu sync.RWMutex
+	if mu.TryRLock() {
+		defer mu.RUnlock()
+	}
+}
+
 // ---------- RWMutex Defer Patterns ----------
 
 // Defer unlock after write lock
@@ -120,6 +139,18 @@ func BadRWDeferUnlockWithoutLock() {
 	var mu sync.RWMutex
 	defer mu.Unlock() // want "rwmutex 'mu' has defer unlock but no corresponding lock"
 	mu.Lock()
+}
+
+func BadRWDeferLockInsteadOfUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()       // want "rwmutex 'mu' is locked but not unlocked"
+	defer mu.Lock() // want "rwmutex 'mu' defer calls Lock instead of Unlock, will deadlock on return"
+}
+
+func BadDeferRLockInsteadOfRUnlock() {
+	var mu sync.RWMutex
+	mu.RLock()       // want "rwmutex 'mu' is rlocked but not runlocked"
+	defer mu.RLock() // want "rwmutex 'mu' defer calls RLock instead of RUnlock, will deadlock on return"
 }
 
 // ---------- RWMutex Conditional Logic ----------
@@ -189,6 +220,47 @@ func BadRWGoroutineLockWithoutUnlock() {
 	}()
 }
 
+func BadRWGoroutineDeadlockParentNeverUnlocksWrite() {
+	var mu sync.RWMutex
+	mu.Lock()   // want "rwmutex 'mu' is locked but not unlocked"
+	go func() { // want "rwmutex 'mu' goroutine started while write lock is held and also tries to acquire read lock, will deadlock if parent never releases"
+		mu.RLock()
+		mu.RUnlock()
+	}()
+}
+
+func BadRWGoroutineDeadlockParentNeverRUnlocksRead() {
+	var mu sync.RWMutex
+	mu.RLock()  // want "rwmutex 'mu' is rlocked but not runlocked"
+	go func() { // want "rwmutex 'mu' goroutine started while read lock is held and also tries to acquire write lock, will deadlock if parent never runlocks"
+		mu.Lock()
+		mu.Unlock()
+	}()
+}
+
+func BadRWGoroutineWaitsBeforeParentRUnlocks() {
+	var mu sync.RWMutex
+	done := make(chan struct{})
+	mu.RLock()
+	go func() { // want "rwmutex 'mu' goroutine started while read lock is held and also tries to acquire write lock before parent runlocks"
+		mu.Lock()
+		mu.Unlock()
+		close(done)
+	}()
+	<-done
+	mu.RUnlock()
+}
+
+func GoodRWGoroutineLocksAfterParentRUnlocks() {
+	var mu sync.RWMutex
+	mu.RLock()
+	go func() {
+		mu.Lock()
+		mu.Unlock()
+	}()
+	mu.RUnlock()
+}
+
 // ---------- RWMutex Balance Issues ----------
 
 // Imbalanced: two rlocks, one runlock
@@ -204,6 +276,30 @@ func BadRWImbalancedMixed() {
 	var mu sync.RWMutex
 	mu.Lock()
 	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	mu.Unlock()
+}
+
+func BadUnlockWhenReadLocked() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.Unlock() // want "rwmutex 'mu' Unlock called but only read lock is held, did you mean RUnlock\\?"
+}
+
+func BadRUnlockWhenWriteLocked() {
+	var mu sync.RWMutex
+	mu.Lock()
+	mu.RUnlock() // want "rwmutex 'mu' RUnlock called but only write lock is held, did you mean Unlock\\?"
+}
+
+func GoodRWMutexCorrectReadAPI() {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
+}
+
+func GoodRWMutexCorrectWriteAPI() {
+	var mu sync.RWMutex
+	mu.Lock()
 	mu.Unlock()
 }
 
