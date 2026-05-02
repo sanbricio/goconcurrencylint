@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -795,6 +796,142 @@ func nodeContainsPos(n ast.Node, pos token.Pos) bool {
 		return false
 	}
 	return n.Pos() <= pos && pos <= n.End()
+}
+
+func (wga *Analyzer) checkLiteralAddLoopGoroutineMismatch(stats map[string]*Stats) {
+	for wgName, st := range stats {
+		var positiveAdds []addCall
+		for _, add := range st.addCalls {
+			if add.value > 0 && !wga.isInGoroutine(add.pos) {
+				positiveAdds = append(positiveAdds, add)
+			}
+		}
+		if len(positiveAdds) != 1 {
+			continue
+		}
+		launched := wga.countLoopWorkerGoroutinesAfter(positiveAdds[0].pos, wgName)
+		if launched <= 1 || launched == positiveAdds[0].value {
+			continue
+		}
+		wga.errorCollector.AddError(positiveAdds[0].pos,
+			"waitgroup '"+wgName+"' Add count "+strconv.Itoa(positiveAdds[0].value)+" does not match "+strconv.Itoa(launched)+" goroutines launched")
+	}
+}
+
+func (wga *Analyzer) countLoopWorkerGoroutinesAfter(after token.Pos, wgName string) int {
+	total := 0
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		switch loop := n.(type) {
+		case *ast.ForStmt:
+			if loop.Pos() <= after {
+				return true
+			}
+			iterations := wga.estimateForIterations(loop)
+			if iterations <= 1 {
+				return true
+			}
+			total += iterations * wga.countWorkerGoroutines(loop.Body, wgName)
+		case *ast.RangeStmt:
+			if loop.Pos() <= after {
+				return true
+			}
+			iterations := wga.estimateRangeIterationsForMismatch(loop)
+			if iterations <= 1 {
+				return true
+			}
+			total += iterations * wga.countWorkerGoroutines(loop.Body, wgName)
+		}
+		return true
+	})
+	return total
+}
+
+func (wga *Analyzer) estimateRangeIterationsForMismatch(rangeStmt *ast.RangeStmt) int {
+	if rangeStmt == nil || rangeStmt.X == nil {
+		return 1
+	}
+	if lit, ok := rangeStmt.X.(*ast.CompositeLit); ok {
+		return len(lit.Elts)
+	}
+	return wga.estimateRangeIterations(rangeStmt)
+}
+
+func (wga *Analyzer) countWorkerGoroutines(body *ast.BlockStmt, wgName string) int {
+	if body == nil {
+		return 0
+	}
+	count := 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		doneInfo, related := wga.goroutineDoneInfo(goStmt, wgName)
+		if related && doneInfo.hasAnyDone {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+func (wga *Analyzer) checkWaitWithoutAdd(stats map[string]*Stats) {
+	for wgName, st := range stats {
+		if !wga.localWaitGroupNames[wgName] || strings.Contains(wgName, ".") ||
+			len(st.addCalls) > 0 || len(st.goCalls) > 0 || wga.waitGroupInitializedFromAnother(wgName) {
+			continue
+		}
+		for _, waitPos := range st.waitCalls {
+			wga.errorCollector.AddError(waitPos, "waitgroup '"+wgName+"' Wait called without any Add")
+		}
+	}
+}
+
+func (wga *Analyzer) waitGroupInitializedFromAnother(wgName string) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || ident.Name != wgName || i >= len(node.Rhs) {
+					continue
+				}
+				if wga.isCopiedWaitGroupExpr(node.Rhs[i]) {
+					found = true
+					return false
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range node.Names {
+				if name.Name != wgName || i >= len(node.Values) {
+					continue
+				}
+				if wga.isCopiedWaitGroupExpr(node.Values[i]) {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func (wga *Analyzer) isCopiedWaitGroupExpr(expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.CompositeLit:
+		return false
+	case *ast.UnaryExpr:
+		return e.Op != token.AND && wga.isCopiedWaitGroupExpr(e.X)
+	}
+	return common.IsWaitGroup(wga.typesInfo.TypeOf(expr))
 }
 
 // checkUnreachableDone checks for Done calls that are unreachable due to early returns
