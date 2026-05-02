@@ -44,10 +44,10 @@ func GoodAddBeforeWait() {
 	wg.Wait()
 }
 
-// No Add, no Done (legal, Wait returns immediately)
-func GoodNoAddNoDone() {
+// Wait without Add is reported even though Wait returns immediately.
+func BadNoAddNoDone() {
 	var wg sync.WaitGroup
-	wg.Wait() // returns immediately
+	wg.Wait() // want "waitgroup 'wg' Wait called without any Add"
 }
 
 // Add without Done (counter never decremented)
@@ -102,6 +102,40 @@ func BadNegativeConstAdd() {
 	wg.Add(negativeAdd) // want "waitgroup 'wg' has negative Add"
 }
 
+func BadAddZero() {
+	var wg sync.WaitGroup
+	wg.Add(0) // want "waitgroup 'wg' Add\\(0\\) is a no-op"
+	wg.Wait()
+}
+
+func BadAddZeroAfterValidAdd() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	wg.Add(0) // want "waitgroup 'wg' Add\\(0\\) is a no-op"
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
+func GoodAddUnknownVariableNoAddZero(n int) {
+	var wg sync.WaitGroup
+	wg.Add(n)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
+func GoodAddPositive() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
 // ---------- Wait Ordering Patterns ----------
 
 // Add after Wait (illegal, Wait should be called after all Adds)
@@ -109,7 +143,7 @@ func BadAddAfterWait() {
 	var wg sync.WaitGroup
 	wg.Wait()
 	go func() {
-		wg.Add(1) // want "waitgroup 'wg' Add called after Wait"
+		wg.Add(1) // want "waitgroup 'wg' Add called after Wait" "waitgroup 'wg' Add called inside goroutine, may race with Wait"
 		wg.Done()
 	}()
 }
@@ -126,7 +160,12 @@ func EdgeCaseAddAfterWaitMainFlow() {
 // Edge case where Wait is called without any Adds
 func EdgeCaseNoAddNoDoneNoGoroutine() {
 	var wg sync.WaitGroup
-	wg.Wait() // legal, returns immediately
+	wg.Wait() // want "waitgroup 'wg' Wait called without any Add"
+}
+
+func GoodIgnoredWaitWithoutAdd() {
+	var wg sync.WaitGroup
+	wg.Wait() // goconcurrencylint:ignore wait-without-add
 }
 
 // Waiting in the same goroutine before any separate Done can run deadlocks.

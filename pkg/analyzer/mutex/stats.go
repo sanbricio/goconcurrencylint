@@ -26,10 +26,17 @@ func (ma *Analyzer) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats
 func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
+		ma.reportPotentialPanicWhileLocked(s, stats)
 		ma.analyzeExpressionStatement(s, stats)
+	case *ast.AssignStmt:
+		ma.analyzeAssignStatement(s, stats)
+	case *ast.DeclStmt:
+		ma.analyzeDeclStatement(s, stats)
 	case *ast.DeferStmt:
 		ma.analyzeDeferStatement(s, stats)
 	case *ast.ReturnStmt:
+		ma.markReturnedTryLockResultsChecked(s)
+		ma.reportPotentialPanicWhileLocked(s, stats)
 		ma.analyzeReturnStatement(s, stats)
 	case *ast.IfStmt:
 		ma.analyzeIfStatement(s, stats)
@@ -81,6 +88,26 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 	}
 
 	varName := common.GetVarName(sel.X)
+
+	// When a TryLock/TryRLock return value is ignored, the caller has no way to
+	// know whether the lock was actually acquired, so any subsequent operation
+	// that assumes the lock is held is racy.
+	switch sel.Sel.Name {
+	case "TryLock":
+		if ma.mutexNames[varName] {
+			ma.errorCollector.AddError(call.Pos(), "mutex '"+varName+"' TryLock return value not checked, lock may not be held")
+			return
+		}
+		if ma.rwMutexNames[varName] {
+			ma.errorCollector.AddError(call.Pos(), "rwmutex '"+varName+"' TryLock return value not checked, lock may not be held")
+			return
+		}
+	case "TryRLock":
+		if ma.rwMutexNames[varName] {
+			ma.errorCollector.AddError(call.Pos(), "rwmutex '"+varName+"' TryRLock return value not checked, lock may not be held")
+			return
+		}
+	}
 
 	if ma.mutexNames[varName] {
 		ma.handleMutexCall(varName, sel.Sel.Name, call.Pos(), stats)
@@ -160,6 +187,14 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 		stats[varName].lock++
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
+		// Unlock called when only a read lock is held.
+		// Correct the state as if RUnlock was called to avoid cascading errors.
+		if stats[varName].rlock > 0 && stats[varName].lock == 0 {
+			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' Unlock called but only read lock is held, did you mean RUnlock?")
+			stats[varName].rlock--
+			ma.removeFirstRLockPos(stats[varName])
+			return
+		}
 		if stats[varName].lock == 0 {
 			if ma.isCarriedLoopUnlock(varName, pos, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
 				return
@@ -179,6 +214,14 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 		stats[varName].rlock++
 		stats[varName].rlockPos = append(stats[varName].rlockPos, pos)
 	case "RUnlock":
+		// RUnlock called when only a write lock is held.
+		// Correct the state as if Unlock was called to avoid cascading errors.
+		if stats[varName].lock > 0 && stats[varName].rlock == 0 {
+			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' RUnlock called but only write lock is held, did you mean Unlock?")
+			stats[varName].lock--
+			ma.removeFirstLockPos(stats[varName])
+			return
+		}
 		if stats[varName].rlock == 0 {
 			if ma.isCarriedLoopUnlock(varName, pos, []string{"RLock", "TryRLock"}, []string{"RUnlock"}) {
 				return
@@ -232,6 +275,23 @@ func (ma *Analyzer) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]
 // handleDeferCall processes direct defer calls
 func (ma *Analyzer) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats map[string]*Stats) {
 	varName := common.GetVarName(call.X)
+
+	// defer Lock / defer RLock re-acquires the lock on
+	// function return instead of releasing it, guaranteed deadlock.
+	if ma.mutexNames[varName] && call.Sel.Name == "Lock" {
+		ma.errorCollector.AddError(pos, "mutex '"+varName+"' defer calls Lock instead of Unlock, will deadlock on return")
+		return
+	}
+	if ma.rwMutexNames[varName] {
+		switch call.Sel.Name {
+		case "Lock":
+			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' defer calls Lock instead of Unlock, will deadlock on return")
+			return
+		case "RLock":
+			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' defer calls RLock instead of RUnlock, will deadlock on return")
+			return
+		}
+	}
 
 	if ma.mutexNames[varName] && call.Sel.Name == "Unlock" {
 		ma.handleDeferUnlock(varName, pos, stats, false)

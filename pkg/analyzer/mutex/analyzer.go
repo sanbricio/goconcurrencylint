@@ -13,19 +13,40 @@ import (
 
 // Analyzer handles the analysis of mutex and rwmutex usage
 type Analyzer struct {
-	mutexNames      map[string]bool
-	rwMutexNames    map[string]bool
-	errorCollector  *report.ErrorCollector
-	stats           map[string]*Stats
-	deferErrors     *deferErrorCollector
-	commentFilter   *commnetfilter.CommentFilter
-	function        *ast.FuncDecl
-	typesInfo       *types.Info
-	rawBodyEffects  bool
-	receiverMethods map[string]map[string]*ast.FuncDecl
-	functions       []*ast.FuncDecl
-	simulationStack map[methodSimulationKey]bool
-	localFuncStack  map[*ast.FuncLit]bool
+	mutexNames             map[string]bool
+	rwMutexNames           map[string]bool
+	errorCollector         *report.ErrorCollector
+	stats                  map[string]*Stats
+	deferErrors            *deferErrorCollector
+	commentFilter          *commnetfilter.CommentFilter
+	function               *ast.FuncDecl
+	typesInfo              *types.Info
+	rawBodyEffects         bool
+	receiverMethods        map[string]map[string]*ast.FuncDecl
+	functions              []*ast.FuncDecl
+	simulationStack        map[methodSimulationKey]bool
+	localFuncStack         map[*ast.FuncLit]bool
+	goroutineLockConflicts []goroutineLockConflict
+	tryLockResults         map[string]*tryLockResult
+	collectionLengths      map[string]int
+}
+
+// goroutineLockConflict records a goroutine that was launched while the parent
+// held a mutex that the goroutine also tries to acquire.
+type goroutineLockConflict struct {
+	varName        string
+	pos            token.Pos
+	isRWMutex      bool
+	parentReadLock bool
+	requestMethod  string
+}
+
+type tryLockResult struct {
+	varName   string
+	method    string
+	pos       token.Pos
+	checked   bool
+	isRWMutex bool
 }
 
 type methodSimulationKey struct {
@@ -70,9 +91,18 @@ func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *repor
 // AnalyzeFunction analyzes mutex usage in a function
 func (ma *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.function = fn
+	ma.rawBodyEffects = false
+	ma.goroutineLockConflicts = nil
+	ma.tryLockResults = make(map[string]*tryLockResult)
+	ma.collectionLengths = make(map[string]int)
+	ma.deferErrors = &deferErrorCollector{
+		badDeferUnlock:  make(map[string]bool),
+		badDeferRUnlock: make(map[string]bool),
+	}
 	ma.initializeStats()
 	ma.checkLockOrderCycles(fn.Body)
 	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
+	ma.reportUncheckedTryLockResults()
 	ma.reportUnmatchedLocks(finalStats)
 }
 

@@ -42,6 +42,30 @@ func GoodMixedWaitGroupUsage() {
 	wg2.Wait()
 }
 
+func BadNestedWaitGroupWaitInsideWorker() {
+	var wg1, wg2 sync.WaitGroup
+	wg1.Add(1)
+	wg2.Add(1)
+	go func() {
+		defer wg1.Done()
+		wg2.Wait() // want "waitgroup 'wg2' Wait inside worker for waitgroup 'wg1' can deadlock"
+	}()
+	wg1.Wait()
+	wg2.Done()
+}
+
+func GoodNestedWaitGroupReleasedBeforeOuterWait() {
+	var wg1, wg2 sync.WaitGroup
+	wg1.Add(1)
+	wg2.Add(1)
+	go func() {
+		defer wg1.Done()
+		wg2.Wait()
+	}()
+	wg2.Done()
+	wg1.Wait()
+}
+
 // ---------- Reuse Patterns ----------
 
 func GoodReuseWaitGroup() {
@@ -133,10 +157,10 @@ func EdgeCaseComplexButValid() {
 	wg.Wait()
 }
 
-// Add and Wait with a channel to signal completion
-func GoodWaitNoAddNoDone() {
+// Wait without Add on a local WaitGroup is reported.
+func BadWaitNoAddNoDone() {
 	var wg sync.WaitGroup
-	wg.Wait() // legal, returns immediately
+	wg.Wait() // want "waitgroup 'wg' Wait called without any Add"
 }
 
 // ---------- Switch/Select Edge Cases ----------

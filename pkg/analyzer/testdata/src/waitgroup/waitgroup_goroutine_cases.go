@@ -16,6 +16,28 @@ func GoodLoopAddDone() {
 	wg.Wait()
 }
 
+func BadAddCountMismatchForLoopGoroutines() {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' Add count 1 does not match 5 goroutines launched"
+	for i := 0; i < 5; i++ {
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+func GoodAddCountMatchesForLoopGoroutines() {
+	var wg sync.WaitGroup
+	wg.Add(5)
+	for i := 0; i < 5; i++ {
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
 // Add inside a loop but Done may be missing in some paths
 func BadLoopAddMissingDone() {
 	var wg sync.WaitGroup
@@ -49,6 +71,37 @@ func GoodMultipleGoroutinesWithDeferDone() {
 
 	_ = errOrderConsumer
 	_ = errReturnConsumer
+}
+
+func BadAddInsideGoroutine() {
+	var wg sync.WaitGroup
+	go func() {
+		wg.Add(1) // want "waitgroup 'wg' Add called inside goroutine, may race with Wait"
+		defer wg.Done()
+	}()
+	wg.Wait()
+}
+
+func BadAddInsideGoroutineNoExternalAdd() {
+	var wg sync.WaitGroup
+	go func() {
+		wg.Add(1) // want "waitgroup 'wg' Add called inside goroutine, may race with Wait"
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+func BadAddInsideNestedGoroutine() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		go func() {
+			wg.Add(1) // want "waitgroup 'wg' Add called inside goroutine, may race with Wait"
+			wg.Done()
+		}()
+		wg.Done()
+	}()
+	wg.Wait()
 }
 
 func GoodSwitchWithDefault() {
@@ -122,7 +175,28 @@ func BadDoneAfterConditionalPanic() {
 		if shouldPanic {
 			panic("error")
 		}
-		wg.Done()
+		wg.Done() // want "waitgroup 'wg' Done not deferred in goroutine, panic will skip Done and deadlock Wait"
+	}()
+	wg.Wait()
+}
+
+func BadDoneNotDeferredInWorker() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		doSomething()
+		wg.Done() // want "waitgroup 'wg' Done not deferred in goroutine, panic will skip Done and deadlock Wait"
+	}()
+	wg.Wait()
+}
+
+func BadDoneNotDeferredMultipleCalls() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		doSomething()
+		doSomething()
+		wg.Done() // want "waitgroup 'wg' Done not deferred in goroutine, panic will skip Done and deadlock Wait"
 	}()
 	wg.Wait()
 }
@@ -136,6 +210,62 @@ func GoodDeferDoneBeforeConditionalPanic() {
 		defer wg.Done()
 		if shouldPanic {
 			panic("error")
+		}
+	}()
+	wg.Wait()
+}
+
+func GoodDoneOnlyStatement() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+func GoodDoneDeferredInsideFuncWrapper() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer func() {
+			wg.Done()
+		}()
+		doSomething()
+	}()
+	wg.Wait()
+}
+
+func BadMultipleDoneSameWorkerBranch() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		wg.Done() // want "waitgroup 'wg' Done called multiple times in the same worker branch"
+	}()
+	wg.Wait()
+}
+
+func BadMultipleDoneSameWorkerBranchAfterDone(cond bool) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		wg.Done()
+		if cond {
+			wg.Done() // want "waitgroup 'wg' Done called multiple times in the same worker branch"
+		}
+	}()
+	wg.Wait()
+}
+
+func GoodSingleDonePerWorkerBranch(cond bool) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		if cond {
+			wg.Done()
+		} else {
+			wg.Done()
 		}
 	}()
 	wg.Wait()

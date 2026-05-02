@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"maps"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -34,6 +35,7 @@ func (ma *Analyzer) handleDeferRUnlock(varName string, pos token.Pos, stats map[
 
 // analyzeRangeStatement handles range statements
 func (ma *Analyzer) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
+	ma.checkMutexDeclaredInLoop(stmt.Body)
 	ma.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.replaceStats(stats, rangeStats)
@@ -89,6 +91,10 @@ func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats
 		return
 	}
 
+	if stmt.Init != nil {
+		ma.analyzeStatement(stmt.Init, stats)
+	}
+
 	if condValue, ok := common.ConstantBoolValue(stmt.Cond, ma.typesInfo); ok {
 		if condValue {
 			thenStats := ma.analyzeBlock(stmt.Body, stats)
@@ -130,6 +136,10 @@ func (ma *Analyzer) branchInitialStatsForCondition(cond ast.Expr, stats map[stri
 	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
 		negatedThen, negatedElse := ma.branchInitialStatsForCondition(unary.X, stats)
 		return negatedElse, negatedThen
+	}
+
+	if ma.applyTryLockResultToBranch(cond, thenStats) {
+		return thenStats, elseStats
 	}
 
 	call, ok := cond.(*ast.CallExpr)
@@ -209,6 +219,44 @@ func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats
 	}
 
 	if fnLit, ok := stmt.Call.Fun.(*ast.FuncLit); ok {
+		// Record goroutines launched while a mutex is held that also try to
+		// acquire the same mutex. The conflict is reported at function exit if
+		// the parent still holds the lock.
+		for varName := range ma.mutexNames {
+			if stats[varName] != nil && stats[varName].lock > 0 {
+				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
+					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"Unlock"}) {
+						ma.errorCollector.AddError(stmt.Pos(),
+							ma.goroutineLockDeadlockMessage(varName, false, false, method, true))
+						continue
+					}
+					ma.goroutineLockConflicts = append(ma.goroutineLockConflicts, goroutineLockConflict{varName: varName, pos: stmt.Pos(), requestMethod: method})
+				}
+			}
+		}
+		for varName := range ma.rwMutexNames {
+			if stats[varName] != nil && stats[varName].lock > 0 {
+				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock", "RLock"}); ok {
+					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"Unlock"}) {
+						ma.errorCollector.AddError(stmt.Pos(),
+							ma.goroutineLockDeadlockMessage(varName, true, false, method, true))
+						continue
+					}
+					ma.goroutineLockConflicts = append(ma.goroutineLockConflicts, goroutineLockConflict{varName: varName, pos: stmt.Pos(), isRWMutex: true, requestMethod: method})
+				}
+			}
+			if stats[varName] != nil && stats[varName].rlock > 0 {
+				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
+					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"RUnlock"}) {
+						ma.errorCollector.AddError(stmt.Pos(),
+							ma.goroutineLockDeadlockMessage(varName, true, true, method, true))
+						continue
+					}
+					ma.goroutineLockConflicts = append(ma.goroutineLockConflicts, goroutineLockConflict{varName: varName, pos: stmt.Pos(), isRWMutex: true, parentReadLock: true, requestMethod: method})
+				}
+			}
+		}
+
 		crossReleases := ma.reportCrossGoroutineReleases(fnLit.Body, stats)
 		goInitial := ma.emptyStatsLike(stats)
 		goStats := ma.analyzeBlock(fnLit.Body, goInitial)
@@ -227,6 +275,7 @@ func (ma *Analyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Sta
 		return
 	}
 
+	ma.checkMutexDeclaredInLoop(stmt.Body)
 	ma.reportDeferredUnlocksInLoop(stmt.Body)
 	forStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.applyLoopExitLocks(stmt, stats, forStats)
@@ -803,5 +852,101 @@ func (ma *Analyzer) reportUnmatchedLocks(stats map[string]*Stats) {
 			continue
 		}
 		ma.reportUnmatchedMutexLocks(rwMutexName, stats[rwMutexName], true)
+	}
+
+	// Report goroutine-parent deadlocks only when the parent exits while still
+	// holding the lock, so the goroutine can never acquire it.
+	for _, conflict := range ma.goroutineLockConflicts {
+		st := stats[conflict.varName]
+		if st == nil {
+			continue
+		}
+		if conflict.parentReadLock {
+			if ma.remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
+				ma.errorCollector.AddError(conflict.pos,
+					ma.goroutineLockDeadlockMessage(conflict.varName, true, true, conflict.requestMethod, false))
+			}
+			continue
+		}
+
+		if ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
+			ma.errorCollector.AddError(conflict.pos,
+				ma.goroutineLockDeadlockMessage(conflict.varName, conflict.isRWMutex, false, conflict.requestMethod, false))
+		}
+	}
+}
+
+// checkMutexDeclaredInLoop reports sync.Mutex / sync.RWMutex variables that are
+// declared directly inside a loop body.  Each iteration creates a fresh mutex
+// that is invisible to other iterations and therefore cannot protect shared state.
+// Only the top-level statements of the loop body are examined; nested loops are
+// handled when they themselves are analysed as for/range statements.
+// Function literals inside the loop are skipped to avoid false positives for
+// patterns like `for { go func() { var mu sync.Mutex; … }() }`.
+func (ma *Analyzer) checkMutexDeclaredInLoop(loopBody *ast.BlockStmt) {
+	if loopBody == nil || ma.typesInfo == nil {
+		return
+	}
+	for _, stmt := range loopBody.List {
+		switch s := stmt.(type) {
+		case *ast.DeclStmt:
+			gen, ok := s.Decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				ma.reportMutexInLoopValueSpec(vs)
+			}
+		case *ast.AssignStmt:
+			if s.Tok == token.DEFINE {
+				ma.reportMutexInLoopAssign(s)
+			}
+		}
+	}
+}
+
+func (ma *Analyzer) reportMutexInLoopValueSpec(vs *ast.ValueSpec) {
+	for _, name := range vs.Names {
+		obj := ma.typesInfo.Defs[name]
+		if obj == nil {
+			continue
+		}
+		typ := obj.Type()
+		switch {
+		case common.IsMutex(typ):
+			ma.errorCollector.AddError(name.Pos(),
+				"mutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+		case common.IsRWMutex(typ):
+			ma.errorCollector.AddError(name.Pos(),
+				"rwmutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+		}
+	}
+}
+
+func (ma *Analyzer) reportMutexInLoopAssign(s *ast.AssignStmt) {
+	for i, lhs := range s.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || i >= len(s.Rhs) {
+			continue
+		}
+		typ := ma.typesInfo.TypeOf(s.Rhs[i])
+		if typ == nil {
+			continue
+		}
+		if ptr, ok := types.Unalias(typ).(*types.Pointer); ok {
+			typ = ptr.Elem()
+		}
+		switch {
+		case common.IsMutex(typ):
+			ma.errorCollector.AddError(ident.Pos(),
+				"mutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+		case common.IsRWMutex(typ):
+			ma.errorCollector.AddError(ident.Pos(),
+				"rwmutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+		}
 	}
 }

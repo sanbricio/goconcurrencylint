@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"sort"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -414,4 +415,209 @@ func cloneIntMap(src map[string]int) map[string]int {
 		dst[k] = v
 	}
 	return dst
+}
+
+// goroutineBodyLockCallMethod returns the first direct lock method call found
+// for varName. Nested goroutines are not traversed so we only flag cases that
+// are directly reachable in this goroutine's frame.
+func (ma *Analyzer) goroutineBodyLockCallMethod(body *ast.BlockStmt, varName string, methodNames []string) (string, bool) {
+	var foundMethod string
+	ast.Inspect(body, func(n ast.Node) bool {
+		if foundMethod != "" {
+			return false
+		}
+		if _, ok := n.(*ast.GoStmt); ok {
+			return false // don't recurse into nested goroutines
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if containsMethod(methodNames, sel.Sel.Name) && common.GetVarName(sel.X) == varName {
+			foundMethod = sel.Sel.Name
+			return false
+		}
+		return true
+	})
+	return foundMethod, foundMethod != ""
+}
+
+func (ma *Analyzer) rwMutexRequestDescription(methodName string) string {
+	switch methodName {
+	case "RLock", "TryRLock":
+		return "read lock"
+	default:
+		return "write lock"
+	}
+}
+
+func (ma *Analyzer) goroutineLockDeadlockMessage(varName string, isRWMutex bool, parentReadLock bool, requestMethod string, parentBlocks bool) string {
+	if !isRWMutex {
+		if parentBlocks {
+			return "mutex '" + varName + "' goroutine started while lock is held and also tries to acquire it before parent unlocks"
+		}
+		return "mutex '" + varName + "' goroutine started while lock is held and also tries to acquire it, will deadlock if parent never releases"
+	}
+
+	if parentReadLock {
+		if parentBlocks {
+			return "rwmutex '" + varName + "' goroutine started while read lock is held and also tries to acquire write lock before parent runlocks"
+		}
+		return "rwmutex '" + varName + "' goroutine started while read lock is held and also tries to acquire write lock, will deadlock if parent never runlocks"
+	}
+
+	requestDescription := ma.rwMutexRequestDescription(requestMethod)
+	if parentBlocks {
+		return "rwmutex '" + varName + "' goroutine started while write lock is held and also tries to acquire " + requestDescription + " before parent unlocks"
+	}
+	return "rwmutex '" + varName + "' goroutine started while write lock is held and also tries to acquire " + requestDescription + ", will deadlock if parent never releases"
+}
+
+func (ma *Analyzer) parentBlocksBeforeUnlock(goPos token.Pos, varName string, unlockMethods []string) bool {
+	if ma.function == nil || ma.function.Body == nil {
+		return false
+	}
+	return ma.blockBlocksBeforeUnlock(ma.function.Body.List, goPos, varName, unlockMethods)
+}
+
+func (ma *Analyzer) blockBlocksBeforeUnlock(stmts []ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
+	for i, stmt := range stmts {
+		if stmt == nil {
+			continue
+		}
+		if stmt.Pos() == goPos {
+			return ma.followingStatementsBlockBeforeUnlock(stmts[i+1:], varName, unlockMethods)
+		}
+
+		switch s := stmt.(type) {
+		case *ast.BlockStmt:
+			if ma.blockBlocksBeforeUnlock(s.List, goPos, varName, unlockMethods) {
+				return true
+			}
+		case *ast.IfStmt:
+			if ma.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods) {
+				return true
+			}
+			if ma.elseBlocksBeforeUnlock(s.Else, goPos, varName, unlockMethods) {
+				return true
+			}
+		case *ast.ForStmt:
+			if s.Body != nil && ma.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods) {
+				return true
+			}
+		case *ast.RangeStmt:
+			if s.Body != nil && ma.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods) {
+				return true
+			}
+		case *ast.SwitchStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok && ma.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods) {
+					return true
+				}
+			}
+		case *ast.TypeSwitchStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok && ma.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods) {
+					return true
+				}
+			}
+		case *ast.SelectStmt:
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CommClause); ok && ma.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods) {
+					return true
+				}
+			}
+		case *ast.LabeledStmt:
+			if ma.blockBlocksBeforeUnlock([]ast.Stmt{s.Stmt}, goPos, varName, unlockMethods) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (ma *Analyzer) elseBlocksBeforeUnlock(stmt ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
+	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		return ma.blockBlocksBeforeUnlock(s.List, goPos, varName, unlockMethods)
+	case *ast.IfStmt:
+		return ma.blockBlocksBeforeUnlock([]ast.Stmt{s}, goPos, varName, unlockMethods)
+	default:
+		return false
+	}
+}
+
+func (ma *Analyzer) followingStatementsBlockBeforeUnlock(stmts []ast.Stmt, varName string, unlockMethods []string) bool {
+	for _, stmt := range stmts {
+		if stmt == nil || ma.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		if ma.statementUnlocks(stmt, varName, unlockMethods) {
+			return false
+		}
+		if ma.statementMayBlock(stmt) {
+			return true
+		}
+	}
+	return false
+}
+
+func (ma *Analyzer) statementUnlocks(stmt ast.Stmt, varName string, unlockMethods []string) bool {
+	exprStmt, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := exprStmt.X.(*ast.CallExpr)
+	if !ok || ma.commentFilter.ShouldSkipCall(call) {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && common.GetVarName(sel.X) == varName && containsMethod(unlockMethods, sel.Sel.Name)
+}
+
+func (ma *Analyzer) statementMayBlock(stmt ast.Stmt) bool {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		if unary, ok := s.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
+			return true
+		}
+		if call, ok := s.X.(*ast.CallExpr); ok {
+			return ma.callMayBlock(call)
+		}
+	case *ast.SelectStmt:
+		return true
+	}
+	return false
+}
+
+func (ma *Analyzer) callMayBlock(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Wait" || ma.typesInfo == nil {
+		return false
+	}
+
+	return isSyncWaitReceiver(ma.typesInfo.TypeOf(sel.X))
+}
+
+func isSyncWaitReceiver(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	if ptr, ok := types.Unalias(typ).(*types.Pointer); ok {
+		typ = ptr.Elem()
+	}
+	named, ok := types.Unalias(typ).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "sync" {
+		return false
+	}
+	switch named.Obj().Name() {
+	case "WaitGroup", "Cond":
+		return true
+	default:
+		return false
+	}
 }
