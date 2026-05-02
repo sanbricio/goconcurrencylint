@@ -469,3 +469,201 @@ func (wga *Analyzer) deferCallRecovers(call *ast.CallExpr) bool {
 	})
 	return found
 }
+
+func (wga *Analyzer) checkAddInsideGoroutine() {
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok || wga.commentFilter.ShouldSkipStatement(goStmt) {
+			return true
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			return true
+		}
+
+		ast.Inspect(fnLit.Body, func(inner ast.Node) bool {
+			call, ok := inner.(*ast.CallExpr)
+			if !ok || wga.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Add" {
+				return true
+			}
+			wgName := common.GetVarName(sel.X)
+			if !wga.waitGroupNames[wgName] || wga.waitGroupIdentDefinedInside(fnLit.Body, sel.X) {
+				return true
+			}
+			wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Add called inside goroutine, may race with Wait")
+			return true
+		})
+
+		return true
+	})
+}
+
+func (wga *Analyzer) waitGroupIdentDefinedInside(body *ast.BlockStmt, expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	if !ok || body == nil || wga.typesInfo == nil {
+		return false
+	}
+	obj := wga.typesInfo.Uses[ident]
+	if obj == nil {
+		obj = wga.typesInfo.Defs[ident]
+	}
+	return obj != nil && body.Pos() <= obj.Pos() && obj.Pos() <= body.End()
+}
+
+func (wga *Analyzer) checkMultipleDoneSameWorkerBranch() {
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok || wga.commentFilter.ShouldSkipStatement(goStmt) {
+			return true
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			return true
+		}
+		for wgName := range wga.waitGroupNames {
+			wga.checkMultipleDoneInBranch(fnLit.Body.List, wgName, 0)
+		}
+		return true
+	})
+}
+
+func (wga *Analyzer) checkMultipleDoneInBranch(stmts []ast.Stmt, wgName string, count int) int {
+	current := count
+	for _, stmt := range stmts {
+		if stmt == nil || wga.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.DeferStmt:
+			if wga.deferInvokesDone(s, wgName) {
+				current++
+				if current > 1 {
+					wga.errorCollector.AddError(s.Call.Pos(), "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
+				}
+			}
+		case *ast.ExprStmt:
+			if call, ok := s.X.(*ast.CallExpr); ok && wga.callInvokesDone(call, wgName) {
+				current++
+				if current > 1 {
+					wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
+				}
+			}
+		case *ast.IfStmt:
+			wga.checkMultipleDoneInBranch(s.Body.List, wgName, current)
+			if s.Else != nil {
+				wga.checkMultipleDoneInElse(s.Else, wgName, current)
+			}
+		case *ast.BlockStmt:
+			current = wga.checkMultipleDoneInBranch(s.List, wgName, current)
+		case *ast.LabeledStmt:
+			current = wga.checkMultipleDoneInBranch([]ast.Stmt{s.Stmt}, wgName, current)
+		}
+	}
+	return current
+}
+
+func (wga *Analyzer) checkMultipleDoneInElse(stmt ast.Stmt, wgName string, count int) {
+	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		wga.checkMultipleDoneInBranch(s.List, wgName, count)
+	case *ast.IfStmt:
+		wga.checkMultipleDoneInBranch([]ast.Stmt{s}, wgName, count)
+	}
+}
+
+func (wga *Analyzer) checkNestedWaitGroupDeadlock() {
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok || wga.commentFilter.ShouldSkipStatement(goStmt) {
+			return true
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			return true
+		}
+
+		outerGroups := wga.workerDoneWaitGroups(fnLit.Body)
+		if len(outerGroups) == 0 {
+			return true
+		}
+		wga.reportNestedWaitsForWorker(goStmt, fnLit.Body, outerGroups)
+		return true
+	})
+}
+
+func (wga *Analyzer) workerDoneWaitGroups(body *ast.BlockStmt) map[string]bool {
+	outerGroups := make(map[string]bool)
+	for wgName := range wga.waitGroupNames {
+		if wga.analyzeDoneCallsWithVisited(body, wgName, make(map[token.Pos]bool)).hasAnyDone {
+			outerGroups[wgName] = true
+		}
+	}
+	return outerGroups
+}
+
+func (wga *Analyzer) reportNestedWaitsForWorker(goStmt *ast.GoStmt, body *ast.BlockStmt, outerGroups map[string]bool) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || wga.commentFilter.ShouldSkipCall(call) {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Wait" {
+			return true
+		}
+		innerWG := common.GetVarName(sel.X)
+		if !wga.waitGroupNames[innerWG] {
+			return true
+		}
+		for outerWG := range outerGroups {
+			if outerWG == innerWG {
+				continue
+			}
+			if wga.outerWaitBeforeInnerRelease(goStmt.Pos(), outerWG, innerWG) {
+				wga.errorCollector.AddError(call.Pos(),
+					"waitgroup '"+innerWG+"' Wait inside worker for waitgroup '"+outerWG+"' can deadlock")
+				return false
+			}
+		}
+		return true
+	})
+}
+
+func (wga *Analyzer) outerWaitBeforeInnerRelease(goPos token.Pos, outerWG, innerWG string) bool {
+	var outerWait token.Pos
+	var innerRelease token.Pos
+	hasInnerAdd := false
+
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || wga.isInGoroutine(call.Pos()) {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		wgName := common.GetVarName(sel.X)
+		switch {
+		case wgName == innerWG && sel.Sel.Name == "Add" && call.Pos() < goPos:
+			if delta, ok := wga.addDelta(call, innerWG); ok && delta > 0 {
+				hasInnerAdd = true
+			}
+		case wgName == outerWG && sel.Sel.Name == "Wait" && call.Pos() > goPos && outerWait == token.NoPos:
+			outerWait = call.Pos()
+		case wgName == innerWG && sel.Sel.Name == "Done" && outerWait != token.NoPos && call.Pos() > outerWait && innerRelease == token.NoPos:
+			innerRelease = call.Pos()
+		case wgName == innerWG && sel.Sel.Name == "Add" && outerWait != token.NoPos && call.Pos() > outerWait && innerRelease == token.NoPos:
+			if delta, ok := wga.addDelta(call, innerWG); ok && delta < 0 {
+				innerRelease = call.Pos()
+			}
+		}
+		return true
+	})
+
+	return hasInnerAdd && outerWait != token.NoPos && innerRelease != token.NoPos
+}
