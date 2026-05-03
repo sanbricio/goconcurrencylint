@@ -307,3 +307,48 @@ func GoodBranchExclusiveDonePaths(startWorker, enqueue bool) {
 
 	wg.Wait()
 }
+
+// A helper that takes &wg performs Add internally. Wait should not be flagged
+// as "Wait without Add" because the helper supplies the missing Add.
+func GoodWaitWithAddInHelper() {
+	var wg sync.WaitGroup
+	trySpawnHelper(&wg, func() {})
+	trySpawnHelper(&wg, func() {})
+	wg.Wait()
+}
+
+// Add lives inside a closure assigned to a local variable. The closure is
+// invoked an arbitrary number of times after assignment, supplying Add and
+// scheduling the matching Done. Wait must not be flagged as missing Add.
+func GoodWaitWithAddInLocalClosure() {
+	var wg sync.WaitGroup
+	addAndRun := func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	addAndRun()
+	addAndRun()
+	wg.Wait()
+}
+
+// A shadowed WaitGroup inside a callback must not make the outer WaitGroup look
+// initialized. The outer wg still has no Add.
+func BadWaitWithoutAddDespiteShadowedCallbackAdd() {
+	var wg sync.WaitGroup
+	registerCallback(func() {
+		var wg sync.WaitGroup
+		wg.Add(1)
+	})
+	wg.Wait() // want "waitgroup 'wg' Wait called without any Add"
+}
+
+// Helper invocations that appear after Wait cannot supply its missing Add, so
+// the warning must still fire even though the WaitGroup is later passed to a
+// helper that calls Add.
+func BadWaitWithHelperAddAfterWait() {
+	var wg sync.WaitGroup
+	wg.Wait() // want "waitgroup 'wg' Wait called without any Add"
+	trySpawnHelper(&wg, func() {})
+}

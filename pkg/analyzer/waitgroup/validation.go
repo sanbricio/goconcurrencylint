@@ -4,11 +4,13 @@ import (
 	"go/ast"
 	"go/constant"
 	"go/token"
+	"go/types"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"golang.org/x/tools/go/ast/astutil"
 )
 
 // validateUsage performs validation checks on collected statistics
@@ -882,9 +884,183 @@ func (wga *Analyzer) checkWaitWithoutAdd(stats map[string]*Stats) {
 			continue
 		}
 		for _, waitPos := range st.waitCalls {
+			targetObj := wga.waitGroupReceiverObjectAt(wgName, "Wait", waitPos)
+			// The Add may live in a helper function the WaitGroup is passed to,
+			// or in a closure assigned to a local variable that is invoked later.
+			// Both checks must consider only references that appear before the
+			// Wait, since later code cannot supply the missing Add.
+			if targetObj != nil &&
+				(wga.isWaitGroupPassedToOtherFunctionsForWait(targetObj, waitPos) ||
+					wga.hasAddInLocalClosure(targetObj, waitPos)) {
+				continue
+			}
 			wga.errorCollector.AddError(waitPos, "waitgroup '"+wgName+"' Wait called without any Add")
 		}
 	}
+}
+
+// hasAddInLocalClosure reports whether a WaitGroup has Add called inside a
+// function literal assigned to a local variable. This is intentionally
+// permissive: it does not prove the closure is invoked. Only closures whose
+// definition appears before waitPos are considered, since a closure defined
+// later cannot have run before the Wait.
+func (wga *Analyzer) hasAddInLocalClosure(target types.Object, waitPos token.Pos) bool {
+	if wga.function == nil || wga.function.Body == nil || target == nil {
+		return false
+	}
+
+	found := false
+	funcLitDepth := 0
+	astutil.Apply(wga.function.Body, func(c *astutil.Cursor) bool {
+		if found {
+			return false
+		}
+		node := c.Node()
+		if node == nil {
+			return true
+		}
+		if fnLit, ok := node.(*ast.FuncLit); ok {
+			if fnLit.Pos() >= waitPos {
+				return false
+			}
+			funcLitDepth++
+			return true
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok || funcLitDepth == 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Add" {
+			return true
+		}
+		if wga.exprReferencesObject(sel.X, target) {
+			found = true
+			return false
+		}
+		return true
+	}, func(c *astutil.Cursor) bool {
+		if _, ok := c.Node().(*ast.FuncLit); ok {
+			funcLitDepth--
+		}
+		return true
+	})
+	return found
+}
+
+// isWaitGroupPassedToOtherFunctionsForWait reports whether the WaitGroup
+// referred to by target is referenced (passed, assigned, returned, etc.)
+// somewhere in the enclosing function before waitPos. References after the
+// Wait cannot supply its missing Add.
+func (wga *Analyzer) isWaitGroupPassedToOtherFunctionsForWait(target types.Object, waitPos token.Pos) bool {
+	if wga.function == nil || wga.function.Body == nil || target == nil {
+		return false
+	}
+
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found || n == nil || n.Pos() >= waitPos {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			for _, arg := range node.Args {
+				if wga.exprReferencesObject(arg, target) {
+					found = true
+					return false
+				}
+			}
+		case *ast.AssignStmt:
+			for _, rhs := range node.Rhs {
+				if wga.exprReferencesObject(rhs, target) {
+					found = true
+					return false
+				}
+			}
+		case *ast.ValueSpec:
+			for _, value := range node.Values {
+				if wga.exprReferencesObject(value, target) {
+					found = true
+					return false
+				}
+			}
+		case *ast.ReturnStmt:
+			for _, result := range node.Results {
+				if wga.exprReferencesObject(result, target) {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func (wga *Analyzer) waitGroupReceiverObjectAt(wgName, method string, pos token.Pos) types.Object {
+	if wga.function == nil || wga.function.Body == nil {
+		return nil
+	}
+	var obj types.Object
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if obj != nil {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || call.Pos() != pos {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != method || common.GetVarName(sel.X) != wgName {
+			return true
+		}
+		obj = wga.receiverObject(sel.X)
+		return false
+	})
+	return obj
+}
+
+func (wga *Analyzer) exprReferencesObject(expr ast.Expr, target types.Object) bool {
+	if expr == nil || target == nil {
+		return false
+	}
+	if obj := wga.receiverObject(expr); obj != nil {
+		return obj == target
+	}
+
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		exprNode, ok := n.(ast.Expr)
+		if !ok {
+			return true
+		}
+		if obj := wga.receiverObject(exprNode); obj != nil && obj == target {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func (wga *Analyzer) receiverObject(expr ast.Expr) types.Object {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		if wga.typesInfo == nil {
+			return nil
+		}
+		return wga.typesInfo.ObjectOf(e)
+	case *ast.ParenExpr:
+		return wga.receiverObject(e.X)
+	case *ast.UnaryExpr:
+		if e.Op == token.AND || e.Op == token.MUL {
+			return wga.receiverObject(e.X)
+		}
+	}
+	return nil
 }
 
 func (wga *Analyzer) waitGroupInitializedFromAnother(wgName string) bool {

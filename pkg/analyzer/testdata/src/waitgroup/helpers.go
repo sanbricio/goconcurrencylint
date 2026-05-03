@@ -78,6 +78,16 @@ func handleExternalWork(wg *sync.WaitGroup) {
 	// external work
 }
 
+// trySpawnHelper increments the WaitGroup, then runs fn in a goroutine that
+// always calls Done. The caller does not need to call Add itself.
+func trySpawnHelper(wg *sync.WaitGroup, fn func()) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		fn()
+	}()
+}
+
 func (o *callbackOwner) markDone() {
 	o.wg.Done()
 }

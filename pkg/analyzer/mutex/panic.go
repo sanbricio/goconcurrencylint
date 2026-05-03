@@ -75,6 +75,11 @@ func (ma *Analyzer) indexExprCanPanic(index *ast.IndexExpr) bool {
 	if index == nil {
 		return false
 	}
+	// Map indexing never panics: missing keys return the zero value, and
+	// negative or out-of-range keys are valid for any comparable key type.
+	if ma.isMapIndex(index) {
+		return false
+	}
 	indexValue, ok := common.ConstantIntValue(index.Index, ma.typesInfo)
 	if !ok {
 		return false
@@ -84,6 +89,18 @@ func (ma *Analyzer) indexExprCanPanic(index *ast.IndexExpr) bool {
 	}
 	length, ok := ma.staticLength(index.X)
 	return ok && indexValue >= length
+}
+
+func (ma *Analyzer) isMapIndex(index *ast.IndexExpr) bool {
+	if index == nil || ma.typesInfo == nil {
+		return false
+	}
+	typ := ma.typesInfo.TypeOf(index.X)
+	if typ == nil {
+		return false
+	}
+	_, ok := typ.Underlying().(*types.Map)
+	return ok
 }
 
 func (ma *Analyzer) staticLength(expr ast.Expr) (int, bool) {

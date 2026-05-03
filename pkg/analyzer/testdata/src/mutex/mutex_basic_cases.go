@@ -303,6 +303,17 @@ func GoodIndexPanicProtectedByDeferUnlock() {
 	_ = items[1]
 }
 
+// Map indexing never panics on missing or out-of-range keys, so a constant
+// index that would be out of range for a slice must not be flagged for maps.
+func GoodMapIndexWithOutOfRangeConstant() {
+	const missingKey = -1
+	m := map[int]string{0: "zero"}
+	var mu sync.Mutex
+	mu.Lock()
+	_ = m[missingKey]
+	mu.Unlock()
+}
+
 // Lock + early-return-Unlock + later Unlock (mutually exclusive, no defer)
 func GoodLockMutuallyExclusiveUnlock(cur, size int) error {
 	var mu sync.Mutex
