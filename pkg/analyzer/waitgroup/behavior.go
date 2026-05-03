@@ -399,7 +399,7 @@ func (wga *Analyzer) functionLiteralMayPanic(fnLit *ast.FuncLit) bool {
 			return true
 		}
 		ident, ok := call.Fun.(*ast.Ident)
-		if ok && ident.Name == "panic" {
+		if ok && wga.isBuiltinPanic(ident) {
 			found = true
 			return false
 		}

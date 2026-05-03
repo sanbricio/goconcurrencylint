@@ -16,9 +16,7 @@ func (wga *Analyzer) isTerminatingStatement(stmt ast.Stmt) bool {
 		return s.Tok == token.BREAK || s.Tok == token.GOTO
 	case *ast.ExprStmt:
 		if call, ok := s.X.(*ast.CallExpr); ok {
-			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "panic" {
-				return true
-			}
+			return wga.callAbortsWorker(call)
 		}
 	}
 	return false

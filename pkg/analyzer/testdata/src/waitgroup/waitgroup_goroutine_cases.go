@@ -1,6 +1,9 @@
 package waitgroup
 
-import "sync"
+import (
+	"runtime"
+	"sync"
+)
 
 // ---------- Loop Patterns ----------
 
@@ -180,22 +183,46 @@ func BadDoneAfterConditionalPanic() {
 	wg.Wait()
 }
 
-func BadDoneNotDeferredInWorker() {
+func GoodNonDeferredDoneAfterOrdinaryCall() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		doSomething()
-		wg.Done() // want "waitgroup 'wg' Done should be deferred so it runs on panic or runtime.Goexit"
+		wg.Done()
 	}()
 	wg.Wait()
 }
 
-func BadDoneNotDeferredMultipleCalls() {
+func GoodNonDeferredDoneAfterMultipleOrdinaryCalls() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		doSomething()
 		doSomething()
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+func GoodShadowedPanicFunctionBeforeDone() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		panic := func(any) {}
+		panic("not the builtin")
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+func BadDoneAfterRuntimeGoexit() {
+	var wg sync.WaitGroup
+	shouldExit := true
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		if shouldExit {
+			runtime.Goexit()
+		}
 		wg.Done() // want "waitgroup 'wg' Done should be deferred so it runs on panic or runtime.Goexit"
 	}()
 	wg.Wait()
