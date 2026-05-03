@@ -50,8 +50,10 @@ func NewAnalyzer(waitGroupNames, localWaitGroupNames, packageLevelWaitGroupNames
 		packageLevelWaitGroupNames: packageLevelWaitGroupNames,
 		errorCollector:             errorCollector,
 		commentFilter:              cf,
-		typesInfo:                  pass.TypesInfo,
-		functionDecls:              buildFunctionDeclMap(pass.Files),
+		// analysis.Pass normally provides TypesInfo; abort detection keeps
+		// conservative fallbacks for direct tests and defensive callers.
+		typesInfo:     pass.TypesInfo,
+		functionDecls: buildFunctionDeclMap(pass.Files),
 	}
 }
 

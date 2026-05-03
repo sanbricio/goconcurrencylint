@@ -98,7 +98,7 @@ Because the tool is a standard `go/analysis` single-checker, it accepts the usua
 | `add-after-wait` | `sync.WaitGroup` | `wg.Add()` is called after `wg.Wait()` has returned with an empty counter — a classic reuse bug. |
 | `go-after-wait` | `sync.WaitGroup` | `wg.Go()` is called after `wg.Wait()` returned empty — same family as `add-after-wait`, specific to Go 1.25's `Go` method. |
 | `add-inside-goroutine` | `sync.WaitGroup` | `wg.Add()` is called from inside a worker goroutine, racing with `Wait()`. |
-| `done-not-deferred` | `sync.WaitGroup` | A worker calls `Done()` after potentially panicking work instead of deferring it; this is intentionally conservative for user-defined calls. |
+| `done-not-deferred` | `sync.WaitGroup` | A worker calls `Done()` after an explicit `panic` or `runtime.Goexit` path instead of deferring it. |
 | `add-loop-count-mismatch` | `sync.WaitGroup` | A literal `Add(n)` count does not match a statically countable loop of worker goroutines. |
 | `add-zero` | `sync.WaitGroup` | `wg.Add(0)` is a no-op and usually means the intended count was lost. |
 | `wait-without-add` | `sync.WaitGroup` | A local `WaitGroup` is waited on without any `Add()` in the same lifecycle. |
