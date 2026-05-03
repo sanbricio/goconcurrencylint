@@ -175,7 +175,7 @@ func BadDoneAfterConditionalPanic() {
 		if shouldPanic {
 			panic("error")
 		}
-		wg.Done() // want "waitgroup 'wg' Done not deferred in goroutine, panic will skip Done and deadlock Wait"
+		wg.Done() // want "waitgroup 'wg' Done should be deferred so it runs on panic or runtime.Goexit"
 	}()
 	wg.Wait()
 }
@@ -185,7 +185,7 @@ func BadDoneNotDeferredInWorker() {
 	wg.Add(1)
 	go func() {
 		doSomething()
-		wg.Done() // want "waitgroup 'wg' Done not deferred in goroutine, panic will skip Done and deadlock Wait"
+		wg.Done() // want "waitgroup 'wg' Done should be deferred so it runs on panic or runtime.Goexit"
 	}()
 	wg.Wait()
 }
@@ -196,7 +196,7 @@ func BadDoneNotDeferredMultipleCalls() {
 	go func() {
 		doSomething()
 		doSomething()
-		wg.Done() // want "waitgroup 'wg' Done not deferred in goroutine, panic will skip Done and deadlock Wait"
+		wg.Done() // want "waitgroup 'wg' Done should be deferred so it runs on panic or runtime.Goexit"
 	}()
 	wg.Wait()
 }
@@ -220,6 +220,20 @@ func GoodDoneOnlyStatement() {
 	wg.Add(1)
 	go func() {
 		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// A defer registers the call for execution at function exit; the deferred
+// call itself does not run inline, so it cannot panic before Done.
+func GoodDoneAfterDeferRegistration() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		wg.Done()
+		<-ch
 	}()
 	wg.Wait()
 }

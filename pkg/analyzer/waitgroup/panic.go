@@ -34,13 +34,17 @@ func (wga *Analyzer) checkDoneNotDeferredInBlock(stmts []ast.Stmt, wgName string
 			if wga.deferInvokesDone(s, wgName) {
 				continue
 			}
-			if wga.statementMayPanic(s, wgName) {
+			// A defer registers the call for execution at function exit; the
+			// deferred call itself does not run inline. Only the argument
+			// expressions are evaluated synchronously, so only those can mark
+			// subsequent code as risky.
+			if wga.deferArgsMayPanic(s, wgName) {
 				risky = true
 			}
 		case *ast.ExprStmt:
 			if call, ok := s.X.(*ast.CallExpr); ok && wga.callInvokesDone(call, wgName) {
 				if risky {
-					wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Done not deferred in goroutine, panic will skip Done and deadlock Wait")
+					wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Done should be deferred so it runs on panic or runtime.Goexit")
 				}
 				continue
 			}
@@ -79,6 +83,47 @@ func (wga *Analyzer) checkDoneNotDeferredInElse(stmt ast.Stmt, wgName string, ri
 	default:
 		return risky
 	}
+}
+
+// deferArgsMayPanic reports whether evaluating the arguments of a deferred
+// call may panic. The deferred call itself runs at function exit, so its body
+// cannot interrupt the ongoing flow; only the argument expressions evaluated
+// at the defer point can.
+func (wga *Analyzer) deferArgsMayPanic(stmt *ast.DeferStmt, wgName string) bool {
+	if stmt == nil || stmt.Call == nil {
+		return false
+	}
+	for _, arg := range stmt.Call.Args {
+		if wga.exprMayPanic(arg, wgName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (wga *Analyzer) exprMayPanic(expr ast.Expr, wgName string) bool {
+	if expr == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || wga.commentFilter.ShouldSkipCall(call) {
+			return true
+		}
+		if wga.isWaitGroupHousekeepingCall(call, wgName) {
+			return true
+		}
+		found = true
+		return false
+	})
+	return found
 }
 
 func (wga *Analyzer) statementMayPanic(stmt ast.Stmt, wgName string) bool {
