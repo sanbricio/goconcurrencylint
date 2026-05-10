@@ -4,6 +4,7 @@ import (
 	"go/ast"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 )
 
 func (ma *Analyzer) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]*Stats) {
@@ -94,7 +95,7 @@ func (ma *Analyzer) reportUncheckedTryLockResult(result *tryLockResult) {
 	if result.isRWMutex {
 		mutexType = "rwmutex"
 	}
-	ma.errorCollector.AddError(result.pos, mutexType+" '"+result.varName+"' "+result.method+" return value not checked, lock may not be held")
+	ma.errorCollector.AddError(result.pos, category.UncheckedTryLock, mutexType+" '"+result.varName+"' "+result.method+" return value not checked, lock may not be held")
 }
 
 func (ma *Analyzer) applyTryLockResultToBranch(cond ast.Expr, stats map[string]*Stats) bool {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/mutex"
@@ -16,12 +17,13 @@ import (
 )
 
 // Analyzer is the main entry point for the goconcurrencylint linter.
-// It detects common mistakes in the use of sync.Mutex and sync.WaitGroup:
-// - Locks without unlocks
-// - Add without Done
+// It performs control-flow-sensitive analysis to detect structural misuse
+// of sync.Mutex, sync.RWMutex, and sync.WaitGroup, plus copy-by-value of
+// these primitives. Each diagnostic is emitted with a stable Category
+// identifier so downstream tooling can filter by check.
 var Analyzer = &analysis.Analyzer{
 	Name:     "goconcurrencylint",
-	Doc:      "Detects common mistakes in the use of sync.Mutex and sync.WaitGroup: locks without unlock and Add without Done.",
+	Doc:      "Detects misuse of sync.Mutex, sync.RWMutex and sync.WaitGroup, plus copy-by-value of sync primitives.",
 	Run:      run,
 	Requires: []*analysis.Analyzer{},
 }
@@ -37,19 +39,40 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	errorCollector := &report.ErrorCollector{}
 	pkgPrimitives := collectPackageLevelPrimitives(pass)
 
-	detectCopyByValue(pass, errorCollector)
+	filtersByFile := make(map[string]*commnetfilter.CommentFilter, len(pass.Files))
 	for _, file := range pass.Files {
-		analyzeFunctions(file, pass, errorCollector, pkgPrimitives)
+		cf := commnetfilter.NewCommentFilter(pass.Fset, file)
+		if name := cf.FileName(); name != "" {
+			filtersByFile[name] = cf
+		}
+		analyzeFunctionsWithFilter(file, cf, pass, errorCollector, pkgPrimitives)
 	}
+	detectCopyByValue(pass, errorCollector)
 
-	errorCollector.ReportAll(pass)
+	errorCollector.ReportAll(pass, ignoreFromFilters(filtersByFile))
 	return nil, nil
 }
 
-// analyzeFunctions processes all function declarations in a file
-func analyzeFunctions(file *ast.File, pass *analysis.Pass, errorCollector *report.ErrorCollector, pkgPrimitives *syncPrimitive) {
-	commentFilter := commnetfilter.NewCommentFilter(pass.Fset, file)
+// ignoreFromFilters returns an IgnoreFunc that consults the per-file
+// CommentFilter for inline directives. A nil map is treated as "no
+// directives present anywhere".
+func ignoreFromFilters(filters map[string]*commnetfilter.CommentFilter) report.IgnoreFunc {
+	if len(filters) == 0 {
+		return nil
+	}
+	return func(filename string, line int, cat string) bool {
+		cf, ok := filters[filename]
+		if !ok {
+			return false
+		}
+		return cf.IsCategoryIgnored(line, cat)
+	}
+}
 
+// analyzeFunctionsWithFilter processes all function declarations in a file
+// using a pre-built CommentFilter, so the same instance is reused for
+// per-file ignore-directive lookups at report time.
+func analyzeFunctionsWithFilter(file *ast.File, commentFilter *commnetfilter.CommentFilter, pass *analysis.Pass, errorCollector *report.ErrorCollector, pkgPrimitives *syncPrimitive) {
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -304,7 +327,7 @@ func reportCopyByValueFieldList(fields *ast.FieldList, pass *analysis.Pass, erro
 			continue
 		}
 		for _, name := range field.Names {
-			errorCollector.AddError(name.Pos(), copyByValueMessage(kind, name.Name))
+			errorCollector.AddError(name.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name.Name))
 		}
 	}
 }
@@ -316,7 +339,7 @@ func reportCopyByValueValueSpec(vs *ast.ValueSpec, pass *analysis.Pass, errorCol
 
 	for _, value := range vs.Values {
 		if kind, name, ok := copiedSyncPrimitive(value, pass); ok {
-			errorCollector.AddError(value.Pos(), copyByValueMessage(kind, name))
+			errorCollector.AddError(value.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name))
 		}
 	}
 }
@@ -331,7 +354,7 @@ func reportCopyByValueAssignments(assign *ast.AssignStmt, pass *analysis.Pass, e
 			continue
 		}
 		if kind, name, ok := copiedSyncPrimitive(rhs, pass); ok {
-			errorCollector.AddError(rhs.Pos(), copyByValueMessage(kind, name))
+			errorCollector.AddError(rhs.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name))
 		}
 	}
 }
@@ -343,7 +366,7 @@ func reportCopyByValueArgs(call *ast.CallExpr, pass *analysis.Pass, errorCollect
 
 	for _, arg := range call.Args {
 		if kind, name, ok := copiedSyncPrimitive(arg, pass); ok {
-			errorCollector.AddError(arg.Pos(), copyByValueMessage(kind, name))
+			errorCollector.AddError(arg.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name))
 		}
 	}
 }

@@ -104,9 +104,33 @@ Because the tool is a standard `go/analysis` single-checker, it accepts the usua
 | `wait-without-add` | `sync.WaitGroup` | A local `WaitGroup` is waited on without any `Add()` in the same lifecycle. |
 | `multiple-done-worker` | `sync.WaitGroup` | The same worker branch can call `Done()` more than once. |
 | `nested-waitgroup-deadlock` | `sync.WaitGroup` | A worker for one `WaitGroup` waits on another whose release is blocked behind the outer `Wait()`. |
-| `package-level-primitive` | all | Any of the above, applied to package-scoped primitives declared in a different file of the same package. |
+| `done-outside-goroutine` | `sync.WaitGroup` | `Done()` runs on the parent goroutine instead of the worker, so a panic in the parent skips it. |
+| `wait-deadlock` | `sync.WaitGroup` | `Wait()` is reached while the same goroutine still owes a `Done()`. |
+| `add-negative` | `sync.WaitGroup` | `wg.Add(n)` is called with a negative literal — panics at runtime. |
+| `go-panic` | `sync.WaitGroup` | A function passed to `wg.Go()` may panic and bring the program down. |
+| `defer-unlock-in-loop` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Unlock()` lives inside a loop body, so the unlock only runs at function return. |
+| `double-lock` | `sync.Mutex`, `sync.RWMutex` | A second `Lock()` is taken while the first is still held (or a write `Lock()` while a read lock is held). |
+| `cross-goroutine-unlock` | `sync.Mutex`, `sync.RWMutex` | `Unlock()` / `RUnlock()` runs in a different goroutine than the matching lock. |
+| `lock-order-cycle` | `sync.Mutex`, `sync.RWMutex` | Two functions acquire the same pair of mutexes in opposite orders — classic deadlock pattern. |
+| `sync-primitive-copy` | all | A `sync.Mutex`, `sync.RWMutex` or `sync.WaitGroup` (or a struct embedding one) is copied by value. |
 
-All checks are enabled by default and emitted as standard `go/analysis` diagnostics. To silence an intentional one-line case, put `// goconcurrencylint:ignore` on the same line as the call; for example, `wg.Wait() // goconcurrencylint:ignore wait-without-add`. Any text after the directive is treated as a human-readable note; today the directive silences all checks reported on that line.
+All checks above also fire on package-scoped primitives declared in any file of the same package — there is no separate ID for that case; the diagnostic carries the same category as the in-function variant.
+
+Each diagnostic is emitted with a stable [`analysis.Diagnostic.Category`](https://pkg.go.dev/golang.org/x/tools/go/analysis#Diagnostic) equal to the ID in the table above, so `golangci-lint` and IDE integrations can filter or label by check.
+
+### Suppressing diagnostics
+
+Place `// goconcurrencylint:ignore` on the same line as the offending call:
+
+```go
+wg.Wait() // goconcurrencylint:ignore wait-without-add
+mu.Lock() // goconcurrencylint:ignore lock-without-unlock, defer-lock
+mu.Lock() // goconcurrencylint:ignore  legacy code, see issue #42
+```
+
+- A list of one or more category IDs (separated by spaces, commas or semicolons) silences only those checks on the line.
+- A bare `// goconcurrencylint:ignore`, or a directive followed only by free text, silences every check on the line.
+- Tokens after the first one that does not match a known category are treated as a human-readable note, so `// goconcurrencylint:ignore lock-without-unlock because foo` only silences `lock-without-unlock`.
 
 ## Examples
 

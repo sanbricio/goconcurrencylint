@@ -1,0 +1,46 @@
+package analyzer
+
+import (
+	"testing"
+
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/analysis/analysistest"
+)
+
+// TestDiagnosticCategoryPropagation runs the analyzer over the full set of
+// fixtures and verifies every emitted diagnostic carries a Category that
+// belongs to the public catalogue. This catches regressions where a new
+// AddError call site forgets to pass a category, or where a refactor breaks
+// the wire-up between ErrorCollector and pass.Report.
+func TestDiagnosticCategoryPropagation(t *testing.T) {
+	known := make(map[string]struct{}, len(category.All()))
+	for _, id := range category.All() {
+		known[id] = struct{}{}
+	}
+
+	results := analysistest.Run(t, analysistest.TestData(), Analyzer,
+		"mutex", "waitgroup", "packagelevel", "ignoredirective")
+
+	totalDiagnostics := 0
+	for _, res := range results {
+		require.NotNil(t, res.Pass, "analysistest must return a non-nil Pass")
+		for _, diag := range res.Diagnostics {
+			totalDiagnostics++
+			pos := res.Pass.Fset.Position(diag.Pos)
+			assert.NotEmpty(t, diag.Category,
+				"diagnostic at %s missing Category: %q", pos, diag.Message)
+			if diag.Category == "" {
+				continue
+			}
+			_, ok := known[diag.Category]
+			assert.True(t, ok,
+				"diagnostic at %s carries unknown Category %q (message: %q)",
+				pos, diag.Category, diag.Message)
+		}
+	}
+
+	assert.Greater(t, totalDiagnostics, 0,
+		"expected the fixtures to produce at least one diagnostic")
+}

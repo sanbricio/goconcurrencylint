@@ -15,9 +15,9 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 
 	t.Run("basic order", func(t *testing.T) {
 		ec := &ErrorCollector{}
-		ec.AddError(pos1, "first error")
-		ec.AddError(pos2, "second error")
-		ec.AddError(pos3, "third error")
+		ec.AddError(pos1, "cat", "first error")
+		ec.AddError(pos2, "cat", "second error")
+		ec.AddError(pos3, "cat", "third error")
 
 		var reported []struct {
 			Pos     token.Position
@@ -35,7 +35,7 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 				})
 			},
 		}
-		ec.ReportAll(pass)
+		ec.ReportAll(pass, nil)
 		assert.Len(t, reported, 3)
 		assert.Equal(t, "foo.go", reported[0].Pos.Filename)
 		assert.Equal(t, "first error", reported[0].Message)
@@ -65,14 +65,14 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 				})
 			},
 		}
-		ec.ReportAll(pass)
+		ec.ReportAll(pass, nil)
 		assert.Len(t, reported, 0)
 	})
 
 	t.Run("same position", func(t *testing.T) {
 		ec := &ErrorCollector{}
-		ec.AddError(pos1, "err1")
-		ec.AddError(pos1, "err2")
+		ec.AddError(pos1, "cat", "err1")
+		ec.AddError(pos1, "cat", "err2")
 		var reported []string
 		pass := &analysis.Pass{
 			Fset: fset,
@@ -80,7 +80,7 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 				reported = append(reported, d.Message)
 			},
 		}
-		ec.ReportAll(pass)
+		ec.ReportAll(pass, nil)
 		assert.Equal(t, []string{"err1", "err2"}, reported)
 	})
 
@@ -91,8 +91,8 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 		posA := fileA.Pos(5)
 		posB := fileB.Pos(5)
 		ec := &ErrorCollector{}
-		ec.AddError(posB, "errB")
-		ec.AddError(posA, "errA")
+		ec.AddError(posB, "cat", "errB")
+		ec.AddError(posA, "cat", "errA")
 		var reported []string
 		pass := &analysis.Pass{
 			Fset: fset2,
@@ -100,24 +100,22 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 				reported = append(reported, d.Message)
 			},
 		}
-		ec.ReportAll(pass)
+		ec.ReportAll(pass, nil)
 		assert.Equal(t, []string{"errA", "errB"}, reported)
 	})
 
 	t.Run("different lines in same file", func(t *testing.T) {
 		ec := &ErrorCollector{}
-		// Creamos archivo con al menos 5 líneas
 		file2 := fset.AddFile("foo2.go", -1, 100)
-		// AddLine añade inicio de línea en offset creciente, para simular saltos de línea
-		file2.AddLine(10)              // línea 2
-		file2.AddLine(20)              // línea 3
-		file2.AddLine(30)              // línea 4
-		file2.AddLine(40)              // línea 5
-		posLine1 := file2.LineStart(1) // línea 1
-		posLine5 := file2.LineStart(5) // línea 5
+		file2.AddLine(10)
+		file2.AddLine(20)
+		file2.AddLine(30)
+		file2.AddLine(40)
+		posLine1 := file2.LineStart(1)
+		posLine5 := file2.LineStart(5)
 
-		ec.AddError(posLine5, "err5")
-		ec.AddError(posLine1, "err1")
+		ec.AddError(posLine5, "cat", "err5")
+		ec.AddError(posLine1, "cat", "err1")
 
 		var reported []struct {
 			Line    int
@@ -135,7 +133,7 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 				})
 			},
 		}
-		ec.ReportAll(pass)
+		ec.ReportAll(pass, nil)
 		assert.Equal(t, 2, len(reported))
 		assert.Equal(t, 1, reported[0].Line)
 		assert.Equal(t, "err1", reported[0].Message)
@@ -145,7 +143,7 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 
 	t.Run("empty message", func(t *testing.T) {
 		ec := &ErrorCollector{}
-		ec.AddError(pos1, "")
+		ec.AddError(pos1, "cat", "")
 		var reported []string
 		pass := &analysis.Pass{
 			Fset: fset,
@@ -153,22 +151,54 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 				reported = append(reported, d.Message)
 			},
 		}
-		ec.ReportAll(pass)
+		ec.ReportAll(pass, nil)
 		assert.Equal(t, []string{""}, reported)
 	})
 
-	t.Run("error report struct", func(t *testing.T) {
-		rep := ErrorReport{Pos: token.Pos(42), Message: "msg"}
-		assert.Equal(t, token.Pos(42), rep.Pos)
-		assert.Equal(t, "msg", rep.Message)
+	t.Run("category preserved", func(t *testing.T) {
+		ec := &ErrorCollector{}
+		ec.AddError(pos1, "lock-without-unlock", "msg")
+		var got string
+		pass := &analysis.Pass{
+			Fset: fset,
+			Report: func(d analysis.Diagnostic) {
+				got = d.Category
+			},
+		}
+		ec.ReportAll(pass, nil)
+		assert.Equal(t, "lock-without-unlock", got)
 	})
 
-	t.Run("direct access to errors field", func(t *testing.T) {
+	t.Run("ignore func filters by category", func(t *testing.T) {
 		ec := &ErrorCollector{}
-		ec.AddError(pos1, "foo")
-		ec.AddError(pos2, "bar")
-		assert.Len(t, ec.errors, 2)
-		assert.Equal(t, "foo", ec.errors[0].Message)
-		assert.Equal(t, "bar", ec.errors[1].Message)
+		ec.AddError(pos1, "lock-without-unlock", "kept")
+		ec.AddError(pos2, "wait-without-add", "dropped")
+		var got []string
+		pass := &analysis.Pass{
+			Fset: fset,
+			Report: func(d analysis.Diagnostic) {
+				got = append(got, d.Message)
+			},
+		}
+		ignore := func(_ string, _ int, category string) bool {
+			return category == "wait-without-add"
+		}
+		ec.ReportAll(pass, ignore)
+		assert.Equal(t, []string{"kept"}, got)
+	})
+
+	t.Run("dedup by pos+category+message", func(t *testing.T) {
+		ec := &ErrorCollector{}
+		ec.AddError(pos1, "cat", "msg")
+		ec.AddError(pos1, "cat", "msg")          // exact dup
+		ec.AddError(pos1, "other-cat", "msg")    // different category, kept
+		ec.AddError(pos1, "cat", "different")    // different message, kept
+		var n int
+		pass := &analysis.Pass{
+			Fset: fset,
+			Report: func(d analysis.Diagnostic) { n++ },
+		}
+		ec.ReportAll(pass, nil)
+		assert.Equal(t, 3, n)
 	})
 }
