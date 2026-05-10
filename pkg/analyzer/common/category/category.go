@@ -7,6 +7,8 @@
 // a breaking change for downstream consumers and ignore directives.
 package category
 
+import "slices"
+
 const (
 	// Mutex / RWMutex checks.
 	LockWithoutUnlock      = "lock-without-unlock"
@@ -81,10 +83,5 @@ func All() []string {
 
 // IsKnown reports whether id is a recognised check category.
 func IsKnown(id string) bool {
-	for _, c := range All() {
-		if c == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(All(), id)
 }

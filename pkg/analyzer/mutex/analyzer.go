@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -441,12 +442,7 @@ func functionBodyContainsFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string
 }
 
 func containsMethod(methodNames []string, methodName string) bool {
-	for _, candidate := range methodNames {
-		if candidate == methodName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(methodNames, methodName)
 }
 
 func relativeMutexPath(varName, prefix string) (string, bool) {

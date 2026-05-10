@@ -35,7 +35,7 @@ type syncPrimitive struct {
 	waitGroups map[string]bool
 }
 
-func run(pass *analysis.Pass) (interface{}, error) {
+func run(pass *analysis.Pass) (any, error) {
 	errorCollector := &report.ErrorCollector{}
 	pkgPrimitives := collectPackageLevelPrimitives(pass)
 
@@ -122,15 +122,9 @@ func collectPackageLevelPrimitives(pass *analysis.Pass) *syncPrimitive {
 
 // mergePrimitives merges src primitives into dst
 func mergePrimitives(dst, src *syncPrimitive) {
-	for k, v := range src.mutexes {
-		dst.mutexes[k] = v
-	}
-	for k, v := range src.rwMutexes {
-		dst.rwMutexes[k] = v
-	}
-	for k, v := range src.waitGroups {
-		dst.waitGroups[k] = v
-	}
+	maps.Copy(dst.mutexes, src.mutexes)
+	maps.Copy(dst.rwMutexes, src.rwMutexes)
+	maps.Copy(dst.waitGroups, src.waitGroups)
 }
 
 func copyPrimitiveNames(src map[string]bool) map[string]bool {
@@ -467,8 +461,8 @@ func containedSyncPrimitiveValueKind(typ types.Type, visited map[types.Type]bool
 		}
 		return containedSyncPrimitiveValueKind(t.Underlying(), visited)
 	case *types.Struct:
-		for i := 0; i < t.NumFields(); i++ {
-			fieldType := types.Unalias(t.Field(i).Type())
+		for field := range t.Fields() {
+			fieldType := types.Unalias(field.Type())
 			if _, ok := fieldType.(*types.Pointer); ok {
 				continue
 			}

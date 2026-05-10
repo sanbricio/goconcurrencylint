@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -393,9 +394,7 @@ func (wga *Analyzer) reportExcessDones(wgName string, stats *Stats, totalExpecte
 		return
 	}
 
-	sort.Slice(mainFlowDoneCalls, func(i, j int) bool {
-		return mainFlowDoneCalls[i] < mainFlowDoneCalls[j]
-	})
+	slices.Sort(mainFlowDoneCalls)
 
 	excessCount := len(mainFlowDoneCalls) - stats.totalAdd
 	startIndex := len(mainFlowDoneCalls) - excessCount
