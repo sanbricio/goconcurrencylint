@@ -41,6 +41,36 @@ func GoodAddCountMatchesForLoopGoroutines() {
 	wg.Wait()
 }
 
+func GoodConstCountMatchesMultipleForLoopGoroutines() {
+	const goroutines = 32
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 3)
+
+	for w := 0; w < goroutines; w++ {
+		go func() {
+			defer wg.Done()
+			doSomething()
+		}()
+	}
+
+	for r := 0; r < goroutines; r++ {
+		go func() {
+			defer wg.Done()
+			doSomething()
+		}()
+	}
+
+	for d := 0; d < goroutines; d++ {
+		go func() {
+			defer wg.Done()
+			doSomething()
+		}()
+	}
+
+	wg.Wait()
+}
+
 // Add inside a loop but Done may be missing in some paths
 func BadLoopAddMissingDone() {
 	var wg sync.WaitGroup

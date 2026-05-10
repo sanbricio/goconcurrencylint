@@ -213,13 +213,19 @@ func (ma *Analyzer) isBorrowedWrapperCall(varName, methodName string) bool {
 		return false
 	}
 
-	suffix, ok := strings.CutPrefix(varName, currentReceiver)
-	if !ok || !strings.HasPrefix(suffix, ".") {
+	oppositeMethods := oppositeMutexMethods(methodName)
+	if len(oppositeMethods) == 0 || ma.currentMethodContainsFieldCall(varName, oppositeMethods) {
 		return false
 	}
 
-	oppositeMethods := oppositeMutexMethods(methodName)
-	if len(oppositeMethods) == 0 || ma.currentMethodContainsFieldCall(varName, oppositeMethods) {
+	if _, fieldSuffix, ok := splitBaseAndSuffix(varName); ok &&
+		methodNameLooksLikeWrapper(ma.function.Name.Name, methodName) &&
+		ma.anySiblingMethodContainsFieldSuffix(fieldSuffix, ma.function.Name.Name, oppositeMethods, oppositeMethods) {
+		return true
+	}
+
+	suffix, ok := strings.CutPrefix(varName, currentReceiver)
+	if !ok || !strings.HasPrefix(suffix, ".") {
 		return false
 	}
 
@@ -312,6 +318,32 @@ func (ma *Analyzer) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod
 	return false
 }
 
+func (ma *Analyzer) anySiblingMethodContainsFieldSuffix(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
+	receiverType := receiverTypeName(ma.function)
+	if receiverType == "" {
+		return false
+	}
+
+	methods := ma.receiverMethods[receiverType]
+	if len(methods) == 0 {
+		return false
+	}
+
+	for methodName, fn := range methods {
+		if methodName == excludeMethod || fn == nil || fn.Body == nil {
+			continue
+		}
+		if !methodNameMatchesAnyHint(methodName, nameHints) {
+			continue
+		}
+		if functionBodyContainsFieldSuffixCall(fn.Body, fieldSuffix, fieldMethods) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func oppositeMutexMethods(methodName string) []string {
 	switch methodName {
 	case "Lock", "TryLock":
@@ -337,7 +369,14 @@ func methodNameMatchesAnyHint(fnName string, hints []string) bool {
 		if hint == "" {
 			continue
 		}
-		if strings.Contains(lowerName, strings.ToLower(hint)) {
+		lowerHint := strings.ToLower(hint)
+		if strings.Contains(lowerName, lowerHint) {
+			return true
+		}
+		if lowerHint == "rlock" && strings.Contains(lowerName, "readlock") {
+			return true
+		}
+		if lowerHint == "runlock" && strings.Contains(lowerName, "readunlock") {
 			return true
 		}
 	}
@@ -362,6 +401,35 @@ func functionBodyContainsFieldCall(body *ast.BlockStmt, varName string, methodNa
 		}
 
 		if containsMethod(methodNames, sel.Sel.Name) && common.GetVarName(sel.X) == varName {
+			found = true
+			return false
+		}
+
+		return true
+	})
+
+	return found
+}
+
+func functionBodyContainsFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string, methodNames []string) bool {
+	if body == nil || fieldSuffix == "" {
+		return false
+	}
+
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !containsMethod(methodNames, sel.Sel.Name) {
+			return true
+		}
+
+		_, suffix, ok := splitBaseAndSuffix(common.GetVarName(sel.X))
+		if ok && suffix == fieldSuffix {
 			found = true
 			return false
 		}

@@ -161,21 +161,7 @@ func (wga *Analyzer) isLikelyExternalLifecycleWaitGroup(wgName string, st *Stats
 	if st.totalAdd == 0 || st.doneCount > 0 || len(st.deferDoneCalls) > 0 || len(st.waitCalls) > 0 || len(st.goCalls) > 0 {
 		return false
 	}
-
-	relatedGoroutine := false
-	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
-		goStmt, ok := n.(*ast.GoStmt)
-		if !ok {
-			return true
-		}
-		if wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
-			relatedGoroutine = true
-			return false
-		}
-		return true
-	})
-
-	return !relatedGoroutine
+	return true
 }
 
 func (wga *Analyzer) countGuaranteedDoneInStatements(stmts []ast.Stmt, wgName string, multiplier int) int {
@@ -282,8 +268,8 @@ func (wga *Analyzer) estimateForIterations(forStmt *ast.ForStmt) int {
 
 	if init, ok := forStmt.Init.(*ast.AssignStmt); ok && len(init.Lhs) == 1 && len(init.Rhs) == 1 {
 		if ident, ok := init.Lhs[0].(*ast.Ident); ok {
-			if lit, ok := init.Rhs[0].(*ast.BasicLit); ok && lit.Kind == token.INT {
-				start = parseIntLiteral(lit)
+			if value, ok := common.ConstantIntValue(init.Rhs[0], wga.typesInfo); ok {
+				start = value
 				counterName = ident.Name
 			}
 		}
@@ -301,11 +287,10 @@ func (wga *Analyzer) estimateForIterations(forStmt *ast.ForStmt) int {
 	if !ok || left.Name != counterName {
 		return 1
 	}
-	right, ok := cond.Y.(*ast.BasicLit)
-	if !ok || right.Kind != token.INT {
+	limit, ok := common.ConstantIntValue(cond.Y, wga.typesInfo)
+	if !ok {
 		return 1
 	}
-	limit := parseIntLiteral(right)
 
 	switch post := forStmt.Post.(type) {
 	case *ast.IncDecStmt:
@@ -559,6 +544,9 @@ func (wga *Analyzer) checkAddInGoroutine(goStmt *ast.GoStmt, wgName string) {
 
 // checkAddAfterWaitInMainFlow detects Add calls in the main execution flow that occur after Wait
 func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
+	if strings.Contains(wgName, ".") {
+		return
+	}
 	for _, wait := range st.waitCalls {
 		// Check if this Wait has any Add or Done operations before it in main flow
 		hasOperationsBefore := false
@@ -1077,7 +1065,7 @@ func (wga *Analyzer) waitGroupInitializedFromAnother(wgName string) bool {
 				if !ok || ident.Name != wgName || i >= len(node.Rhs) {
 					continue
 				}
-				if wga.isCopiedWaitGroupExpr(node.Rhs[i]) {
+				if wga.isWaitGroupAliasedOrCopiedExpr(node.Rhs[i]) {
 					found = true
 					return false
 				}
@@ -1087,7 +1075,7 @@ func (wga *Analyzer) waitGroupInitializedFromAnother(wgName string) bool {
 				if name.Name != wgName || i >= len(node.Values) {
 					continue
 				}
-				if wga.isCopiedWaitGroupExpr(node.Values[i]) {
+				if wga.isWaitGroupAliasedOrCopiedExpr(node.Values[i]) {
 					found = true
 					return false
 				}
@@ -1098,7 +1086,9 @@ func (wga *Analyzer) waitGroupInitializedFromAnother(wgName string) bool {
 	return found
 }
 
-func (wga *Analyzer) isCopiedWaitGroupExpr(expr ast.Expr) bool {
+// isWaitGroupAliasedOrCopiedExpr reports whether expr initializes a local
+// WaitGroup handle from another WaitGroup, either by value or by address.
+func (wga *Analyzer) isWaitGroupAliasedOrCopiedExpr(expr ast.Expr) bool {
 	if expr == nil {
 		return false
 	}
@@ -1106,9 +1096,17 @@ func (wga *Analyzer) isCopiedWaitGroupExpr(expr ast.Expr) bool {
 	case *ast.CompositeLit:
 		return false
 	case *ast.UnaryExpr:
-		return e.Op != token.AND && wga.isCopiedWaitGroupExpr(e.X)
+		if e.Op == token.AND {
+			return wga.isWaitGroupFieldExpr(e.X)
+		}
+		return wga.isWaitGroupAliasedOrCopiedExpr(e.X)
 	}
 	return common.IsWaitGroup(wga.typesInfo.TypeOf(expr))
+}
+
+func (wga *Analyzer) isWaitGroupFieldExpr(expr ast.Expr) bool {
+	_, ok := expr.(*ast.SelectorExpr)
+	return ok && common.IsWaitGroup(wga.typesInfo.TypeOf(expr))
 }
 
 // checkUnreachableDone checks for Done calls that are unreachable due to early returns

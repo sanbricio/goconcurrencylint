@@ -755,6 +755,14 @@ type positionalLifecycleToken struct {
 	*positionalLifecycleStore
 }
 
+type blockWithMutex struct {
+	mu sync.RWMutex
+}
+
+type blockStore struct {
+	blks []*blockWithMutex
+}
+
 // Good: struct field mutex properly locked and unlocked
 func GoodStructFieldMutex() {
 	var sm SafeMap
@@ -885,6 +893,30 @@ func (nwm *NamedWrapperMutex) rLock() {
 
 func (nwm *NamedWrapperMutex) rUnlock() {
 	nwm.mu.RUnlock()
+}
+
+func (bs *blockStore) lockAllBlocks() {
+	for _, blk := range bs.blks {
+		blk.mu.Lock()
+	}
+}
+
+func (bs *blockStore) unlockAllBlocks() {
+	for _, blk := range bs.blks {
+		blk.mu.Unlock()
+	}
+}
+
+func (bs *blockStore) readLockAllBlocks() {
+	for _, blk := range bs.blks {
+		blk.mu.RLock()
+	}
+}
+
+func (bs *blockStore) readUnlockAllBlocks() {
+	for _, blk := range bs.blks {
+		blk.mu.RUnlock()
+	}
 }
 
 // Good: a loop can intentionally break while still holding the lock and release it afterwards.

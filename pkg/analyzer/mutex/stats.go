@@ -1,8 +1,11 @@
 package mutex
 
 import (
+	"bytes"
 	"go/ast"
+	"go/printer"
 	"go/token"
+	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
@@ -11,16 +14,212 @@ import (
 // analyzeBlock analyzes a block statement starting from the provided state and
 // returns the resulting stats after executing that block.
 func (ma *Analyzer) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats) map[string]*Stats {
-	blockStats := ma.copyStats(initial)
+	return ma.analyzeStatementList(block.List, initial)
+}
 
-	for _, stmt := range block.List {
+func (ma *Analyzer) analyzeStatementList(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
+	blockStats := ma.copyStats(initial)
+	skip := make(map[token.Pos]bool)
+
+	for i, stmt := range stmts {
 		if ma.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		if skip[stmt.Pos()] {
+			continue
+		}
+		if ma.skipBalancedGuardedLock(stmt, stmts[i+1:], skip) {
 			continue
 		}
 		ma.analyzeStatement(stmt, blockStats)
 	}
 
 	return blockStats
+}
+
+func (ma *Analyzer) skipBalancedGuardedLock(stmt ast.Stmt, rest []ast.Stmt, skip map[token.Pos]bool) bool {
+	guard, varName, methodName, ok := ma.guardedMutexCall(stmt)
+	if !ok || !isLockMethod(methodName) {
+		return false
+	}
+
+	releaseMethod := matchingUnlockMethod(methodName)
+	if releaseMethod == "" {
+		return false
+	}
+
+	for _, later := range rest {
+		laterGuard, laterVarName, laterMethodName, ok := ma.guardedMutexCall(later)
+		if ok && laterGuard == guard && laterVarName == varName && laterMethodName == releaseMethod {
+			skip[later.Pos()] = true
+			return true
+		}
+		if ma.statementMayExit(later) {
+			return false
+		}
+	}
+
+	return false
+}
+
+func (ma *Analyzer) statementMayExit(stmt ast.Stmt) bool {
+	found := false
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.DeferStmt, *ast.GoStmt:
+			return false
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			found = true
+			return false
+		case *ast.BranchStmt:
+			if node.Tok == token.GOTO || node.Tok == token.BREAK || node.Tok == token.CONTINUE {
+				found = true
+				return false
+			}
+		case *ast.CallExpr:
+			if ma.callTerminatesExecution(node) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func (ma *Analyzer) callTerminatesExecution(call *ast.CallExpr) bool {
+	if call == nil {
+		return false
+	}
+	if ident, ok := call.Fun.(*ast.Ident); ok {
+		return ma.isBuiltinPanic(ident)
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+
+	methodName := sel.Sel.Name
+	if ma.typesInfo != nil {
+		if obj := ma.typesInfo.ObjectOf(sel.Sel); obj != nil && obj.Pkg() != nil {
+			switch obj.Pkg().Path() {
+			case "os":
+				return methodName == "Exit"
+			case "runtime":
+				return methodName == "Goexit"
+			case "log", "testing":
+				return isFatalMethod(methodName)
+			}
+		}
+	}
+
+	receiverName := common.GetVarName(sel.X)
+	switch receiverName {
+	case "os":
+		return methodName == "Exit"
+	case "runtime":
+		return methodName == "Goexit"
+	case "log":
+		return isFatalMethod(methodName)
+	default:
+		return false
+	}
+}
+
+func (ma *Analyzer) isBuiltinPanic(ident *ast.Ident) bool {
+	if ident == nil || ident.Name != "panic" {
+		return false
+	}
+	if ma.typesInfo == nil {
+		return true
+	}
+	obj := ma.typesInfo.ObjectOf(ident)
+	if obj == nil {
+		return true
+	}
+	_, ok := obj.(*types.Builtin)
+	return ok
+}
+
+func isFatalMethod(methodName string) bool {
+	return methodName == "Fatal" || methodName == "Fatalf" || methodName == "Fatalln"
+}
+
+func (ma *Analyzer) guardedMutexCall(stmt ast.Stmt) (string, string, string, bool) {
+	ifStmt, ok := stmt.(*ast.IfStmt)
+	if !ok || ifStmt.Init != nil || ifStmt.Else != nil || ifStmt.Body == nil {
+		return "", "", "", false
+	}
+
+	var varName, methodName string
+	foundCalls := 0
+	for _, bodyStmt := range ifStmt.Body.List {
+		if ma.statementMayExit(bodyStmt) {
+			return "", "", "", false
+		}
+		ast.Inspect(bodyStmt, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncLit); ok {
+				return false
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok || ma.commentFilter.ShouldSkipCall(call) {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			candidateVarName := common.GetVarName(sel.X)
+			if !ma.mutexNames[candidateVarName] && !ma.rwMutexNames[candidateVarName] {
+				return true
+			}
+			candidateMethodName := sel.Sel.Name
+			if !isLockMethod(candidateMethodName) && !isUnlockMethod(candidateMethodName) {
+				return true
+			}
+			foundCalls++
+			varName = candidateVarName
+			methodName = candidateMethodName
+			return true
+		})
+	}
+	if foundCalls != 1 {
+		return "", "", "", false
+	}
+
+	return exprString(ifStmt.Cond), varName, methodName, true
+}
+
+func exprString(expr ast.Expr) string {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, token.NewFileSet(), expr); err != nil {
+		return ""
+	}
+	return buf.String()
+}
+
+func isLockMethod(methodName string) bool {
+	return methodName == "Lock" || methodName == "RLock"
+}
+
+func isUnlockMethod(methodName string) bool {
+	return methodName == "Unlock" || methodName == "RUnlock"
+}
+
+func matchingUnlockMethod(methodName string) string {
+	switch methodName {
+	case "Lock":
+		return "Unlock"
+	case "RLock":
+		return "RUnlock"
+	default:
+		return ""
+	}
 }
 
 // analyzeStatement analyzes individual statements
@@ -277,6 +476,19 @@ func (ma *Analyzer) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]
 func (ma *Analyzer) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats map[string]*Stats) {
 	varName := common.GetVarName(call.X)
 
+	if call.Sel.Name == "Lock" && ma.consumeBorrowedDeferredLock(varName, stats) {
+		return
+	}
+	if call.Sel.Name == "RLock" && ma.consumeBorrowedDeferredRLock(varName, stats) {
+		return
+	}
+	if call.Sel.Name == "Lock" && ma.deferredRelockBalancesEarlierDeferredUnlock(varName, stats) {
+		return
+	}
+	if call.Sel.Name == "RLock" && ma.deferredRRelockBalancesEarlierDeferredRUnlock(varName, stats) {
+		return
+	}
+
 	// defer Lock / defer RLock re-acquires the lock on
 	// function return instead of releasing it, guaranteed deadlock.
 	if ma.mutexNames[varName] && call.Sel.Name == "Lock" {
@@ -306,6 +518,36 @@ func (ma *Analyzer) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats
 			ma.handleDeferRUnlock(varName, pos, stats)
 		}
 	}
+}
+
+func (ma *Analyzer) consumeBorrowedDeferredLock(varName string, stats map[string]*Stats) bool {
+	st := stats[varName]
+	if st == nil || st.borrowedLock == 0 {
+		return false
+	}
+	st.borrowedLock--
+	ma.removeFirstBorrowedUnlockPos(st)
+	return true
+}
+
+func (ma *Analyzer) consumeBorrowedDeferredRLock(varName string, stats map[string]*Stats) bool {
+	st := stats[varName]
+	if st == nil || st.borrowedRLock == 0 {
+		return false
+	}
+	st.borrowedRLock--
+	ma.removeFirstBorrowedRUnlockPos(st)
+	return true
+}
+
+func (ma *Analyzer) deferredRelockBalancesEarlierDeferredUnlock(varName string, stats map[string]*Stats) bool {
+	st := stats[varName]
+	return st != nil && st.lock == 0 && st.deferUnlock > 0
+}
+
+func (ma *Analyzer) deferredRRelockBalancesEarlierDeferredRUnlock(varName string, stats map[string]*Stats) bool {
+	st := stats[varName]
+	return st != nil && st.rlock == 0 && st.deferRUnlock > 0
 }
 
 // handleDeferFunctionLiteral processes defer with function literals

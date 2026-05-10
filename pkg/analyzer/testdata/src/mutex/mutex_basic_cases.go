@@ -1,6 +1,9 @@
 package mutex
 
-import "sync"
+import (
+	"log"
+	"sync"
+)
 
 // ========== MUTEX TESTS ==========
 
@@ -240,6 +243,42 @@ func BadDeferLockWithoutPriorLock() {
 	defer mu.Lock() // want "mutex 'mu' defer calls Lock instead of Unlock, will deadlock on return"
 }
 
+func GoodDeferRelockAfterTemporaryUnlock(mu *sync.Mutex) {
+	mu.Unlock()
+	defer mu.Lock()
+	_ = mu
+}
+
+func GoodDeferRWMutexRelockAfterTemporaryUnlock(mu *sync.RWMutex) {
+	mu.Unlock()
+	defer mu.Lock()
+	_ = mu
+}
+
+func GoodDeferRWMutexRRelockAfterTemporaryRUnlock(mu *sync.RWMutex) {
+	mu.RUnlock()
+	defer mu.RLock()
+	_ = mu
+}
+
+func GoodDeferredRelockBeforeEarlierDeferredUnlock() {
+	var mu sync.Mutex
+	mu.Lock()
+	defer mu.Unlock()
+	mu.Unlock()
+	// Deferred calls run LIFO, so this relock executes before the earlier unlock.
+	defer mu.Lock()
+}
+
+func GoodDeferredRWMutexRelockBeforeEarlierDeferredUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	defer mu.Unlock()
+	mu.Unlock()
+	// Deferred calls run LIFO, so this relock executes before the earlier unlock.
+	defer mu.Lock()
+}
+
 // ---------- Conditional Logic ----------
 
 // RLock + early-return-with-RUnlock in one branch + defer RUnlock in the other
@@ -324,6 +363,63 @@ func GoodLockMutuallyExclusiveUnlock(cur, size int) error {
 	}
 	mu.Unlock()
 	return nil
+}
+
+func GoodConditionalLockUnlockSameGuard(needLock bool) {
+	var mu sync.Mutex
+	if needLock {
+		mu.Lock()
+	}
+	_ = needLock
+	if needLock {
+		mu.Unlock()
+	}
+}
+
+func GoodConditionalRWMutexLockUnlockSameGuard(needLock bool) {
+	var mu sync.RWMutex
+	if needLock {
+		mu.Lock()
+	}
+	_ = needLock
+	if needLock {
+		mu.Unlock()
+	}
+}
+
+func GoodConditionalRWMutexRLockRUnlockSameNegatedGuard(hasLock bool) {
+	var mu sync.RWMutex
+	if !hasLock {
+		mu.RLock()
+	}
+	_ = hasLock
+	if !hasLock {
+		mu.RUnlock()
+	}
+}
+
+func GoodConditionalLockUnlockSameGuardWithRead(needLock bool) {
+	var mu sync.Mutex
+	var value int
+	if needLock {
+		mu.Lock()
+		value++
+	}
+	_ = value
+	if needLock {
+		mu.Unlock()
+	}
+}
+
+func BadConditionalLockWithFatalBeforeMatchingUnlock(needLock bool) {
+	var mu sync.Mutex
+	if needLock {
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in if"
+	}
+	log.Fatal("stop")
+	if needLock {
+		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+	}
 }
 
 // Conditional: both branches lock and unlock
