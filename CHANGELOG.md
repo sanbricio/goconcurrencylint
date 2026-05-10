@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.3.0 - 2026-05-10
+
+## What's Changed
+* feat: enhance WaitGroup Analyzer with additional checks and functionality by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/9
+* refactor: waitgroup tests into multiple files for better organization by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/10
+* feat(waitgroup): improve and reduce false positives in balance analysis by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/11
+* feat: add logo image for goconcurrencylint and update README by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/12
+* feat: reduce false positives in mutex and waitgroup analysis by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/13
+* feat(mutex): propagate lock state through method calls and detect cal… by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/14
+* feat: enhance mutex and waitgroup analysis with copy-by-value detecti… by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/15
+* feat: enhance mutex and waitgroup analysis with new checks and test c… by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/16
+* feat: enhance mutex and waitgroup analysis with new lifecycle checks by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/17
+* feat: Add mutex and waitgroup analysis enhancements by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/19
+* feat: Add advanced concurrency checks and ignore directive support by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/20
+* refactor: reorganize waitgroup checks and add new validation functions by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/21
+* fix: reduce false positives in mutex and waitgroup analyzers by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/22
+* fix: scope done-not-deferred to explicit panic and runtime.Goexit by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/23
+* feat: error reporting to use diagnostic categories by @sanbricio in https://github.com/sanbricio/goconcurrencylint/pull/24
+
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.2.1...v0.3.0
+
 ## v0.2.1 - 2026-04-14
 
 ## What's Changed
