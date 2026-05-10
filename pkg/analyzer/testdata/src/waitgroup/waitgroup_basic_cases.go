@@ -148,6 +148,22 @@ func BadAddAfterWait() {
 	}()
 }
 
+func GoodAddInsideGoroutineWithWaitInsideSameGoroutine() {
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+
+	go func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+		}()
+		wg.Wait()
+		close(done)
+	}()
+
+	<-done
+}
+
 // Edge case where Add is called after Wait, but in a different flow
 func EdgeCaseAddAfterWaitMainFlow() {
 	var wg sync.WaitGroup

@@ -472,6 +472,16 @@ func (wga *Analyzer) deferCallRecovers(call *ast.CallExpr) bool {
 }
 
 func (wga *Analyzer) checkAddInsideGoroutine() {
+	mainFlowWaits := make(map[string]bool)
+	hasMainFlowWait := func(wgName string) bool {
+		if cached, ok := mainFlowWaits[wgName]; ok {
+			return cached
+		}
+		found := wga.hasMainFlowWait(wgName)
+		mainFlowWaits[wgName] = found
+		return found
+	}
+
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		goStmt, ok := n.(*ast.GoStmt)
 		if !ok || wga.commentFilter.ShouldSkipStatement(goStmt) {
@@ -495,12 +505,35 @@ func (wga *Analyzer) checkAddInsideGoroutine() {
 			if !wga.waitGroupNames[wgName] || wga.waitGroupIdentDefinedInside(fnLit.Body, sel.X) {
 				return true
 			}
+			if !hasMainFlowWait(wgName) {
+				return true
+			}
 			wga.errorCollector.AddError(call.Pos(), category.AddInsideGoroutine, "waitgroup '"+wgName+"' Add called inside goroutine, may race with Wait")
 			return true
 		})
 
 		return true
 	})
+}
+
+func (wga *Analyzer) hasMainFlowWait(wgName string) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !wga.isInMainFunctionFlow(call.Pos()) {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Wait" || common.GetVarName(sel.X) != wgName {
+			return true
+		}
+		found = true
+		return false
+	})
+	return found
 }
 
 func (wga *Analyzer) waitGroupIdentDefinedInside(body *ast.BlockStmt, expr ast.Expr) bool {
@@ -624,6 +657,9 @@ func (wga *Analyzer) reportNestedWaitsForWorker(goStmt *ast.GoStmt, body *ast.Bl
 			if outerWG == innerWG {
 				continue
 			}
+			if wga.workerReleasesWaitGroupBefore(body, outerWG, call.Pos()) {
+				continue
+			}
 			if wga.outerWaitBeforeInnerRelease(goStmt.Pos(), outerWG, innerWG) {
 				wga.errorCollector.AddError(call.Pos(), category.NestedWaitGroupDeadlock,
 					"waitgroup '"+innerWG+"' Wait inside worker for waitgroup '"+outerWG+"' can deadlock")
@@ -632,6 +668,54 @@ func (wga *Analyzer) reportNestedWaitsForWorker(goStmt *ast.GoStmt, body *ast.Bl
 		}
 		return true
 	})
+}
+
+func (wga *Analyzer) workerReleasesWaitGroupBefore(body *ast.BlockStmt, wgName string, before token.Pos) bool {
+	if body == nil {
+		return false
+	}
+	for _, stmt := range body.List {
+		if stmt == nil || stmt.Pos() >= before {
+			break
+		}
+		if wga.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		if wga.topLevelStatementReleasesWaitGroup(stmt, wgName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (wga *Analyzer) topLevelStatementReleasesWaitGroup(stmt ast.Stmt, wgName string) bool {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		call, ok := s.X.(*ast.CallExpr)
+		return ok && wga.callReleasesWaitGroup(call, wgName)
+	case *ast.LabeledStmt:
+		return wga.topLevelStatementReleasesWaitGroup(s.Stmt, wgName)
+	default:
+		return false
+	}
+}
+
+func (wga *Analyzer) callReleasesWaitGroup(call *ast.CallExpr, wgName string) bool {
+	if call == nil || wga.commentFilter.ShouldSkipCall(call) {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || common.GetVarName(sel.X) != wgName {
+		return false
+	}
+	if sel.Sel.Name == "Done" {
+		return true
+	}
+	if sel.Sel.Name != "Add" {
+		return false
+	}
+	delta, ok := wga.addDelta(call, wgName)
+	return ok && delta < 0
 }
 
 func (wga *Analyzer) outerWaitBeforeInnerRelease(goPos token.Pos, outerWG, innerWG string) bool {

@@ -74,16 +74,7 @@ func (ma *Analyzer) analyzeSelectStatement(stmt *ast.SelectStmt, stats map[strin
 
 // analyzeStatements is a helper to analyze a list of statements
 func (ma *Analyzer) analyzeStatements(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
-	blockStats := ma.copyStats(initial)
-
-	for _, stmt := range stmts {
-		if ma.commentFilter.ShouldSkipStatement(stmt) {
-			continue
-		}
-		ma.analyzeStatement(stmt, blockStats)
-	}
-
-	return blockStats
+	return ma.analyzeStatementList(stmts, initial)
 }
 
 // analyzeIfStatement handles if statements with proper branch analysis

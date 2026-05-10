@@ -66,6 +66,41 @@ func GoodNestedWaitGroupReleasedBeforeOuterWait() {
 	wg1.Wait()
 }
 
+func GoodNestedWorkerSignalsReadyBeforeWaitingOnRun() {
+	var ready, run, cleanup sync.WaitGroup
+	ready.Add(1)
+	run.Add(1)
+	cleanup.Add(1)
+
+	go func() {
+		ready.Done()
+		defer cleanup.Done()
+		run.Wait()
+	}()
+
+	ready.Wait()
+	run.Done()
+	cleanup.Wait()
+}
+
+func BadNestedWorkerConditionallySignalsReadyBeforeWaitingOnRun(release bool) {
+	var ready, run sync.WaitGroup
+	ready.Add(1)
+	run.Add(1)
+
+	go func() {
+		if release {
+			ready.Done()
+		} else {
+			defer ready.Done()
+		}
+		run.Wait() // want "waitgroup 'run' Wait inside worker for waitgroup 'ready' can deadlock"
+	}()
+
+	ready.Wait()
+	run.Done()
+}
+
 // ---------- Reuse Patterns ----------
 
 func GoodReuseWaitGroup() {
@@ -161,6 +196,45 @@ func EdgeCaseComplexButValid() {
 func BadWaitNoAddNoDone() {
 	var wg sync.WaitGroup
 	wg.Wait() // want "waitgroup 'wg' Wait called without any Add"
+}
+
+func GoodBorrowedFieldWaitGroupAliasWait(s *ServerSystemLike) {
+	wg := &s.sys.wg
+	wg.Wait()
+}
+
+func GoodFieldWaitGroupExternalLifecycleReuse(mirror *MirrorLike) {
+	mirror.wg.Wait()
+	mirror.wg.Add(1)
+	go func() {
+		defer mirror.wg.Done()
+	}()
+	mirror.wg.Wait()
+}
+
+func GoodFieldWaitGroupAddInsideGoroutineExternalLifecycle(mirror *MirrorLike) {
+	go func() {
+		mirror.wg.Add(1)
+		defer mirror.wg.Done()
+	}()
+}
+
+func GoodFieldWaitGroupAddWithoutLocalWaitExternalLifecycle(mirror *MirrorLike) {
+	mirror.wg.Add(1)
+}
+
+func GoodFieldWaitGroupAddInsideGoroutineWithoutLocalWaitExternalLifecycle(mirror *MirrorLike) {
+	go func() {
+		mirror.wg.Add(1)
+	}()
+}
+
+func BadFieldWaitGroupAddInsideGoroutineWithLocalWait(mirror *MirrorLike) {
+	go func() {
+		mirror.wg.Add(1) // want "waitgroup 'mirror.wg' Add called inside goroutine, may race with Wait"
+		defer mirror.wg.Done()
+	}()
+	mirror.wg.Wait()
 }
 
 // ---------- Switch/Select Edge Cases ----------
@@ -354,6 +428,16 @@ type EmbeddedWorkerPool struct {
 
 type HandlerLike struct {
 	startWG sync.WaitGroup
+}
+
+type ServerSystemLike struct {
+	sys struct {
+		wg sync.WaitGroup
+	}
+}
+
+type MirrorLike struct {
+	wg sync.WaitGroup
 }
 
 // Good: struct field waitgroup with proper Add and Done
