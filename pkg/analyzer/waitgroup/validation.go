@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 	"golang.org/x/tools/go/ast/astutil"
 )
 
@@ -209,7 +210,7 @@ func (wga *Analyzer) countGuaranteedDoneInStatements(stmts []ast.Stmt, wgName st
 			if !doneInfo.hasAnyDone {
 				relatedAdd := wga.findRelatedAddCall(s, wgName)
 				if relatedAdd != token.NoPos {
-					wga.errorCollector.AddError(relatedAdd,
+					wga.errorCollector.AddError(relatedAdd, category.AddWithoutDone,
 						"waitgroup '"+wgName+"' has Add without corresponding Done")
 				}
 			}
@@ -384,7 +385,7 @@ func (wga *Analyzer) reportUnmatchedAdds(wgName string, stats *Stats, totalExpec
 		if remainingDone >= addCall.value {
 			remainingDone -= addCall.value
 		} else {
-			wga.errorCollector.AddError(addCall.pos, "waitgroup '"+wgName+"' has Add without corresponding Done")
+			wga.errorCollector.AddError(addCall.pos, category.AddWithoutDone, "waitgroup '"+wgName+"' has Add without corresponding Done")
 		}
 	}
 }
@@ -415,7 +416,7 @@ func (wga *Analyzer) reportExcessDones(wgName string, stats *Stats, totalExpecte
 	startIndex := len(mainFlowDoneCalls) - excessCount
 
 	for i := startIndex; i < len(mainFlowDoneCalls) && i >= 0; i++ {
-		wga.errorCollector.AddError(mainFlowDoneCalls[i], "waitgroup '"+wgName+"' has Done without corresponding Add")
+		wga.errorCollector.AddError(mainFlowDoneCalls[i], category.DoneWithoutAdd, "waitgroup '"+wgName+"' has Done without corresponding Add")
 	}
 }
 
@@ -434,7 +435,7 @@ func (wga *Analyzer) checkWaitBeforeDoneSameGoroutine(stats map[string]*Stats) {
 				continue
 			}
 			if wga.pendingMainFlowAddsBeforeWait(st, waitPos) > 0 && wga.hasMainFlowReleaseAfterWait(st, waitPos) {
-				wga.errorCollector.AddError(waitPos, "waitgroup '"+wgName+"' waits with pending Add in the same goroutine")
+				wga.errorCollector.AddError(waitPos, category.WaitDeadlock, "waitgroup '"+wgName+"' waits with pending Add in the same goroutine")
 			}
 		}
 	}
@@ -545,9 +546,9 @@ func (wga *Analyzer) checkAddInGoroutine(goStmt *ast.GoStmt, wgName string) {
 
 					switch sel.Sel.Name {
 					case "Add":
-						wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Add called after Wait")
+						wga.errorCollector.AddError(call.Pos(), category.AddAfterWait, "waitgroup '"+wgName+"' Add called after Wait")
 					case "Go":
-						wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Go called after Wait")
+						wga.errorCollector.AddError(call.Pos(), category.GoAfterWait, "waitgroup '"+wgName+"' Go called after Wait")
 					}
 				}
 			}
@@ -599,12 +600,12 @@ func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
 					if add.value == 1 && wga.hasDeferredDoneAfter(wgName, add.pos) {
 						continue
 					}
-					wga.errorCollector.AddError(add.pos, "waitgroup '"+wgName+"' Add called after Wait")
+					wga.errorCollector.AddError(add.pos, category.AddAfterWait, "waitgroup '"+wgName+"' Add called after Wait")
 				}
 			}
 			for _, goPos := range st.goCalls {
 				if goPos > wait && !wga.isInGoroutine(goPos) {
-					wga.errorCollector.AddError(goPos, "waitgroup '"+wgName+"' Go called after Wait")
+					wga.errorCollector.AddError(goPos, category.GoAfterWait, "waitgroup '"+wgName+"' Go called after Wait")
 				}
 			}
 		}
@@ -723,7 +724,7 @@ func (wga *Analyzer) analyzeLoopBalance(forStmt *ast.ForStmt) {
 		if len(stats.addCalls) > 0 {
 			if stats.unconditionalDones == 0 && stats.conditionalDones > 0 {
 				for _, addPos := range stats.addCalls {
-					wga.errorCollector.AddError(addPos,
+					wga.errorCollector.AddError(addPos, category.AddWithoutDone,
 						"waitgroup '"+wgName+"' has Add without corresponding Done")
 				}
 			}
@@ -815,7 +816,7 @@ func (wga *Analyzer) checkLiteralAddLoopGoroutineMismatch(stats map[string]*Stat
 		if launched <= 1 || launched == positiveAdds[0].value {
 			continue
 		}
-		wga.errorCollector.AddError(positiveAdds[0].pos,
+		wga.errorCollector.AddError(positiveAdds[0].pos, category.AddLoopCountMismatch,
 			"waitgroup '"+wgName+"' Add count "+strconv.Itoa(positiveAdds[0].value)+" does not match "+strconv.Itoa(launched)+" goroutines launched")
 	}
 }
@@ -894,7 +895,7 @@ func (wga *Analyzer) checkWaitWithoutAdd(stats map[string]*Stats) {
 					wga.hasAddInLocalClosure(targetObj, waitPos)) {
 				continue
 			}
-			wga.errorCollector.AddError(waitPos, "waitgroup '"+wgName+"' Wait called without any Add")
+			wga.errorCollector.AddError(waitPos, category.WaitWithoutAdd, "waitgroup '"+wgName+"' Wait called without any Add")
 		}
 	}
 }
@@ -1123,7 +1124,7 @@ func (wga *Analyzer) checkUnreachableDone() {
 				if wga.hasUnreachableDone(fnLit.Body, wgName) {
 					addPos := wga.findRelatedAddCall(goStmt, wgName)
 					if addPos != token.NoPos {
-						wga.errorCollector.AddError(addPos,
+						wga.errorCollector.AddError(addPos, category.AddWithoutDone,
 							"waitgroup '"+wgName+"' has Add without corresponding Done")
 					}
 				}

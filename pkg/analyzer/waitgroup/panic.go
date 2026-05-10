@@ -5,6 +5,7 @@ import (
 	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 )
 
 func (wga *Analyzer) checkDoneNotDeferredInWorker() {
@@ -45,7 +46,7 @@ func (wga *Analyzer) checkDoneNotDeferredInBlock(stmts []ast.Stmt, wgName string
 		case *ast.ExprStmt:
 			if call, ok := s.X.(*ast.CallExpr); ok && wga.callInvokesDone(call, wgName) {
 				if risky {
-					wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Done should be deferred so it runs on panic or runtime.Goexit")
+					wga.errorCollector.AddError(call.Pos(), category.DoneNotDeferred, "waitgroup '"+wgName+"' Done should be deferred so it runs on panic or runtime.Goexit")
 				}
 				continue
 			}

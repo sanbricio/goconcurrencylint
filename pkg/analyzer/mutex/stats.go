@@ -5,6 +5,7 @@ import (
 	"go/token"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 )
 
 // analyzeBlock analyzes a block statement starting from the provided state and
@@ -95,16 +96,16 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 	switch sel.Sel.Name {
 	case "TryLock":
 		if ma.mutexNames[varName] {
-			ma.errorCollector.AddError(call.Pos(), "mutex '"+varName+"' TryLock return value not checked, lock may not be held")
+			ma.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "mutex '"+varName+"' TryLock return value not checked, lock may not be held")
 			return
 		}
 		if ma.rwMutexNames[varName] {
-			ma.errorCollector.AddError(call.Pos(), "rwmutex '"+varName+"' TryLock return value not checked, lock may not be held")
+			ma.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "rwmutex '"+varName+"' TryLock return value not checked, lock may not be held")
 			return
 		}
 	case "TryRLock":
 		if ma.rwMutexNames[varName] {
-			ma.errorCollector.AddError(call.Pos(), "rwmutex '"+varName+"' TryRLock return value not checked, lock may not be held")
+			ma.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "rwmutex '"+varName+"' TryRLock return value not checked, lock may not be held")
 			return
 		}
 	}
@@ -129,7 +130,7 @@ func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, s
 	switch methodName {
 	case "Lock":
 		if stats[varName].lock > 0 {
-			ma.errorCollector.AddError(pos, "mutex '"+varName+"' is re-locked before unlock")
+			ma.errorCollector.AddError(pos, category.DoubleLock, "mutex '"+varName+"' is re-locked before unlock")
 		}
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
@@ -169,7 +170,7 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 	switch methodName {
 	case "Lock":
 		if stats[varName].rlock > 0 {
-			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' attempts write Lock while read lock is held")
+			ma.errorCollector.AddError(pos, category.DoubleLock, "rwmutex '"+varName+"' attempts write Lock while read lock is held")
 		}
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
@@ -190,7 +191,7 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 		// Unlock called when only a read lock is held.
 		// Correct the state as if RUnlock was called to avoid cascading errors.
 		if stats[varName].rlock > 0 && stats[varName].lock == 0 {
-			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' Unlock called but only read lock is held, did you mean RUnlock?")
+			ma.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' Unlock called but only read lock is held, did you mean RUnlock?")
 			stats[varName].rlock--
 			ma.removeFirstRLockPos(stats[varName])
 			return
@@ -217,7 +218,7 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 		// RUnlock called when only a write lock is held.
 		// Correct the state as if Unlock was called to avoid cascading errors.
 		if stats[varName].lock > 0 && stats[varName].rlock == 0 {
-			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' RUnlock called but only write lock is held, did you mean Unlock?")
+			ma.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' RUnlock called but only write lock is held, did you mean Unlock?")
 			stats[varName].lock--
 			ma.removeFirstLockPos(stats[varName])
 			return
@@ -279,16 +280,16 @@ func (ma *Analyzer) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats
 	// defer Lock / defer RLock re-acquires the lock on
 	// function return instead of releasing it, guaranteed deadlock.
 	if ma.mutexNames[varName] && call.Sel.Name == "Lock" {
-		ma.errorCollector.AddError(pos, "mutex '"+varName+"' defer calls Lock instead of Unlock, will deadlock on return")
+		ma.errorCollector.AddError(pos, category.DeferLock, "mutex '"+varName+"' defer calls Lock instead of Unlock, will deadlock on return")
 		return
 	}
 	if ma.rwMutexNames[varName] {
 		switch call.Sel.Name {
 		case "Lock":
-			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' defer calls Lock instead of Unlock, will deadlock on return")
+			ma.errorCollector.AddError(pos, category.DeferLock, "rwmutex '"+varName+"' defer calls Lock instead of Unlock, will deadlock on return")
 			return
 		case "RLock":
-			ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' defer calls RLock instead of RUnlock, will deadlock on return")
+			ma.errorCollector.AddError(pos, category.DeferLock, "rwmutex '"+varName+"' defer calls RLock instead of RUnlock, will deadlock on return")
 			return
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 )
 
 func (ma *Analyzer) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[string]*Stats) {
@@ -41,14 +42,14 @@ func (ma *Analyzer) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[str
 			continue
 		}
 		if ma.mutexNames[name] && ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
-			ma.errorCollector.AddError(panicPos, "mutex '"+name+"' may remain locked if index expression panics before unlock")
+			ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "mutex '"+name+"' may remain locked if index expression panics before unlock")
 		}
 		if ma.rwMutexNames[name] {
 			if ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
-				ma.errorCollector.AddError(panicPos, "rwmutex '"+name+"' may remain locked if index expression panics before unlock")
+				ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain locked if index expression panics before unlock")
 			}
 			if ma.remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
-				ma.errorCollector.AddError(panicPos, "rwmutex '"+name+"' may remain rlocked if index expression panics before runlock")
+				ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain rlocked if index expression panics before runlock")
 			}
 		}
 	}

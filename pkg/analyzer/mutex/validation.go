@@ -7,6 +7,7 @@ import (
 	"maps"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 )
 
 // handleDeferUnlock processes defer unlock calls
@@ -16,7 +17,7 @@ func (ma *Analyzer) handleDeferUnlock(varName string, pos token.Pos, stats map[s
 		if isRWMutex {
 			mutexType = "rwmutex"
 		}
-		ma.errorCollector.AddError(pos, mutexType+" '"+varName+"' has defer unlock but no corresponding lock")
+		ma.errorCollector.AddError(pos, category.DeferUnlockWithoutLock, mutexType+" '"+varName+"' has defer unlock but no corresponding lock")
 		ma.deferErrors.badDeferUnlock[varName] = true
 	} else {
 		stats[varName].deferUnlock++
@@ -26,7 +27,7 @@ func (ma *Analyzer) handleDeferUnlock(varName string, pos token.Pos, stats map[s
 // handleDeferRUnlock processes defer runlock calls
 func (ma *Analyzer) handleDeferRUnlock(varName string, pos token.Pos, stats map[string]*Stats) {
 	if stats[varName].rlock == 0 {
-		ma.errorCollector.AddError(pos, "rwmutex '"+varName+"' has defer runlock but no corresponding rlock")
+		ma.errorCollector.AddError(pos, category.DeferUnlockWithoutLock, "rwmutex '"+varName+"' has defer runlock but no corresponding rlock")
 		ma.deferErrors.badDeferRUnlock[varName] = true
 	} else {
 		stats[varName].deferRUnlock++
@@ -226,7 +227,7 @@ func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats
 			if stats[varName] != nil && stats[varName].lock > 0 {
 				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
 					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"Unlock"}) {
-						ma.errorCollector.AddError(stmt.Pos(),
+						ma.errorCollector.AddError(stmt.Pos(), category.GoroutineLockDeadlock,
 							ma.goroutineLockDeadlockMessage(varName, false, false, method, true))
 						continue
 					}
@@ -238,7 +239,7 @@ func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats
 			if stats[varName] != nil && stats[varName].lock > 0 {
 				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock", "RLock"}); ok {
 					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"Unlock"}) {
-						ma.errorCollector.AddError(stmt.Pos(),
+						ma.errorCollector.AddError(stmt.Pos(), category.GoroutineLockDeadlock,
 							ma.goroutineLockDeadlockMessage(varName, true, false, method, true))
 						continue
 					}
@@ -248,7 +249,7 @@ func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats
 			if stats[varName] != nil && stats[varName].rlock > 0 {
 				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
 					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"RUnlock"}) {
-						ma.errorCollector.AddError(stmt.Pos(),
+						ma.errorCollector.AddError(stmt.Pos(), category.GoroutineLockDeadlock,
 							ma.goroutineLockDeadlockMessage(varName, true, true, method, true))
 						continue
 					}
@@ -413,11 +414,11 @@ func (ma *Analyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, lock
 					if ma.rwMutexNames[varName] {
 						mutexType = "rwmutex"
 					}
-					ma.errorCollector.AddError(s.Pos(), mutexType+" '"+varName+"' defers unlock inside loop")
+					ma.errorCollector.AddError(s.Pos(), category.DeferUnlockInLoop, mutexType+" '"+varName+"' defers unlock inside loop")
 				}
 			case "RUnlock":
 				if rlocked[varName] {
-					ma.errorCollector.AddError(s.Pos(), "rwmutex '"+varName+"' defers runlock inside loop")
+					ma.errorCollector.AddError(s.Pos(), category.DeferUnlockInLoop, "rwmutex '"+varName+"' defers runlock inside loop")
 				}
 			}
 
@@ -718,7 +719,7 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 	lockMessage := mutexType + " '" + mutexName + "' is locked but not unlocked in " + branchType
 	if delta := ma.remainingLockCount(final.lock, final.deferUnlock) - ma.remainingLockCount(initial.lock, initial.deferUnlock); delta > 0 {
 		for _, pos := range ma.trailingPositions(final.lockPos, delta) {
-			ma.errorCollector.AddError(pos, lockMessage)
+			ma.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
 		}
 	}
 
@@ -727,7 +728,7 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 	unlockMessage := mutexType + " '" + mutexName + "' is unlocked but not locked"
 	if delta := final.borrowedLock - initial.borrowedLock; delta > 0 && !suppressBorrowedUnlock {
 		for _, pos := range ma.trailingPositions(final.borrowedUnlockPos, delta) {
-			ma.errorCollector.AddError(pos, unlockMessage)
+			ma.errorCollector.AddError(pos, category.UnlockWithoutLock, unlockMessage)
 		}
 	}
 
@@ -735,7 +736,7 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 		rlockMessage := "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
 		if delta := ma.remainingLockCount(final.rlock, final.deferRUnlock) - ma.remainingLockCount(initial.rlock, initial.deferRUnlock); delta > 0 {
 			for _, pos := range ma.trailingPositions(final.rlockPos, delta) {
-				ma.errorCollector.AddError(pos, rlockMessage)
+				ma.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
 			}
 		}
 
@@ -744,7 +745,7 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 		runlockMessage := "rwmutex '" + mutexName + "' is runlocked but not rlocked"
 		if delta := final.borrowedRLock - initial.borrowedRLock; delta > 0 && !suppressBorrowedRUnlock {
 			for _, pos := range ma.trailingPositions(final.borrowedRUnlockPos, delta) {
-				ma.errorCollector.AddError(pos, runlockMessage)
+				ma.errorCollector.AddError(pos, category.UnlockWithoutLock, runlockMessage)
 			}
 		}
 	}
@@ -795,7 +796,7 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 		if suppressFunctionLevelLock {
 			continue
 		}
-		ma.errorCollector.AddError(pos, lockMessage)
+		ma.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
 	}
 
 	suppressFunctionLevelUnlock := branchType == "" &&
@@ -805,7 +806,7 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 		if suppressFunctionLevelUnlock {
 			continue
 		}
-		ma.errorCollector.AddError(pos, mutexType+" '"+mutexName+"' is unlocked but not locked")
+		ma.errorCollector.AddError(pos, category.UnlockWithoutLock, mutexType+" '"+mutexName+"' is unlocked but not locked")
 	}
 
 	if isRWMutex {
@@ -814,7 +815,7 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 			if suppressFunctionLevelRLock {
 				continue
 			}
-			ma.errorCollector.AddError(pos, rlockMessage)
+			ma.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
 		}
 		suppressFunctionLevelRUnlock := branchType == "" &&
 			(ma.functionIsLifecycleReleaseFor(mutexName, []string{"RLock", "TryRLock"}) ||
@@ -823,7 +824,7 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 			if suppressFunctionLevelRUnlock {
 				continue
 			}
-			ma.errorCollector.AddError(pos, "rwmutex '"+mutexName+"' is runlocked but not rlocked")
+			ma.errorCollector.AddError(pos, category.UnlockWithoutLock, "rwmutex '"+mutexName+"' is runlocked but not rlocked")
 		}
 	}
 }
@@ -863,14 +864,14 @@ func (ma *Analyzer) reportUnmatchedLocks(stats map[string]*Stats) {
 		}
 		if conflict.parentReadLock {
 			if ma.remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
-				ma.errorCollector.AddError(conflict.pos,
+				ma.errorCollector.AddError(conflict.pos, category.GoroutineLockDeadlock,
 					ma.goroutineLockDeadlockMessage(conflict.varName, true, true, conflict.requestMethod, false))
 			}
 			continue
 		}
 
 		if ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
-			ma.errorCollector.AddError(conflict.pos,
+			ma.errorCollector.AddError(conflict.pos, category.GoroutineLockDeadlock,
 				ma.goroutineLockDeadlockMessage(conflict.varName, conflict.isRWMutex, false, conflict.requestMethod, false))
 		}
 	}
@@ -919,10 +920,10 @@ func (ma *Analyzer) reportMutexInLoopValueSpec(vs *ast.ValueSpec) {
 		switch {
 		case common.IsMutex(typ):
 			ma.errorCollector.AddError(name.Pos(),
-				"mutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+				category.MutexInLoop, "mutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
 		case common.IsRWMutex(typ):
 			ma.errorCollector.AddError(name.Pos(),
-				"rwmutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+				category.MutexInLoop, "rwmutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
 		}
 	}
 }
@@ -943,10 +944,10 @@ func (ma *Analyzer) reportMutexInLoopAssign(s *ast.AssignStmt) {
 		switch {
 		case common.IsMutex(typ):
 			ma.errorCollector.AddError(ident.Pos(),
-				"mutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+				category.MutexInLoop, "mutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
 		case common.IsRWMutex(typ):
 			ma.errorCollector.AddError(ident.Pos(),
-				"rwmutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+				category.MutexInLoop, "rwmutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
 		}
 	}
 }

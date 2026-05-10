@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 )
 
 type lockOrderEdge struct {
@@ -172,7 +173,7 @@ func (ma *Analyzer) recordHeldLockOrderEdges(varName string, pos token.Pos, held
 		}
 		reported[reportKey] = true
 		first, second := orderedLockNames(heldName, varName)
-		ma.errorCollector.AddError(pos, "mutex lock order cycle between '"+first+"' and '"+second+"'")
+		ma.errorCollector.AddError(pos, category.LockOrderCycle, "mutex lock order cycle between '"+first+"' and '"+second+"'")
 	}
 }
 
@@ -307,7 +308,7 @@ func (ma *Analyzer) scanCrossGoroutineReleaseCall(call *ast.CallExpr, parentStat
 			}
 			if ma.parentHoldsExclusiveLock(parentStats, varName) {
 				releases.unlocks[varName] = append(releases.unlocks[varName], call.Pos())
-				ma.errorCollector.AddError(call.Pos(), "mutex '"+varName+"' is unlocked in a different goroutine than it was locked")
+				ma.errorCollector.AddError(call.Pos(), category.CrossGoroutineUnlock, "mutex '"+varName+"' is unlocked in a different goroutine than it was locked")
 			}
 		}
 	case "RLock", "TryRLock":
@@ -322,7 +323,7 @@ func (ma *Analyzer) scanCrossGoroutineReleaseCall(call *ast.CallExpr, parentStat
 			}
 			if ma.parentHoldsReadLock(parentStats, varName) {
 				releases.runlocks[varName] = append(releases.runlocks[varName], call.Pos())
-				ma.errorCollector.AddError(call.Pos(), "rwmutex '"+varName+"' is runlocked in a different goroutine than it was rlocked")
+				ma.errorCollector.AddError(call.Pos(), category.CrossGoroutineUnlock, "rwmutex '"+varName+"' is runlocked in a different goroutine than it was rlocked")
 			}
 		}
 	}

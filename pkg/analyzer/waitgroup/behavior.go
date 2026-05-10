@@ -5,6 +5,7 @@ import (
 	"go/token"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 )
 
 type waitDonePositions struct {
@@ -29,7 +30,7 @@ func (wga *Analyzer) checkWaitAndDoneInSameGoroutine() {
 			positions := wga.collectWaitDonePositions(fnLit.Body, wgName)
 			for _, waitPos := range positions.waits {
 				if wga.waitDependsOnDoneInSameGoroutine(waitPos, positions) {
-					wga.errorCollector.AddError(waitPos, "waitgroup '"+wgName+"' Wait will deadlock: same goroutine has pending Done")
+					wga.errorCollector.AddError(waitPos, category.WaitDeadlock, "waitgroup '"+wgName+"' Wait will deadlock: same goroutine has pending Done")
 				}
 			}
 		}
@@ -246,7 +247,7 @@ func (wga *Analyzer) checkDoneOutsideWorkerForWaitGroup(wgName string) {
 			if wga.callInvokesDone(call, wgName) {
 				recentPositiveAdd = false
 				if workerGoroutinesWithoutDone > 0 {
-					wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Done called outside worker goroutine")
+					wga.errorCollector.AddError(call.Pos(), category.DoneOutsideGoroutine, "waitgroup '"+wgName+"' Done called outside worker goroutine")
 					workerGoroutinesWithoutDone--
 				}
 				if pendingAdds > 0 {
@@ -257,7 +258,7 @@ func (wga *Analyzer) checkDoneOutsideWorkerForWaitGroup(wgName string) {
 			recentPositiveAdd = false
 			if wga.deferInvokesDone(s, wgName) {
 				if workerGoroutinesWithoutDone > 0 {
-					wga.errorCollector.AddError(s.Call.Pos(), "waitgroup '"+wgName+"' Done called outside worker goroutine")
+					wga.errorCollector.AddError(s.Call.Pos(), category.DoneOutsideGoroutine, "waitgroup '"+wgName+"' Done called outside worker goroutine")
 					workerGoroutinesWithoutDone--
 				}
 				if pendingAdds > 0 {
@@ -375,7 +376,7 @@ func (wga *Analyzer) checkWaitGroupGoPanic() {
 			return true
 		}
 		if wga.functionLiteralMayPanic(fnLit) {
-			wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Go function may panic")
+			wga.errorCollector.AddError(call.Pos(), category.GoPanic, "waitgroup '"+wgName+"' Go function may panic")
 		}
 		return true
 	})
@@ -494,7 +495,7 @@ func (wga *Analyzer) checkAddInsideGoroutine() {
 			if !wga.waitGroupNames[wgName] || wga.waitGroupIdentDefinedInside(fnLit.Body, sel.X) {
 				return true
 			}
-			wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Add called inside goroutine, may race with Wait")
+			wga.errorCollector.AddError(call.Pos(), category.AddInsideGoroutine, "waitgroup '"+wgName+"' Add called inside goroutine, may race with Wait")
 			return true
 		})
 
@@ -542,14 +543,14 @@ func (wga *Analyzer) checkMultipleDoneInBranch(stmts []ast.Stmt, wgName string, 
 			if wga.deferInvokesDone(s, wgName) {
 				current++
 				if current > 1 {
-					wga.errorCollector.AddError(s.Call.Pos(), "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
+					wga.errorCollector.AddError(s.Call.Pos(), category.MultipleDoneWorker, "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
 				}
 			}
 		case *ast.ExprStmt:
 			if call, ok := s.X.(*ast.CallExpr); ok && wga.callInvokesDone(call, wgName) {
 				current++
 				if current > 1 {
-					wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
+					wga.errorCollector.AddError(call.Pos(), category.MultipleDoneWorker, "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
 				}
 			}
 		case *ast.IfStmt:
@@ -624,7 +625,7 @@ func (wga *Analyzer) reportNestedWaitsForWorker(goStmt *ast.GoStmt, body *ast.Bl
 				continue
 			}
 			if wga.outerWaitBeforeInnerRelease(goStmt.Pos(), outerWG, innerWG) {
-				wga.errorCollector.AddError(call.Pos(),
+				wga.errorCollector.AddError(call.Pos(), category.NestedWaitGroupDeadlock,
 					"waitgroup '"+innerWG+"' Wait inside worker for waitgroup '"+outerWG+"' can deadlock")
 				return false
 			}

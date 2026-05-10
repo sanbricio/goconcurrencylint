@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
 	"golang.org/x/tools/go/analysis"
@@ -122,10 +123,10 @@ func (wga *Analyzer) handleAddCall(call *ast.CallExpr, wgName string, stats map[
 			// wg.Add(workers) the same way they see wg.Add(4).
 			addValue = constantValue
 			if addValue < 0 {
-				wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' has negative Add("+strconv.Itoa(addValue)+")")
+				wga.errorCollector.AddError(call.Pos(), category.AddNegative, "waitgroup '"+wgName+"' has negative Add("+strconv.Itoa(addValue)+")")
 			}
 			if addValue == 0 {
-				wga.errorCollector.AddError(call.Pos(), "waitgroup '"+wgName+"' Add(0) is a no-op")
+				wga.errorCollector.AddError(call.Pos(), category.AddZero, "waitgroup '"+wgName+"' Add(0) is a no-op")
 			}
 		}
 	}

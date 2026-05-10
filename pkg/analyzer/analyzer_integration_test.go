@@ -13,6 +13,7 @@ func TestAnalyzerFixtures(t *testing.T) {
 		{name: "mutex", packages: []string{"mutex"}},
 		{name: "waitgroup", packages: []string{"waitgroup"}},
 		{name: "packagelevel", packages: []string{"packagelevel"}},
+		{name: "ignoredirective", packages: []string{"ignoredirective"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			analysistest.Run(t, analysistest.TestData(), Analyzer, tc.packages...)

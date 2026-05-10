@@ -654,22 +654,30 @@ func main() {
 	require.NoError(t, err)
 
 	cf := NewCommentFilter(fset, file)
-	var skipped, reported int
+	// ShouldSkipCall ignores directives on purpose: they only filter at
+	// report time so the analyzer can keep tracking state.
 	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		if call, ok := n.(*ast.CallExpr); ok {
+			assert.False(t, cf.ShouldSkipCall(call), "ShouldSkipCall must not honor ignore directives")
 		}
-		if cf.ShouldSkipCall(call) {
-			skipped++
-			return true
-		}
-		reported++
 		return true
 	})
 
-	assert.Equal(t, 1, skipped)
-	assert.Equal(t, 1, reported)
+	var directiveLine int
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			pos := fset.Position(call.Pos())
+			if cf.HasIgnoreDirective(call.Pos()) {
+				directiveLine = pos.Line
+			}
+		}
+		return true
+	})
+	assert.NotZero(t, directiveLine, "expected to locate the directive line")
+	assert.True(t, cf.IsCategoryIgnored(directiveLine, "wait-without-add"))
+	assert.False(t, cf.IsCategoryIgnored(directiveLine, "lock-without-unlock"))
+	// Other lines unaffected.
+	assert.False(t, cf.IsCategoryIgnored(directiveLine+1, "wait-without-add"))
 }
 
 func TestCommentFilter_IgnoreDirectiveRequiresBoundary(t *testing.T) {
@@ -688,20 +696,70 @@ func main() {
 	require.NoError(t, err)
 
 	cf := NewCommentFilter(fset, file)
-	var skipped, reported int
+	directiveLines := map[int]bool{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		if cf.ShouldSkipCall(call) {
-			skipped++
-			return true
+		if cf.HasIgnoreDirective(call.Pos()) {
+			directiveLines[fset.Position(call.Pos()).Line] = true
 		}
-		reported++
 		return true
 	})
 
-	assert.Equal(t, 1, skipped)
-	assert.Equal(t, 3, reported)
+	assert.Len(t, directiveLines, 1, "only the bare ignore directive should match; near-misses must not trigger")
+}
+
+func TestCommentFilter_IgnoreDirectiveBareSilencesEverything(t *testing.T) {
+	src := `package main
+
+func main() {
+	mu.Lock() // goconcurrencylint:ignore  any human note here
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
+	require.NoError(t, err)
+
+	cf := NewCommentFilter(fset, file)
+
+	var line int
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			line = fset.Position(call.Pos()).Line
+		}
+		return true
+	})
+	require.NotZero(t, line)
+
+	assert.True(t, cf.IsCategoryIgnored(line, "lock-without-unlock"))
+	assert.True(t, cf.IsCategoryIgnored(line, "anything"))
+}
+
+func TestCommentFilter_IgnoreDirectiveMultipleCategories(t *testing.T) {
+	src := `package main
+
+func main() {
+	mu.Lock() // goconcurrencylint:ignore lock-without-unlock, defer-lock
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
+	require.NoError(t, err)
+
+	cf := NewCommentFilter(fset, file)
+
+	var line int
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			line = fset.Position(call.Pos()).Line
+		}
+		return true
+	})
+	require.NotZero(t, line)
+
+	assert.True(t, cf.IsCategoryIgnored(line, "lock-without-unlock"))
+	assert.True(t, cf.IsCategoryIgnored(line, "defer-lock"))
+	assert.False(t, cf.IsCategoryIgnored(line, "wait-without-add"))
 }
