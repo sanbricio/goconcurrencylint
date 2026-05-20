@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"sort"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -48,22 +49,22 @@ func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bo
 				ma.scanLockOrderStatements(fnLit.Body.List, make(map[string]bool), edges, reported)
 			}
 		case *ast.IfStmt:
-			thenHeld := cloneBoolMap(held)
+			thenHeld := maps.Clone(held)
 			if varName, ok := ma.tryLockCallVar(s.Cond); ok {
 				ma.recordHeldLockOrderEdges(varName, s.Cond.Pos(), thenHeld, edges, reported)
 				thenHeld[varName] = true
 			}
 			ma.scanLockOrderStatements(s.Body.List, thenHeld, edges, reported)
 			if s.Else != nil {
-				ma.scanLockOrderElse(s.Else, cloneBoolMap(held), edges, reported)
+				ma.scanLockOrderElse(s.Else, maps.Clone(held), edges, reported)
 			}
 		case *ast.ForStmt:
 			if s.Body != nil {
-				ma.scanLockOrderStatements(s.Body.List, cloneBoolMap(held), edges, reported)
+				ma.scanLockOrderStatements(s.Body.List, maps.Clone(held), edges, reported)
 			}
 		case *ast.RangeStmt:
 			if s.Body != nil {
-				ma.scanLockOrderStatements(s.Body.List, cloneBoolMap(held), edges, reported)
+				ma.scanLockOrderStatements(s.Body.List, maps.Clone(held), edges, reported)
 			}
 		case *ast.BlockStmt:
 			ma.scanLockOrderStatements(s.List, held, edges, reported)
@@ -72,19 +73,19 @@ func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bo
 		case *ast.SwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.scanLockOrderStatements(cc.Body, cloneBoolMap(held), edges, reported)
+					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported)
 				}
 			}
 		case *ast.TypeSwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.scanLockOrderStatements(cc.Body, cloneBoolMap(held), edges, reported)
+					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported)
 				}
 			}
 		case *ast.SelectStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CommClause); ok {
-					ma.scanLockOrderStatements(cc.Body, cloneBoolMap(held), edges, reported)
+					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported)
 				}
 			}
 		}
@@ -116,7 +117,7 @@ func (ma *Analyzer) scanLockOrderDefer(stmt *ast.DeferStmt, held map[string]bool
 		return
 	}
 	if call, ok := stmt.Call.Fun.(*ast.FuncLit); ok && call.Body != nil {
-		ma.scanLockOrderStatements(call.Body.List, cloneBoolMap(held), edges, reported)
+		ma.scanLockOrderStatements(call.Body.List, maps.Clone(held), edges, reported)
 	}
 }
 
@@ -237,17 +238,17 @@ func (ma *Analyzer) scanCrossGoroutineReleaseStatements(stmts []ast.Stmt, parent
 		case *ast.DeferStmt:
 			ma.scanCrossGoroutineReleaseCall(s.Call, parentStats, localLocks, localRLocks, releases)
 		case *ast.IfStmt:
-			ma.scanCrossGoroutineReleaseStatements(s.Body.List, parentStats, cloneIntMap(localLocks), cloneIntMap(localRLocks), releases)
+			ma.scanCrossGoroutineReleaseStatements(s.Body.List, parentStats, maps.Clone(localLocks), maps.Clone(localRLocks), releases)
 			if s.Else != nil {
-				ma.scanCrossGoroutineReleaseElse(s.Else, parentStats, cloneIntMap(localLocks), cloneIntMap(localRLocks), releases)
+				ma.scanCrossGoroutineReleaseElse(s.Else, parentStats, maps.Clone(localLocks), maps.Clone(localRLocks), releases)
 			}
 		case *ast.ForStmt:
 			if s.Body != nil {
-				ma.scanCrossGoroutineReleaseStatements(s.Body.List, parentStats, cloneIntMap(localLocks), cloneIntMap(localRLocks), releases)
+				ma.scanCrossGoroutineReleaseStatements(s.Body.List, parentStats, maps.Clone(localLocks), maps.Clone(localRLocks), releases)
 			}
 		case *ast.RangeStmt:
 			if s.Body != nil {
-				ma.scanCrossGoroutineReleaseStatements(s.Body.List, parentStats, cloneIntMap(localLocks), cloneIntMap(localRLocks), releases)
+				ma.scanCrossGoroutineReleaseStatements(s.Body.List, parentStats, maps.Clone(localLocks), maps.Clone(localRLocks), releases)
 			}
 		case *ast.BlockStmt:
 			ma.scanCrossGoroutineReleaseStatements(s.List, parentStats, localLocks, localRLocks, releases)
@@ -256,19 +257,19 @@ func (ma *Analyzer) scanCrossGoroutineReleaseStatements(stmts []ast.Stmt, parent
 		case *ast.SwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.scanCrossGoroutineReleaseStatements(cc.Body, parentStats, cloneIntMap(localLocks), cloneIntMap(localRLocks), releases)
+					ma.scanCrossGoroutineReleaseStatements(cc.Body, parentStats, maps.Clone(localLocks), maps.Clone(localRLocks), releases)
 				}
 			}
 		case *ast.TypeSwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.scanCrossGoroutineReleaseStatements(cc.Body, parentStats, cloneIntMap(localLocks), cloneIntMap(localRLocks), releases)
+					ma.scanCrossGoroutineReleaseStatements(cc.Body, parentStats, maps.Clone(localLocks), maps.Clone(localRLocks), releases)
 				}
 			}
 		case *ast.SelectStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CommClause); ok {
-					ma.scanCrossGoroutineReleaseStatements(cc.Body, parentStats, cloneIntMap(localLocks), cloneIntMap(localRLocks), releases)
+					ma.scanCrossGoroutineReleaseStatements(cc.Body, parentStats, maps.Clone(localLocks), maps.Clone(localRLocks), releases)
 				}
 			}
 		}
@@ -408,14 +409,6 @@ func removePos(positions *[]token.Pos, pos token.Pos) bool {
 		return true
 	}
 	return false
-}
-
-func cloneIntMap(src map[string]int) map[string]int {
-	dst := make(map[string]int, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
 }
 
 // goroutineBodyLockCallMethod returns the first direct lock method call found

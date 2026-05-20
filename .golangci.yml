@@ -6,6 +6,7 @@ linters:
     - staticcheck
     - errcheck
     - ineffassign
+    - modernize
     - unused
   settings:
     govet:

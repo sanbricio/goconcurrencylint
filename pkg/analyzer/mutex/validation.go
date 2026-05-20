@@ -414,34 +414,34 @@ func (ma *Analyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, lock
 			}
 
 		case *ast.BlockStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+			ma.reportDeferredUnlocksInLoopStatements(s.List, maps.Clone(locked), maps.Clone(rlocked))
 		case *ast.LabeledStmt:
-			ma.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s.Stmt}, cloneBoolMap(locked), cloneBoolMap(rlocked))
+			ma.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s.Stmt}, maps.Clone(locked), maps.Clone(rlocked))
 		case *ast.IfStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
 			if s.Else != nil {
-				ma.reportDeferredUnlocksInLoopElse(s.Else, cloneBoolMap(locked), cloneBoolMap(rlocked))
+				ma.reportDeferredUnlocksInLoopElse(s.Else, maps.Clone(locked), maps.Clone(rlocked))
 			}
 		case *ast.ForStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
 		case *ast.RangeStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, cloneBoolMap(locked), cloneBoolMap(rlocked))
+			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
 		case *ast.SwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.reportDeferredUnlocksInLoopStatements(cc.Body, cloneBoolMap(locked), cloneBoolMap(rlocked))
+					ma.reportDeferredUnlocksInLoopStatements(cc.Body, maps.Clone(locked), maps.Clone(rlocked))
 				}
 			}
 		case *ast.TypeSwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.reportDeferredUnlocksInLoopStatements(cc.Body, cloneBoolMap(locked), cloneBoolMap(rlocked))
+					ma.reportDeferredUnlocksInLoopStatements(cc.Body, maps.Clone(locked), maps.Clone(rlocked))
 				}
 			}
 		case *ast.SelectStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CommClause); ok {
-					ma.reportDeferredUnlocksInLoopStatements(cc.Body, cloneBoolMap(locked), cloneBoolMap(rlocked))
+					ma.reportDeferredUnlocksInLoopStatements(cc.Body, maps.Clone(locked), maps.Clone(rlocked))
 				}
 			}
 		}
@@ -455,10 +455,6 @@ func (ma *Analyzer) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, locked, rlock
 	case *ast.IfStmt:
 		ma.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s}, locked, rlocked)
 	}
-}
-
-func cloneBoolMap(src map[string]bool) map[string]bool {
-	return maps.Clone(src)
 }
 
 func (ma *Analyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[string]*Stats) {
