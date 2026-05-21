@@ -52,4 +52,5 @@ Thumbs.db
 .env
 .env.*
 
-scripts/
+scripts/integration_test.sh
+scripts/reports

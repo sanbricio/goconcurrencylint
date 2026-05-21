@@ -1,0 +1,135 @@
+name: Integration (real-world repos)
+
+# Runs goconcurrencylint against a curated set of open-source Go projects to
+# surface false positives and analyzer crashes against real code.
+#
+# This workflow is manual-only (workflow_dispatch). It never runs on push or
+# pull requests, and individual lint failures do not fail the job — findings
+# are reported as artifacts and in the run summary for investigation.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.target.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: nats-server
+            repo: nats-io/nats-server
+            scan-path: ./...
+            timeout: 5
+          - name: consul
+            repo: hashicorp/consul
+            scan-path: ./...
+            timeout: 6
+          - name: etcd
+            repo: etcd-io/etcd
+            scan-path: ./...
+            timeout: 8
+          - name: jaeger
+            repo: jaegertracing/jaeger
+            scan-path: ./...
+            timeout: 5
+          - name: prometheus
+            repo: prometheus/prometheus
+            scan-path: ./...
+            timeout: 8
+          - name: temporal
+            repo: temporalio/temporal
+            scan-path: ./...
+            timeout: 8
+
+    steps:
+      - name: Checkout linter
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Build linter binary
+        id: build
+        run: |
+          linter_sha=$(git rev-parse --short HEAD)
+          linter_ref=$(git rev-parse --abbrev-ref HEAD)
+          go build -o "${RUNNER_TEMP}/goconcurrencylint" ./cmd/goconcurrencylint
+          echo "sha=${linter_sha}" >> "${GITHUB_OUTPUT}"
+          echo "ref=${linter_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout target repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ matrix.target.repo }}
+          path: target
+          fetch-depth: 1
+
+      - name: Resolve target dependencies
+        id: deps
+        working-directory: target
+        run: |
+          target_sha=$(git rev-parse HEAD)
+          target_short=$(git rev-parse --short HEAD)
+          start=$(date +%s)
+          go mod download
+          end=$(date +%s)
+          echo "sha=${target_sha}"           >> "${GITHUB_OUTPUT}"
+          echo "short=${target_short}"       >> "${GITHUB_OUTPUT}"
+          echo "duration_s=$((end - start))" >> "${GITHUB_OUTPUT}"
+
+      # `go vet -vettool` is the supported invocation for a third-party
+      # analyzer. Diagnostics and tooling errors both land on stderr; the
+      # report script separates them later by matching the canonical
+      # `file.go:line:col: message` form.
+      - name: Run linter
+        id: lint
+        continue-on-error: true
+        working-directory: target
+        timeout-minutes: ${{ matrix.target.timeout }}
+        run: |
+          set +e
+          start=$(date +%s)
+          go vet -vettool="${RUNNER_TEMP}/goconcurrencylint" ${{ matrix.target.scan-path }} \
+            >"${RUNNER_TEMP}/stdout.txt" 2>"${RUNNER_TEMP}/stderr.txt"
+          exit_code=$?
+          end=$(date +%s)
+          echo "exit_code=${exit_code}"      >> "${GITHUB_OUTPUT}"
+          echo "duration_s=$((end - start))" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Build report
+        if: always()
+        id: report
+        env:
+          TARGET_NAME: ${{ matrix.target.name }}
+          TARGET_REPO: ${{ matrix.target.repo }}
+          SCAN_PATH: ${{ matrix.target.scan-path }}
+          TARGET_SHA: ${{ steps.deps.outputs.sha }}
+          TARGET_SHORT_SHA: ${{ steps.deps.outputs.short }}
+          LINTER_REF: ${{ steps.build.outputs.ref }}
+          LINTER_SHA: ${{ steps.build.outputs.sha }}
+          EXIT_CODE: ${{ steps.lint.outputs.exit_code }}
+          DEPS_DURATION_S: ${{ steps.deps.outputs.duration_s }}
+          LINT_DURATION_S: ${{ steps.lint.outputs.duration_s }}
+          MATRIX_TIMEOUT_MIN: ${{ matrix.target.timeout }}
+          STDERR_FILE: ${{ runner.temp }}/stderr.txt
+          REPORT_DIR: ${{ runner.temp }}
+        run: ./scripts/ci/integration_report.sh
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.report.outputs.artifact_name }}
+          path: ${{ steps.report.outputs.report_path }}
+          if-no-files-found: warn
+          retention-days: 30
