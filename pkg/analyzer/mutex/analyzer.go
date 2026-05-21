@@ -1137,15 +1137,16 @@ func (ma *Analyzer) initializeStats() {
 	}
 }
 
-// cloneStatsMap creates a deep copy of the stats map
+// cloneStatsMap returns a new map containing deep copies of every Stats in original.
 func (ma *Analyzer) cloneStatsMap(original map[string]*Stats) map[string]*Stats {
 	copy := make(map[string]*Stats)
 	ma.copyStatsMap(copy, original)
 	return copy
 }
 
-// copyStatsMap overwrites the current stats with the analyzed result of a
-// sequential block.
+// copyStatsMap copies every entry from src into dst, performing a deep copy
+// of each Stats value via copyStats. Keys present in dst but not in src are
+// left untouched (merge semantics, not full replacement).
 func (ma *Analyzer) copyStatsMap(dst, src map[string]*Stats) {
 	for name, srcStats := range src {
 		if _, exists := dst[name]; !exists {
@@ -1169,8 +1170,9 @@ func cloneStats(stats *Stats) *Stats {
 	return clone
 }
 
-// copyStats copies all fields from the src Stats object into dst.
-// to prevent memory sharing between instances. It safely returns early if src or dst is nil.
+// copyStats copies all fields from src into dst, cloning slice fields so
+// the two instances do not share backing arrays. It is a no-op if either
+// src or dst is nil.
 func copyStats(dst, src *Stats) {
 	if src == nil || dst == nil {
 		return
