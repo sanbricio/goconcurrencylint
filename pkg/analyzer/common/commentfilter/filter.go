@@ -4,6 +4,7 @@ package commentfilter
 import (
 	"go/ast"
 	"go/token"
+	"sort"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
@@ -24,6 +25,17 @@ type CommentFilter struct {
 	fileName     string
 	comments     []*ast.CommentGroup
 	ignoreByLine map[int]*ignoreEntry
+
+	// Sorted [start, end) ranges of every comment, plus the file's
+	// inclusive Pos bounds, used by IsInComment for O(log N) lookup.
+	commentRanges []commentRange
+	fileBase      token.Pos
+	fileEnd       token.Pos
+}
+
+type commentRange struct {
+	start token.Pos
+	end   token.Pos
 }
 
 // ignoreEntry records the categories silenced for a given line. all=true
@@ -51,8 +63,32 @@ func NewCommentFilter(fset *token.FileSet, file *ast.File) *CommentFilter {
 		comments:     comments,
 		ignoreByLine: make(map[int]*ignoreEntry),
 	}
+	cf.indexCommentRanges(file)
 	cf.indexIgnoreDirectives()
 	return cf
+}
+
+func (cf *CommentFilter) indexCommentRanges(file *ast.File) {
+	if cf.fileSet != nil && file != nil && file.Pos().IsValid() {
+		if tf := cf.fileSet.File(file.Pos()); tf != nil {
+			cf.fileBase = token.Pos(tf.Base())
+			cf.fileEnd = token.Pos(tf.Base() + tf.Size())
+		}
+	}
+	if len(cf.comments) == 0 {
+		return
+	}
+	cf.commentRanges = make([]commentRange, 0, len(cf.comments))
+	for _, group := range cf.comments {
+		for _, c := range group.List {
+			cf.commentRanges = append(cf.commentRanges, commentRange{c.Pos(), c.End()})
+		}
+	}
+	// go/parser emits comments in source order; sort defensively in case a
+	// caller hands us a manually-built CommentGroup list.
+	sort.Slice(cf.commentRanges, func(i, j int) bool {
+		return cf.commentRanges[i].start < cf.commentRanges[j].start
+	})
 }
 
 // FileName returns the source filename this filter was built from.
@@ -60,23 +96,19 @@ func (cf *CommentFilter) FileName() string {
 	return cf.fileName
 }
 
-// IsInComment checks if a position is within a comment.
+// IsInComment reports whether pos falls inside any comment of this
+// filter's file. Positions from other files are rejected in O(1).
 func (cf *CommentFilter) IsInComment(pos token.Pos) bool {
-	if pos == token.NoPos {
+	if pos == token.NoPos || len(cf.commentRanges) == 0 {
 		return false
 	}
-
-	position := cf.fileSet.Position(pos)
-
-	for _, group := range cf.comments {
-		for _, comment := range group.List {
-			if cf.positionInComment(position, comment) {
-				return true
-			}
-		}
+	if cf.fileEnd > cf.fileBase && (pos < cf.fileBase || pos > cf.fileEnd) {
+		return false
 	}
-
-	return false
+	i := sort.Search(len(cf.commentRanges), func(i int) bool {
+		return cf.commentRanges[i].end > pos
+	})
+	return i < len(cf.commentRanges) && cf.commentRanges[i].start <= pos
 }
 
 // ShouldSkipCall reports whether a call expression sits inside a real
@@ -225,53 +257,4 @@ func parseCategories(tail string) []string {
 		out = append(out, f)
 	}
 	return out
-}
-
-// positionInComment checks if a position is within a specific comment
-func (cf *CommentFilter) positionInComment(pos token.Position, comment *ast.Comment) bool {
-	commentStart := cf.fileSet.Position(comment.Pos())
-	commentEnd := cf.fileSet.Position(comment.End())
-
-	if pos.Filename != commentStart.Filename {
-		return false
-	}
-
-	if strings.HasPrefix(comment.Text, "/*") {
-		return cf.isInBlockComment(pos, commentStart, commentEnd)
-	}
-
-	if strings.HasPrefix(comment.Text, "//") {
-		return cf.isInLineComment(pos, commentStart)
-	}
-
-	return false
-}
-
-func (cf *CommentFilter) isInBlockComment(pos, start, end token.Position) bool {
-	if start.Line == end.Line {
-		return pos.Line == start.Line &&
-			pos.Column >= start.Column &&
-			pos.Column <= end.Column
-	}
-
-	if pos.Line > start.Line && pos.Line < end.Line {
-		return true
-	}
-
-	if pos.Line == start.Line {
-		return pos.Column >= start.Column
-	}
-
-	if pos.Line == end.Line {
-		return pos.Column <= end.Column
-	}
-
-	return false
-}
-
-func (cf *CommentFilter) isInLineComment(pos, commentStart token.Position) bool {
-	if pos.Line != commentStart.Line {
-		return false
-	}
-	return pos.Column >= commentStart.Column
 }
