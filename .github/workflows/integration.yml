@@ -28,31 +28,42 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `timeout` is the per-target lint budget enforced by coreutils
+        # `timeout` inside the step. `step_timeout` is the GitHub-level
+        # safety net (set to `timeout + 2`) in case the bash `timeout`
+        # itself wedges — GitHub Actions expressions don't support
+        # arithmetic, so it has to be precomputed here.
         target:
           - name: nats-server
             repo: nats-io/nats-server
             scan-path: ./...
             timeout: 5
+            step_timeout: 7
           - name: consul
             repo: hashicorp/consul
             scan-path: ./...
             timeout: 6
+            step_timeout: 8
           - name: etcd
             repo: etcd-io/etcd
             scan-path: ./...
             timeout: 8
+            step_timeout: 10
           - name: jaeger
             repo: jaegertracing/jaeger
             scan-path: ./...
             timeout: 5
+            step_timeout: 7
           - name: prometheus
             repo: prometheus/prometheus
             scan-path: ./...
             timeout: 8
+            step_timeout: 10
           - name: temporal
             repo: temporalio/temporal
             scan-path: ./...
             timeout: 8
+            step_timeout: 10
 
     steps:
       - name: Checkout linter
@@ -113,7 +124,7 @@ jobs:
         id: lint
         continue-on-error: true
         working-directory: target
-        timeout-minutes: ${{ matrix.target.timeout + 2 }}
+        timeout-minutes: ${{ matrix.target.step_timeout }}
         env:
           LINT_TIMEOUT_MIN: ${{ matrix.target.timeout }}
         run: |
