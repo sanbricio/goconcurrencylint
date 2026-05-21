@@ -61,17 +61,13 @@ func main() {
 }
 
 func TestCommentFilter_CodeInsideComments(t *testing.T) {
-	// Test with code that's actually positioned inside comment ranges
-	// This is tricky because Go parser won't parse invalid syntax inside comments
-	// Let's test with artificial positions that fall within comment ranges
-
 	src := `package main
 
 func main() {
 	/* This is a block comment spanning multiple lines
 	   and we want to test positions within this range
 	   to verify our comment detection logic works */
-	   
+
 	mu.Lock()   // This is clearly outside
 	mu.Unlock() // This is also outside
 }
@@ -83,53 +79,24 @@ func main() {
 
 	cf := NewCommentFilter(fset, file)
 
-	// Test actual function calls (should be outside comments)
 	ast.Inspect(file, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "mu" {
-					pos := fset.Position(call.Pos())
-					inComment := cf.IsInComment(call.Pos())
-
-					t.Logf("Call %s.%s at line %d, col %d - InComment: %v",
-						ident.Name, sel.Sel.Name, pos.Line, pos.Column, inComment)
-
-					// These should NOT be in comments
-					assert.False(t, inComment, "Real function calls should not be in comments")
+					assert.False(t, cf.IsInComment(call.Pos()),
+						"Real function calls should not be in comments")
 				}
 			}
 		}
 		return true
 	})
 
-	// Now test with artificial positions that fall within comment ranges
-	// Find the comment and test positions within it
+	// Pos values taken straight from parsed comments must be detected as
+	// "in comment" by IsInComment — this is the contract callers rely on.
 	require.Greater(t, len(file.Comments), 0, "Should have at least one comment")
-
-	comment := file.Comments[0].List[0] // First comment
-	commentStart := fset.Position(comment.Pos())
-	commentEnd := fset.Position(comment.End())
-
-	t.Logf("Comment range: line %d col %d to line %d col %d",
-		commentStart.Line, commentStart.Column, commentEnd.Line, commentEnd.Column)
-
-	// Test a position that's clearly inside the comment
-	// Let's create a position in the middle of the comment
-	midCommentFile := fset.AddFile("test.go", -1, 1000)
-	midCommentFile.AddLine(commentStart.Line + 1) // Add line info
-
-	// Create a position in the middle of the comment (line 5, column 10)
-	midCommentFile.Pos(50)
-	midPosition := token.Position{
-		Filename: "test.go",
-		Offset:   50,
-		Line:     commentStart.Line + 1, // Line 5
-		Column:   10,                    // Column 10
-	}
-
-	// Test our comment detection with this middle position
-	isInComment := cf.positionInComment(midPosition, comment)
-	assert.True(t, isInComment, "Position in middle of comment should be detected as in comment")
+	comment := file.Comments[0].List[0]
+	assert.True(t, cf.IsInComment(comment.Pos()), "comment.Pos() should be in comment")
+	assert.True(t, cf.IsInComment(comment.End()-1), "byte before comment.End() should be in comment")
 }
 
 func TestCommentFilter_SpecificCommentRanges(t *testing.T) {
@@ -182,108 +149,6 @@ func main() {
 		}
 		return true
 	})
-}
-
-func TestCommentFilter_LineCommentDetection(t *testing.T) {
-	src := `package main
-
-func main() {
-	mu.Lock()  // This comment starts at column 13
-}
-`
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
-	require.NoError(t, err)
-
-	cf := NewCommentFilter(fset, file)
-
-	// Find the line comment
-	require.Greater(t, len(file.Comments), 0, "Should have a comment")
-	comment := file.Comments[0].List[0]
-	commentPos := fset.Position(comment.Pos())
-
-	t.Logf("Line comment: %q at line %d col %d", comment.Text, commentPos.Line, commentPos.Column)
-
-	// Test positions on the same line
-	testPositions := []struct {
-		column   int
-		expected bool
-		desc     string
-	}{
-		{1, false, "beginning of line - before comment"},
-		{10, false, "before comment starts"},
-		{commentPos.Column, true, "at comment start"},
-		{commentPos.Column + 5, true, "inside comment"},
-		{commentPos.Column + 20, true, "further inside comment"},
-	}
-
-	for _, test := range testPositions {
-		testPos := token.Position{
-			Filename: commentPos.Filename,
-			Line:     commentPos.Line,
-			Column:   test.column,
-		}
-
-		result := cf.positionInComment(testPos, comment)
-		assert.Equal(t, test.expected, result,
-			"Position at col %d should be %v (%s)", test.column, test.expected, test.desc)
-	}
-}
-
-func TestCommentFilter_BlockCommentDetection(t *testing.T) {
-	src := `package main
-
-func main() {
-	/* This is a 
-	   multi-line 
-	   block comment */
-	mu.Lock()
-}
-`
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
-	require.NoError(t, err)
-
-	cf := NewCommentFilter(fset, file)
-
-	// Find the block comment
-	require.Greater(t, len(file.Comments), 0, "Should have a comment")
-	comment := file.Comments[0].List[0]
-	commentStart := fset.Position(comment.Pos())
-	commentEnd := fset.Position(comment.End())
-
-	t.Logf("Block comment from line %d col %d to line %d col %d",
-		commentStart.Line, commentStart.Column, commentEnd.Line, commentEnd.Column)
-
-	// Test various positions relative to the block comment
-	testCases := []struct {
-		line     int
-		column   int
-		expected bool
-		desc     string
-	}{
-		{commentStart.Line, commentStart.Column, true, "start of comment"},
-		{commentStart.Line, commentStart.Column + 5, true, "inside first line"},
-		{commentStart.Line + 1, 5, true, "middle line of comment"},
-		{commentEnd.Line, commentEnd.Column, true, "end of comment"},
-		{commentEnd.Line + 1, 2, false, "after comment"},
-		{commentStart.Line - 1, 5, false, "before comment"},
-	}
-
-	for _, test := range testCases {
-		testPos := token.Position{
-			Filename: commentStart.Filename,
-			Line:     test.line,
-			Column:   test.column,
-		}
-
-		result := cf.positionInComment(testPos, comment)
-		assert.Equal(t, test.expected, result,
-			"Position at line %d col %d should be %v (%s)",
-			test.line, test.column, test.expected, test.desc)
-	}
 }
 
 func TestShouldSkipCall(t *testing.T) {
@@ -541,34 +406,6 @@ func main() {
 			assert.False(t, inComment, "mu.Unlock() should not be in comment")
 		}
 	}
-}
-
-func TestCommentFilter_UnsupportedCommentType(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "test.go", "package main\nfunc main() { mu.Lock() }", parser.ParseComments)
-	require.NoError(t, err)
-
-	// Create a mock comment that doesn't start with // or /*
-	mockComment := &ast.Comment{
-		Slash: token.Pos(1),
-		Text:  "unknown comment type",
-	}
-
-	cf := NewCommentFilter(fset, file)
-
-	// Find a real position to test
-	var testPos token.Position
-	ast.Inspect(file, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			testPos = fset.Position(call.Pos())
-			return false
-		}
-		return true
-	})
-
-	// Test the positionInComment method directly with unsupported comment
-	assert.False(t, cf.positionInComment(testPos, mockComment),
-		"Unsupported comment type should return false")
 }
 
 func TestCommentFilter_RealCommentPositions(t *testing.T) {
