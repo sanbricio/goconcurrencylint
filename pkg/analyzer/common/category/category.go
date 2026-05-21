@@ -9,46 +9,50 @@ package category
 
 import "slices"
 
+// Category is the identifier of a check. Its value is emitted as
+// analysis.Diagnostic.Category and matched by inline ignore directives.
+type Category string
+
 const (
 	// Mutex / RWMutex checks.
-	LockWithoutUnlock      = "lock-without-unlock"
-	UnlockWithoutLock      = "unlock-without-lock"
-	DeferUnlockWithoutLock = "defer-unlock-without-lock"
-	UncheckedTryLock       = "unchecked-trylock"
-	DeferLock              = "defer-lock"
-	MutexInLoop            = "mutex-in-loop"
-	DeferUnlockInLoop      = "defer-unlock-in-loop"
-	RWMutexAPIMismatch     = "rwmutex-api-mismatch"
-	GoroutineLockDeadlock  = "goroutine-lock-deadlock"
-	PanicBeforeUnlock      = "panic-before-unlock"
-	DoubleLock             = "double-lock"
-	CrossGoroutineUnlock   = "cross-goroutine-unlock"
-	LockOrderCycle         = "lock-order-cycle"
+	LockWithoutUnlock      Category = "lock-without-unlock"
+	UnlockWithoutLock      Category = "unlock-without-lock"
+	DeferUnlockWithoutLock Category = "defer-unlock-without-lock"
+	UncheckedTryLock       Category = "unchecked-trylock"
+	DeferLock              Category = "defer-lock"
+	MutexInLoop            Category = "mutex-in-loop"
+	DeferUnlockInLoop      Category = "defer-unlock-in-loop"
+	RWMutexAPIMismatch     Category = "rwmutex-api-mismatch"
+	GoroutineLockDeadlock  Category = "goroutine-lock-deadlock"
+	PanicBeforeUnlock      Category = "panic-before-unlock"
+	DoubleLock             Category = "double-lock"
+	CrossGoroutineUnlock   Category = "cross-goroutine-unlock"
+	LockOrderCycle         Category = "lock-order-cycle"
 
 	// WaitGroup checks.
-	AddWithoutDone          = "add-without-done"
-	DoneWithoutAdd          = "done-without-add"
-	AddAfterWait            = "add-after-wait"
-	GoAfterWait             = "go-after-wait"
-	AddInsideGoroutine      = "add-inside-goroutine"
-	DoneNotDeferred         = "done-not-deferred"
-	AddLoopCountMismatch    = "add-loop-count-mismatch"
-	AddZero                 = "add-zero"
-	AddNegative             = "add-negative"
-	WaitWithoutAdd          = "wait-without-add"
-	WaitDeadlock            = "wait-deadlock"
-	MultipleDoneWorker      = "multiple-done-worker"
-	NestedWaitGroupDeadlock = "nested-waitgroup-deadlock"
-	DoneOutsideGoroutine    = "done-outside-goroutine"
-	GoPanic                 = "go-panic"
+	AddWithoutDone          Category = "add-without-done"
+	DoneWithoutAdd          Category = "done-without-add"
+	AddAfterWait            Category = "add-after-wait"
+	GoAfterWait             Category = "go-after-wait"
+	AddInsideGoroutine      Category = "add-inside-goroutine"
+	DoneNotDeferred         Category = "done-not-deferred"
+	AddLoopCountMismatch    Category = "add-loop-count-mismatch"
+	AddZero                 Category = "add-zero"
+	AddNegative             Category = "add-negative"
+	WaitWithoutAdd          Category = "wait-without-add"
+	WaitDeadlock            Category = "wait-deadlock"
+	MultipleDoneWorker      Category = "multiple-done-worker"
+	NestedWaitGroupDeadlock Category = "nested-waitgroup-deadlock"
+	DoneOutsideGoroutine    Category = "done-outside-goroutine"
+	GoPanic                 Category = "go-panic"
 
 	// Cross-primitive.
-	SyncPrimitiveCopy = "sync-primitive-copy"
+	SyncPrimitiveCopy Category = "sync-primitive-copy"
 )
 
 // All returns every known check category. Order is not significant.
-func All() []string {
-	return []string{
+func All() []Category {
+	return []Category{
 		LockWithoutUnlock,
 		UnlockWithoutLock,
 		DeferUnlockWithoutLock,
@@ -83,5 +87,5 @@ func All() []string {
 
 // IsKnown reports whether id is a recognised check category.
 func IsKnown(id string) bool {
-	return slices.Contains(All(), id)
+	return slices.Contains(All(), Category(id))
 }

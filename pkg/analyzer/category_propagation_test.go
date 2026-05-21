@@ -11,11 +11,9 @@ import (
 
 // TestDiagnosticCategoryPropagation runs the analyzer over the full set of
 // fixtures and verifies every emitted diagnostic carries a Category that
-// belongs to the public catalogue. This catches regressions where a new
-// AddError call site forgets to pass a category, or where a refactor breaks
-// the wire-up between ErrorCollector and pass.Report.
+// belongs to the public catalogue.
 func TestDiagnosticCategoryPropagation(t *testing.T) {
-	known := make(map[string]struct{}, len(category.All()))
+	known := make(map[category.Category]struct{}, len(category.All()))
 	for _, id := range category.All() {
 		known[id] = struct{}{}
 	}
@@ -34,7 +32,7 @@ func TestDiagnosticCategoryPropagation(t *testing.T) {
 			if diag.Category == "" {
 				continue
 			}
-			_, ok := known[diag.Category]
+			_, ok := known[category.Category(diag.Category)]
 			assert.True(t, ok,
 				"diagnostic at %s carries unknown Category %q (message: %q)",
 				pos, diag.Category, diag.Message)

@@ -16,7 +16,7 @@ import (
 type Analyzer struct {
 	mutexNames             map[string]bool
 	rwMutexNames           map[string]bool
-	errorCollector         *report.ErrorCollector
+	errorCollector         report.Reporter
 	stats                  map[string]*Stats
 	deferErrors            *deferErrorCollector
 	commentFilter          *commentfilter.CommentFilter
@@ -73,7 +73,7 @@ type deferErrorCollector struct {
 }
 
 // NewAnalyzer creates a new mutex analyzer
-func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
+func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
 	return &Analyzer{
 		mutexNames:      mutexNames,
 		rwMutexNames:    rwMutexNames,

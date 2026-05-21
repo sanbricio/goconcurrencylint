@@ -4,8 +4,15 @@ import (
 	"go/token"
 	"sort"
 
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 	"golang.org/x/tools/go/analysis"
 )
+
+// Reporter receives diagnostics from checkers as (position, category,
+// message) triplets. ErrorCollector is the standard implementation.
+type Reporter interface {
+	AddError(pos token.Pos, cat category.Category, message string)
+}
 
 // ErrorReport represents a single diagnostic to be reported. Category must
 // match a stable identifier from the category package so downstream tools
@@ -13,14 +20,14 @@ import (
 // filter by it.
 type ErrorReport struct {
 	Pos      token.Pos
-	Category string
+	Category category.Category
 	Message  string
 }
 
 // IgnoreFunc decides whether a diagnostic should be suppressed based on its
 // location and category. It is consulted at report time; passing a nil
 // IgnoreFunc disables filtering.
-type IgnoreFunc func(filename string, line int, category string) bool
+type IgnoreFunc func(filename string, line int, cat category.Category) bool
 
 // ErrorCollector accumulates diagnostics across files, deduplicates by
 // (Pos, Category, Message), and emits them sorted in deterministic order.
@@ -29,13 +36,12 @@ type ErrorCollector struct {
 	seen   map[ErrorReport]struct{}
 }
 
-// AddError records a diagnostic. category should be a constant from the
-// category package; passing an empty category is allowed for transitional
-// callers but will not match any per-rule ignore directive.
-func (ec *ErrorCollector) AddError(pos token.Pos, category, message string) {
+// AddError records a diagnostic. cat should be a constant from the category
+// package; an empty category will not match any per-rule ignore directive.
+func (ec *ErrorCollector) AddError(pos token.Pos, cat category.Category, message string) {
 	report := ErrorReport{
 		Pos:      pos,
-		Category: category,
+		Category: cat,
 		Message:  message,
 	}
 
@@ -79,7 +85,7 @@ func (ec *ErrorCollector) ReportAll(pass *analysis.Pass, ignore IgnoreFunc) {
 		}
 		pass.Report(analysis.Diagnostic{
 			Pos:      err.Pos,
-			Category: err.Category,
+			Category: string(err.Category),
 			Message:  err.Message,
 		})
 	}

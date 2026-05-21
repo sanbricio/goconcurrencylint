@@ -111,10 +111,10 @@ func (cf *CommentFilter) HasIgnoreDirective(pos token.Pos) bool {
 	return ok
 }
 
-// IsCategoryIgnored reports whether category is silenced at the given line.
+// IsCategoryIgnored reports whether cat is silenced at the given line.
 // A bare directive on that line silences every category. An empty category
 // only matches a bare directive (it never matches a per-rule list).
-func (cf *CommentFilter) IsCategoryIgnored(line int, category string) bool {
+func (cf *CommentFilter) IsCategoryIgnored(line int, cat category.Category) bool {
 	entry, ok := cf.ignoreByLine[line]
 	if !ok {
 		return false
@@ -122,10 +122,10 @@ func (cf *CommentFilter) IsCategoryIgnored(line int, category string) bool {
 	if entry.all {
 		return true
 	}
-	if category == "" {
+	if cat == "" {
 		return false
 	}
-	_, ok = entry.categories[category]
+	_, ok = entry.categories[string(cat)]
 	return ok
 }
 

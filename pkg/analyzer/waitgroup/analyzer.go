@@ -19,7 +19,7 @@ type Analyzer struct {
 	waitGroupNames             map[string]bool
 	localWaitGroupNames        map[string]bool
 	packageLevelWaitGroupNames map[string]bool
-	errorCollector             *report.ErrorCollector
+	errorCollector             report.Reporter
 	function                   *ast.FuncDecl
 	commentFilter              *commentfilter.CommentFilter
 	typesInfo                  *types.Info
@@ -44,7 +44,7 @@ type Stats struct {
 }
 
 // NewAnalyzer creates a new WaitGroup analyzer
-func NewAnalyzer(waitGroupNames, localWaitGroupNames, packageLevelWaitGroupNames map[string]bool, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Analyzer {
+func NewAnalyzer(waitGroupNames, localWaitGroupNames, packageLevelWaitGroupNames map[string]bool, errorCollector report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Analyzer {
 	return &Analyzer{
 		waitGroupNames:             waitGroupNames,
 		localWaitGroupNames:        localWaitGroupNames,

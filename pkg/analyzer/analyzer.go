@@ -60,7 +60,7 @@ func ignoreFromFilters(filters map[string]*commentfilter.CommentFilter) report.I
 	if len(filters) == 0 {
 		return nil
 	}
-	return func(filename string, line int, cat string) bool {
+	return func(filename string, line int, cat category.Category) bool {
 		cf, ok := filters[filename]
 		if !ok {
 			return false
@@ -72,7 +72,7 @@ func ignoreFromFilters(filters map[string]*commentfilter.CommentFilter) report.I
 // analyzeFunctionsWithFilter processes all function declarations in a file
 // using a pre-built CommentFilter, so the same instance is reused for
 // per-file ignore-directive lookups at report time.
-func analyzeFunctionsWithFilter(file *ast.File, commentFilter *commentfilter.CommentFilter, pass *analysis.Pass, errorCollector *report.ErrorCollector, pkgPrimitives *syncPrimitive) {
+func analyzeFunctionsWithFilter(file *ast.File, commentFilter *commentfilter.CommentFilter, pass *analysis.Pass, errorCollector report.Reporter, pkgPrimitives *syncPrimitive) {
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -175,24 +175,16 @@ func findSyncPrimitives(fn *ast.FuncDecl, pass *analysis.Pass) *syncPrimitive {
 			}
 
 		case *ast.AssignStmt:
-			// Handle short variable declarations
-			if node.Tok == token.DEFINE {
-				for i, lhs := range node.Lhs {
-					if ident, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
-						if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
-							classifyAndAddPrimitive(ident.Name, typ, primitives)
-						}
-					}
-				}
+			if node.Tok != token.DEFINE && node.Tok != token.ASSIGN {
+				break
 			}
-			// Handle regular assignments
-			if node.Tok == token.ASSIGN {
-				for i, lhs := range node.Lhs {
-					if ident, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
-						if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
-							classifyAndAddPrimitive(ident.Name, typ, primitives)
-						}
-					}
+			for i, lhs := range node.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || i >= len(node.Rhs) {
+					continue
+				}
+				if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
+					classifyAndAddPrimitive(ident.Name, typ, primitives)
 				}
 			}
 
@@ -264,18 +256,18 @@ func hasWaitGroups(primitives *syncPrimitive) bool {
 }
 
 // analyzeMutexUsage handles mutex and rwmutex analysis
-func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
+func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
 	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf, pass.TypesInfo, pass.Files)
 	analyzer.AnalyzeFunction(fn)
 }
 
 // analyzeWaitGroupUsage handles waitgroup analysis
-func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWaitGroups, packageLevelWaitGroups map[string]bool, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
+func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWaitGroups, packageLevelWaitGroups map[string]bool, errorCollector report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
 	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, localWaitGroups, packageLevelWaitGroups, errorCollector, cf, pass)
 	analyzer.AnalyzeFunction(fn)
 }
 
-func detectCopyByValue(pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func detectCopyByValue(pass *analysis.Pass, errorCollector report.Reporter) {
 	for _, file := range pass.Files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch node := n.(type) {
@@ -295,7 +287,7 @@ func detectCopyByValue(pass *analysis.Pass, errorCollector *report.ErrorCollecto
 	}
 }
 
-func reportCopyByValueFuncLitParams(fn *ast.FuncLit, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func reportCopyByValueFuncLitParams(fn *ast.FuncLit, pass *analysis.Pass, errorCollector report.Reporter) {
 	if fn == nil || fn.Type == nil || fn.Type.Params == nil {
 		return
 	}
@@ -303,7 +295,7 @@ func reportCopyByValueFuncLitParams(fn *ast.FuncLit, pass *analysis.Pass, errorC
 	reportCopyByValueFieldList(fn.Type.Params, pass, errorCollector)
 }
 
-func reportCopyByValueParams(fn *ast.FuncDecl, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func reportCopyByValueParams(fn *ast.FuncDecl, pass *analysis.Pass, errorCollector report.Reporter) {
 	if fn == nil || fn.Type == nil || fn.Type.Params == nil {
 		return
 	}
@@ -314,7 +306,7 @@ func reportCopyByValueParams(fn *ast.FuncDecl, pass *analysis.Pass, errorCollect
 	reportCopyByValueFieldList(fn.Type.Params, pass, errorCollector)
 }
 
-func reportCopyByValueFieldList(fields *ast.FieldList, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func reportCopyByValueFieldList(fields *ast.FieldList, pass *analysis.Pass, errorCollector report.Reporter) {
 	for _, field := range fields.List {
 		kind := syncPrimitiveValueKind(pass.TypesInfo.TypeOf(field.Type))
 		if kind == "" {
@@ -326,7 +318,7 @@ func reportCopyByValueFieldList(fields *ast.FieldList, pass *analysis.Pass, erro
 	}
 }
 
-func reportCopyByValueValueSpec(vs *ast.ValueSpec, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func reportCopyByValueValueSpec(vs *ast.ValueSpec, pass *analysis.Pass, errorCollector report.Reporter) {
 	if vs == nil {
 		return
 	}
@@ -338,7 +330,7 @@ func reportCopyByValueValueSpec(vs *ast.ValueSpec, pass *analysis.Pass, errorCol
 	}
 }
 
-func reportCopyByValueAssignments(assign *ast.AssignStmt, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func reportCopyByValueAssignments(assign *ast.AssignStmt, pass *analysis.Pass, errorCollector report.Reporter) {
 	if assign == nil || (assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE) {
 		return
 	}
@@ -353,7 +345,7 @@ func reportCopyByValueAssignments(assign *ast.AssignStmt, pass *analysis.Pass, e
 	}
 }
 
-func reportCopyByValueArgs(call *ast.CallExpr, pass *analysis.Pass, errorCollector *report.ErrorCollector) {
+func reportCopyByValueArgs(call *ast.CallExpr, pass *analysis.Pass, errorCollector report.Reporter) {
 	if call == nil {
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"go/token"
 	"testing"
 
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/tools/go/analysis"
 )
@@ -180,8 +181,8 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 				got = append(got, d.Message)
 			},
 		}
-		ignore := func(_ string, _ int, category string) bool {
-			return category == "wait-without-add"
+		ignore := func(_ string, _ int, cat category.Category) bool {
+			return cat == "wait-without-add"
 		}
 		ec.ReportAll(pass, ignore)
 		assert.Equal(t, []string{"kept"}, got)
