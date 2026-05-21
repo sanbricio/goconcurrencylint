@@ -887,25 +887,6 @@ func (ma *Analyzer) functionIsCallerManagedReleaseFor(mutexName string, methodNa
 	return totalCallSites > 0
 }
 
-func cloneStats(stats *Stats) *Stats {
-	if stats == nil {
-		return &Stats{}
-	}
-
-	return &Stats{
-		lock:               stats.lock,
-		rlock:              stats.rlock,
-		borrowedLock:       stats.borrowedLock,
-		borrowedRLock:      stats.borrowedRLock,
-		deferUnlock:        stats.deferUnlock,
-		deferRUnlock:       stats.deferRUnlock,
-		lockPos:            append([]token.Pos{}, stats.lockPos...),
-		rlockPos:           append([]token.Pos{}, stats.rlockPos...),
-		borrowedUnlockPos:  append([]token.Pos{}, stats.borrowedUnlockPos...),
-		borrowedRUnlockPos: append([]token.Pos{}, stats.borrowedRUnlockPos...),
-	}
-}
-
 func (ma *Analyzer) clearStats(stats map[string]*Stats) {
 	for name := range stats {
 		stats[name] = &Stats{}
@@ -1012,10 +993,10 @@ func (ma *Analyzer) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr
 		},
 	}
 
-	baseline := simulated.copyStats(stats)
+	baseline := simulated.cloneStatsMap(stats)
 	final := simulated.analyzeBlock(fnlit.Body, baseline)
 	simulated.applyFunctionExitDefers(final, baseline)
-	ma.replaceStats(stats, final)
+	ma.copyStatsMap(stats, final)
 	return true
 }
 
@@ -1156,44 +1137,55 @@ func (ma *Analyzer) initializeStats() {
 	}
 }
 
-// copyStats creates a deep copy of the stats map
-func (ma *Analyzer) copyStats(original map[string]*Stats) map[string]*Stats {
+// cloneStatsMap creates a deep copy of the stats map
+func (ma *Analyzer) cloneStatsMap(original map[string]*Stats) map[string]*Stats {
 	copy := make(map[string]*Stats)
-	for name, stats := range original {
-		copy[name] = &Stats{
-			lock:               stats.lock,
-			rlock:              stats.rlock,
-			borrowedLock:       stats.borrowedLock,
-			borrowedRLock:      stats.borrowedRLock,
-			deferUnlock:        stats.deferUnlock,
-			deferRUnlock:       stats.deferRUnlock,
-			lockPos:            append([]token.Pos{}, stats.lockPos...),
-			rlockPos:           append([]token.Pos{}, stats.rlockPos...),
-			borrowedUnlockPos:  append([]token.Pos{}, stats.borrowedUnlockPos...),
-			borrowedRUnlockPos: append([]token.Pos{}, stats.borrowedRUnlockPos...),
-		}
-	}
+	ma.copyStatsMap(copy, original)
 	return copy
 }
 
-// replaceStats overwrites the current stats with the analyzed result of a
+// copyStatsMap overwrites the current stats with the analyzed result of a
 // sequential block.
-func (ma *Analyzer) replaceStats(dst, src map[string]*Stats) {
+func (ma *Analyzer) copyStatsMap(dst, src map[string]*Stats) {
 	for name, srcStats := range src {
 		if _, exists := dst[name]; !exists {
 			dst[name] = &Stats{}
 		}
-		dst[name].lock = srcStats.lock
-		dst[name].rlock = srcStats.rlock
-		dst[name].borrowedLock = srcStats.borrowedLock
-		dst[name].borrowedRLock = srcStats.borrowedRLock
-		dst[name].deferUnlock = srcStats.deferUnlock
-		dst[name].deferRUnlock = srcStats.deferRUnlock
-		dst[name].lockPos = append([]token.Pos{}, srcStats.lockPos...)
-		dst[name].rlockPos = append([]token.Pos{}, srcStats.rlockPos...)
-		dst[name].borrowedUnlockPos = append([]token.Pos{}, srcStats.borrowedUnlockPos...)
-		dst[name].borrowedRUnlockPos = append([]token.Pos{}, srcStats.borrowedRUnlockPos...)
+
+		copyStats(dst[name], srcStats)
 	}
+}
+
+// cloneStats creates a deep copy of a single Stats object.
+// If the input is nil, it returns a new initialized empty Stats instance.
+func cloneStats(stats *Stats) *Stats {
+	if stats == nil {
+		return &Stats{}
+	}
+
+	clone := &Stats{}
+	copyStats(clone, stats)
+
+	return clone
+}
+
+// copyStats copies all fields from the src Stats object into dst.
+// to prevent memory sharing between instances. It safely returns early if src or dst is nil.
+func copyStats(dst, src *Stats) {
+	if src == nil || dst == nil {
+		return
+	}
+
+	dst.lock = src.lock
+	dst.rlock = src.rlock
+	dst.borrowedLock = src.borrowedLock
+	dst.borrowedRLock = src.borrowedRLock
+	dst.deferUnlock = src.deferUnlock
+	dst.deferRUnlock = src.deferRUnlock
+	dst.lockPos = slices.Clone(src.lockPos)
+	dst.rlockPos = slices.Clone(src.rlockPos)
+	dst.borrowedUnlockPos = slices.Clone(src.borrowedUnlockPos)
+	dst.borrowedRUnlockPos = slices.Clone(src.borrowedRUnlockPos)
 }
 
 // removeFirstLockPos removes the first lock position from the list
