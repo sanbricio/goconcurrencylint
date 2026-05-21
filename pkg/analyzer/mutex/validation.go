@@ -39,7 +39,7 @@ func (ma *Analyzer) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]
 	ma.checkMutexDeclaredInLoop(stmt.Body)
 	ma.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := ma.analyzeBlock(stmt.Body, stats)
-	ma.replaceStats(stats, rangeStats)
+	ma.copyStatsMap(stats, rangeStats)
 }
 
 // analyzeSwitchStatement handles switch statements
@@ -90,13 +90,13 @@ func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats
 	if condValue, ok := common.ConstantBoolValue(stmt.Cond, ma.typesInfo); ok {
 		if condValue {
 			thenStats := ma.analyzeBlock(stmt.Body, stats)
-			ma.replaceStats(stats, thenStats)
+			ma.copyStatsMap(stats, thenStats)
 			return
 		}
 
 		if stmt.Else != nil {
 			elseStats := ma.analyzeElseBranch(stmt.Else, stats)
-			ma.replaceStats(stats, elseStats)
+			ma.copyStatsMap(stats, elseStats)
 		}
 		return
 	}
@@ -107,7 +107,7 @@ func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats
 	if stmt.Else != nil {
 		elseStats := ma.analyzeElseBranch(stmt.Else, elseBase)
 		if ma.canMergeBranchStates(thenStats, elseStats) {
-			ma.replaceStats(stats, thenStats)
+			ma.copyStatsMap(stats, thenStats)
 			return
 		}
 		ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
@@ -117,13 +117,13 @@ func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats
 
 	ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
 	if ma.blockAlwaysTerminates(stmt.Body) {
-		ma.replaceStats(stats, elseBase)
+		ma.copyStatsMap(stats, elseBase)
 	}
 }
 
 func (ma *Analyzer) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
-	thenStats := ma.copyStats(stats)
-	elseStats := ma.copyStats(stats)
+	thenStats := ma.cloneStatsMap(stats)
+	elseStats := ma.cloneStatsMap(stats)
 
 	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
 		negatedThen, negatedElse := ma.branchInitialStatsForCondition(unary.X, stats)
@@ -275,7 +275,7 @@ func (ma *Analyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Sta
 		ma.clearStats(stats)
 		return
 	}
-	ma.replaceStats(stats, forStats)
+	ma.copyStatsMap(stats, forStats)
 }
 
 func (ma *Analyzer) blockContainsReturn(block *ast.BlockStmt) bool {

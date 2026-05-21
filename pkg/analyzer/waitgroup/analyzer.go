@@ -9,7 +9,7 @@ import (
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
-	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
 	"golang.org/x/tools/go/analysis"
 )
@@ -21,7 +21,7 @@ type Analyzer struct {
 	packageLevelWaitGroupNames map[string]bool
 	errorCollector             *report.ErrorCollector
 	function                   *ast.FuncDecl
-	commentFilter              *commnetfilter.CommentFilter
+	commentFilter              *commentfilter.CommentFilter
 	typesInfo                  *types.Info
 	functionDecls              map[token.Pos]*ast.FuncDecl
 }
@@ -44,7 +44,7 @@ type Stats struct {
 }
 
 // NewAnalyzer creates a new WaitGroup analyzer
-func NewAnalyzer(waitGroupNames, localWaitGroupNames, packageLevelWaitGroupNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) *Analyzer {
+func NewAnalyzer(waitGroupNames, localWaitGroupNames, packageLevelWaitGroupNames map[string]bool, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Analyzer {
 	return &Analyzer{
 		waitGroupNames:             waitGroupNames,
 		localWaitGroupNames:        localWaitGroupNames,

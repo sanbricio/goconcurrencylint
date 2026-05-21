@@ -18,7 +18,7 @@ func (ma *Analyzer) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats
 }
 
 func (ma *Analyzer) analyzeStatementList(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
-	blockStats := ma.copyStats(initial)
+	blockStats := ma.cloneStatsMap(initial)
 	skip := make(map[token.Pos]bool)
 
 	for i, stmt := range stmts {
@@ -256,7 +256,7 @@ func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 		ma.analyzeStatement(s.Stmt, stats)
 	case *ast.BlockStmt:
 		nestedStats := ma.analyzeBlock(s, stats)
-		ma.replaceStats(stats, nestedStats)
+		ma.copyStatsMap(stats, nestedStats)
 	}
 }
 

@@ -1,4 +1,4 @@
-package commnetfilter
+package commentfilter
 
 import (
 	"go/ast"
