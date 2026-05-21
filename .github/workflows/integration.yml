@@ -18,6 +18,13 @@ jobs:
     name: Scan ${{ matrix.target.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # `GOTOOLCHAIN=auto` lets `go mod download` / `go build` fetch the
+    # toolchain version requested by each target's `go.mod` (some targets
+    # pin Go >= 1.26). It is applied at the job level so it overrides the
+    # `GOTOOLCHAIN=local` that `actions/setup-go` exports into
+    # `$GITHUB_ENV` for all subsequent steps.
+    env:
+      GOTOOLCHAIN: auto
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +61,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: 'stable'
           cache: true
 
       - name: Build linter binary
@@ -75,33 +82,54 @@ jobs:
 
       - name: Resolve target dependencies
         id: deps
+        continue-on-error: true
         working-directory: target
         run: |
+          set +e
           target_sha=$(git rev-parse HEAD)
           target_short=$(git rev-parse --short HEAD)
+          echo "sha=${target_sha}"     >> "${GITHUB_OUTPUT}"
+          echo "short=${target_short}" >> "${GITHUB_OUTPUT}"
           start=$(date +%s)
           go mod download
+          deps_exit=$?
           end=$(date +%s)
-          echo "sha=${target_sha}"           >> "${GITHUB_OUTPUT}"
-          echo "short=${target_short}"       >> "${GITHUB_OUTPUT}"
+          echo "exit_code=${deps_exit}"      >> "${GITHUB_OUTPUT}"
           echo "duration_s=$((end - start))" >> "${GITHUB_OUTPUT}"
+          exit 0
 
       # `go vet -vettool` is the supported invocation for a third-party
       # analyzer. Diagnostics and tooling errors both land on stderr; the
       # report script separates them later by matching the canonical
       # `file.go:line:col: message` form.
+      #
+      # Timeouts are enforced by coreutils `timeout` rather than GitHub's
+      # `timeout-minutes`: that way the step exits cleanly with a
+      # `timeout` sentinel exit code instead of being killed by the
+      # runner (which would leave the step red and skip the post-run
+      # bookkeeping below). The step-level `timeout-minutes` is kept as a
+      # safety margin in case the bash timeout itself wedges.
       - name: Run linter
         id: lint
         continue-on-error: true
         working-directory: target
-        timeout-minutes: ${{ matrix.target.timeout }}
+        timeout-minutes: ${{ matrix.target.timeout + 2 }}
+        env:
+          LINT_TIMEOUT_MIN: ${{ matrix.target.timeout }}
         run: |
           set +e
           start=$(date +%s)
-          go vet -vettool="${RUNNER_TEMP}/goconcurrencylint" ${{ matrix.target.scan-path }} \
+          timeout --signal=TERM --kill-after=30s "${LINT_TIMEOUT_MIN}m" \
+            go vet -vettool="${RUNNER_TEMP}/goconcurrencylint" ${{ matrix.target.scan-path }} \
             >"${RUNNER_TEMP}/stdout.txt" 2>"${RUNNER_TEMP}/stderr.txt"
-          exit_code=$?
+          raw_exit=$?
           end=$(date +%s)
+          # `timeout` returns 124 on SIGTERM, 137 on the follow-up SIGKILL.
+          if [ "${raw_exit}" -eq 124 ] || [ "${raw_exit}" -eq 137 ]; then
+            exit_code="timeout"
+          else
+            exit_code="${raw_exit}"
+          fi
           echo "exit_code=${exit_code}"      >> "${GITHUB_OUTPUT}"
           echo "duration_s=$((end - start))" >> "${GITHUB_OUTPUT}"
           exit 0
