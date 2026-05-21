@@ -9,7 +9,7 @@ import (
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
-	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/mutex"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/waitgroup"
@@ -39,9 +39,9 @@ func run(pass *analysis.Pass) (any, error) {
 	errorCollector := &report.ErrorCollector{}
 	pkgPrimitives := collectPackageLevelPrimitives(pass)
 
-	filtersByFile := make(map[string]*commnetfilter.CommentFilter, len(pass.Files))
+	filtersByFile := make(map[string]*commentfilter.CommentFilter, len(pass.Files))
 	for _, file := range pass.Files {
-		cf := commnetfilter.NewCommentFilter(pass.Fset, file)
+		cf := commentfilter.NewCommentFilter(pass.Fset, file)
 		if name := cf.FileName(); name != "" {
 			filtersByFile[name] = cf
 		}
@@ -56,7 +56,7 @@ func run(pass *analysis.Pass) (any, error) {
 // ignoreFromFilters returns an IgnoreFunc that consults the per-file
 // CommentFilter for inline directives. A nil map is treated as "no
 // directives present anywhere".
-func ignoreFromFilters(filters map[string]*commnetfilter.CommentFilter) report.IgnoreFunc {
+func ignoreFromFilters(filters map[string]*commentfilter.CommentFilter) report.IgnoreFunc {
 	if len(filters) == 0 {
 		return nil
 	}
@@ -72,7 +72,7 @@ func ignoreFromFilters(filters map[string]*commnetfilter.CommentFilter) report.I
 // analyzeFunctionsWithFilter processes all function declarations in a file
 // using a pre-built CommentFilter, so the same instance is reused for
 // per-file ignore-directive lookups at report time.
-func analyzeFunctionsWithFilter(file *ast.File, commentFilter *commnetfilter.CommentFilter, pass *analysis.Pass, errorCollector *report.ErrorCollector, pkgPrimitives *syncPrimitive) {
+func analyzeFunctionsWithFilter(file *ast.File, commentFilter *commentfilter.CommentFilter, pass *analysis.Pass, errorCollector *report.ErrorCollector, pkgPrimitives *syncPrimitive) {
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
@@ -264,13 +264,13 @@ func hasWaitGroups(primitives *syncPrimitive) bool {
 }
 
 // analyzeMutexUsage handles mutex and rwmutex analysis
-func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
+func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
 	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf, pass.TypesInfo, pass.Files)
 	analyzer.AnalyzeFunction(fn)
 }
 
 // analyzeWaitGroupUsage handles waitgroup analysis
-func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWaitGroups, packageLevelWaitGroups map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, pass *analysis.Pass) {
+func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWaitGroups, packageLevelWaitGroups map[string]bool, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
 	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, localWaitGroups, packageLevelWaitGroups, errorCollector, cf, pass)
 	analyzer.AnalyzeFunction(fn)
 }

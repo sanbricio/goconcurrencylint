@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	commnetfilter "github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
 )
 
@@ -19,7 +19,7 @@ type Analyzer struct {
 	errorCollector         *report.ErrorCollector
 	stats                  map[string]*Stats
 	deferErrors            *deferErrorCollector
-	commentFilter          *commnetfilter.CommentFilter
+	commentFilter          *commentfilter.CommentFilter
 	function               *ast.FuncDecl
 	typesInfo              *types.Info
 	rawBodyEffects         bool
@@ -73,7 +73,7 @@ type deferErrorCollector struct {
 }
 
 // NewAnalyzer creates a new mutex analyzer
-func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *report.ErrorCollector, cf *commnetfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
+func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector *report.ErrorCollector, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
 	return &Analyzer{
 		mutexNames:      mutexNames,
 		rwMutexNames:    rwMutexNames,

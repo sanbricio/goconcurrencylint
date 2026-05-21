@@ -1,5 +1,5 @@
-// Package commnetfilter provides shared utilities for the concurrency linter
-package commnetfilter
+// Package commentfilter provides shared utilities for the concurrency linter
+package commentfilter
 
 import (
 	"go/ast"
