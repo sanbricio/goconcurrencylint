@@ -30,6 +30,10 @@ type Analyzer struct {
 	goroutineLockConflicts []goroutineLockConflict
 	tryLockResults         map[string]*tryLockResult
 	collectionLengths      map[string]int
+
+	// memoizes functionIsCallerManagedReleaseFor; validation.go calls it
+	// repeatedly with the same args per validation pass.
+	callerManagedCache map[callerManagedKey]bool
 }
 
 // goroutineLockConflict records a goroutine that was launched while the parent
@@ -75,13 +79,14 @@ type deferErrorCollector struct {
 // NewAnalyzer creates a new mutex analyzer
 func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
 	return &Analyzer{
-		mutexNames:      mutexNames,
-		rwMutexNames:    rwMutexNames,
-		errorCollector:  errorCollector,
-		commentFilter:   cf,
-		typesInfo:       typesInfo,
-		receiverMethods: buildReceiverMethodMap(files),
-		functions:       collectFunctionDecls(files),
+		mutexNames:         mutexNames,
+		rwMutexNames:       rwMutexNames,
+		errorCollector:     errorCollector,
+		commentFilter:      cf,
+		typesInfo:          typesInfo,
+		receiverMethods:    buildReceiverMethodMap(files),
+		functions:          collectFunctionDecls(files),
+		callerManagedCache: make(map[callerManagedKey]bool),
 		deferErrors: &deferErrorCollector{
 			badDeferUnlock:  make(map[string]bool),
 			badDeferRUnlock: make(map[string]bool),
@@ -833,11 +838,25 @@ func (ma *Analyzer) explicitTransferCallPositions(body *ast.BlockStmt) map[token
 	return positions
 }
 
+type callerManagedKey struct {
+	mutexName string
+	isRW      bool
+}
+
 func (ma *Analyzer) functionIsCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
 	if ma.function == nil || ma.function.Name == nil {
 		return false
 	}
+	key := callerManagedKey{mutexName, len(methodNames) > 0 && methodNames[0] == "RLock"}
+	if v, ok := ma.callerManagedCache[key]; ok {
+		return v
+	}
+	v := ma.computeCallerManagedReleaseFor(mutexName, methodNames)
+	ma.callerManagedCache[key] = v
+	return v
+}
 
+func (ma *Analyzer) computeCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
 	currentReceiver := receiverName(ma.function)
 	currentType := receiverTypeName(ma.function)
 	if currentReceiver == "" || currentType == "" {
