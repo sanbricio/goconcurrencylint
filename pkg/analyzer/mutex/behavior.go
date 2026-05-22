@@ -594,24 +594,9 @@ func (ma *Analyzer) callMayBlock(call *ast.CallExpr) bool {
 		return false
 	}
 
-	return isSyncWaitReceiver(ma.typesInfo.TypeOf(sel.X))
-}
+	typ := ma.typesInfo.TypeOf(sel.X)
+	typ = types.Unalias(typ)
+	typ = common.DerefOnce(typ)
 
-func isSyncWaitReceiver(typ types.Type) bool {
-	if typ == nil {
-		return false
-	}
-	if ptr, ok := types.Unalias(typ).(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	named, ok := types.Unalias(typ).(*types.Named)
-	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "sync" {
-		return false
-	}
-	switch named.Obj().Name() {
-	case "WaitGroup", "Cond":
-		return true
-	default:
-		return false
-	}
+	return common.MatchesPkgAndName(typ, "sync", "WaitGroup", "Cond")
 }

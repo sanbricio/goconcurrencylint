@@ -408,24 +408,22 @@ func syncPrimitiveValueKind(typ types.Type) string {
 }
 
 func directSyncPrimitiveValueKind(typ types.Type) string {
-	if typ == nil {
-		return ""
-	}
-	named, ok := types.Unalias(typ).(*types.Named)
-	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "sync" {
-		return ""
+	typ = types.Unalias(typ)
+
+	if match, ok := common.MatchPkgAndName(
+		typ, "sync", "Mutex", "RWMutex", "WaitGroup",
+	); ok {
+		switch match {
+		case "Mutex":
+			return "mutex"
+		case "RWMutex":
+			return "rwmutex"
+		case "WaitGroup":
+			return "waitgroup"
+		}
 	}
 
-	switch named.Obj().Name() {
-	case "Mutex":
-		return "mutex"
-	case "RWMutex":
-		return "rwmutex"
-	case "WaitGroup":
-		return "waitgroup"
-	default:
-		return ""
-	}
+	return ""
 }
 
 func copyByValueMessage(kind, name string) string {

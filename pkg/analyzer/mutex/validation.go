@@ -925,9 +925,8 @@ func (ma *Analyzer) reportMutexInLoopAssign(s *ast.AssignStmt) {
 		if typ == nil {
 			continue
 		}
-		if ptr, ok := types.Unalias(typ).(*types.Pointer); ok {
-			typ = ptr.Elem()
-		}
+		typ = types.Unalias(typ)
+		typ = common.DerefOnce(typ)
 		switch {
 		case common.IsMutex(typ):
 			ma.errorCollector.AddError(ident.Pos(),

@@ -5,40 +5,70 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"strconv"
 )
 
+// DerefOnce removes a single pointer indirection from typ.
+// Non-pointer types are returned unchanged.
+func DerefOnce(typ types.Type) types.Type {
+	if ptr, ok := typ.(*types.Pointer); ok {
+		return ptr.Elem()
+	}
+	return typ
+}
+
 // IsMutex returns true if the given type is sync.Mutex or *sync.Mutex.
 func IsMutex(typ types.Type) bool {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil &&
-		named.Obj().Pkg().Path() == "sync" &&
-		named.Obj().Name() == "Mutex"
+	typ = DerefOnce(typ)
+	return MatchesPkgAndName(typ, "sync", "Mutex")
 }
 
 // IsRWMutex returns true if the given type is sync.RWMutex or *sync.RWMutex.
 func IsRWMutex(typ types.Type) bool {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
-	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil &&
-		named.Obj().Pkg().Path() == "sync" &&
-		named.Obj().Name() == "RWMutex"
+	typ = DerefOnce(typ)
+	return MatchesPkgAndName(typ, "sync", "RWMutex")
 }
 
 // IsWaitGroup returns true if the given type is sync.WaitGroup or *sync.WaitGroup.
 func IsWaitGroup(typ types.Type) bool {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		typ = ptr.Elem()
-	}
+	typ = DerefOnce(typ)
+	return MatchesPkgAndName(typ, "sync", "WaitGroup")
+}
+
+// MatchesPkgAndName reports whether typ is a named type declared in pkg
+// whose name matches any of names.
+//
+// The type is matched nominally and is not automatically dereferenced
+// or unaliased.
+func MatchesPkgAndName(typ types.Type, pkg string, names ...string) bool {
+	_, matches := MatchPkgAndName(typ, pkg, names...)
+	return matches
+}
+
+// MatchPkgAndName returns the matched type name if typ is a named type
+// declared in pkg whose name matches any of names.
+//
+// The returned boolean reports whether a match was found.
+//
+// The type is matched nominally and is not automatically dereferenced
+// or unaliased.
+func MatchPkgAndName(typ types.Type, pkg string, names ...string) (string, bool) {
 	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil &&
-		named.Obj().Pkg().Path() == "sync" &&
-		named.Obj().Name() == "WaitGroup"
+	if !ok || named.Obj().Pkg() == nil {
+		return "", false
+	}
+
+	if named.Obj().Pkg().Path() != pkg {
+		return "", false
+	}
+
+	name := named.Obj().Name()
+	if slices.Contains(names, name) {
+		return name, true
+	}
+
+	return "", false
 }
 
 // GetVarName returns the variable name if the expression is an identifier,
