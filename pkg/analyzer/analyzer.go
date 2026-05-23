@@ -41,6 +41,9 @@ func run(pass *analysis.Pass) (any, error) {
 
 	filtersByFile := make(map[string]*commentfilter.CommentFilter, len(pass.Files))
 	for _, file := range pass.Files {
+		if common.IsGeneratedFile(file) {
+			continue
+		}
 		cf := commentfilter.NewCommentFilter(pass.Fset, file)
 		if name := cf.FileName(); name != "" {
 			filtersByFile[name] = cf
@@ -269,6 +272,9 @@ func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWai
 
 func detectCopyByValue(pass *analysis.Pass, errorCollector report.Reporter) {
 	for _, file := range pass.Files {
+		if common.IsGeneratedFile(file) {
+			continue
+		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.FuncDecl:
