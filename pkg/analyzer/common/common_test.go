@@ -206,3 +206,132 @@ func makeNamedType(pkgPath, name string, isPtr bool) types.Type {
 	}
 	return named
 }
+
+func TestDerefOnce(t *testing.T) {
+	intType := types.Typ[types.Int]
+	ptrToInt := types.NewPointer(intType)
+	ptrToPtrToInt := types.NewPointer(ptrToInt)
+
+	tests := []struct {
+		name  string
+		input types.Type
+		want  types.Type
+	}{
+		{
+			name:  "Non-pointer type (Basic int) returns itself",
+			input: intType,
+			want:  intType,
+		},
+		{
+			name:  "Single pointer (*int) returns underlying type",
+			input: ptrToInt,
+			want:  intType,
+		},
+		{
+			name:  "Double pointer (**int) dereferences only once to *int",
+			input: ptrToPtrToInt,
+			want:  ptrToInt,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DerefOnce(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestMatchPkgAndName(t *testing.T) {
+	pkgFoo := types.NewPackage("example.com/foo", "foo")
+	objA := types.NewTypeName(token.NoPos, pkgFoo, "TypeA", nil)
+	typeA := types.NewNamed(objA, types.Typ[types.String], nil)
+
+	objB := types.NewTypeName(token.NoPos, pkgFoo, "TypeB", nil)
+	typeB := types.NewNamed(objB, types.Typ[types.Int], nil)
+
+	pkgBar := types.NewPackage("example.com/bar", "bar")
+	objC := types.NewTypeName(token.NoPos, pkgBar, "TypeA", nil)
+	typeC := types.NewNamed(objC, types.Typ[types.String], nil)
+
+	objNilPkg := types.NewTypeName(token.NoPos, nil, "TypeA", nil)
+	typeNilPkg := types.NewNamed(objNilPkg, types.Typ[types.Bool], nil)
+
+	tests := []struct {
+		name        string
+		typ         types.Type
+		pkg         string
+		names       []string
+		wantName    string
+		wantMatched bool
+	}{
+		{
+			name:        "Not a named type (Basic int type)",
+			typ:         types.Typ[types.Int],
+			pkg:         "example.com/foo",
+			names:       []string{"TypeA"},
+			wantName:    "",
+			wantMatched: false,
+		},
+		{
+			name:        "Named type with nil package",
+			typ:         typeNilPkg,
+			pkg:         "example.com/foo",
+			names:       []string{"TypeA"},
+			wantName:    "",
+			wantMatched: false,
+		},
+		{
+			name:        "Package does not match (same type name)",
+			typ:         typeC,
+			pkg:         "example.com/foo",
+			names:       []string{"TypeA"},
+			wantName:    "",
+			wantMatched: false,
+		},
+		{
+			name:        "Package matches but the name is not in the list",
+			typ:         typeB,
+			pkg:         "example.com/foo",
+			names:       []string{"TypeA", "TypeC"},
+			wantName:    "",
+			wantMatched: false,
+		},
+		{
+			name:        "Exact match with a single name",
+			typ:         typeA,
+			pkg:         "example.com/foo",
+			names:       []string{"TypeA"},
+			wantName:    "TypeA",
+			wantMatched: true,
+		},
+		{
+			name:        "Exact match within multiple valid names",
+			typ:         typeA,
+			pkg:         "example.com/foo",
+			names:       []string{"TypeB", "TypeA", "TypeC"},
+			wantName:    "TypeA",
+			wantMatched: true,
+		},
+		{
+			name:        "Empty names list",
+			typ:         typeA,
+			pkg:         "example.com/foo",
+			names:       []string{},
+			wantName:    "",
+			wantMatched: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotMatched := MatchPkgAndName(tt.typ, tt.pkg, tt.names...)
+			assert.Equal(t, tt.wantName, gotName)
+			assert.Equal(t, tt.wantMatched, gotMatched)
+
+			
+			gotMatchesOnly := MatchesPkgAndName(tt.typ, tt.pkg, tt.names...)
+			assert.Equal(t, tt.wantMatched, gotMatchesOnly)
+		})
+	}
+}
