@@ -9,12 +9,19 @@ import (
 	"strconv"
 )
 
-
 // IsGeneratedFile reports whether file has the standard
 // `// Code generated ... DO NOT EDIT.` header. Apply at the report boundary
 // only: cross-file symbol maps must keep generated declarations.
 func IsGeneratedFile(file *ast.File) bool {
 	return ast.IsGenerated(file)
+}
+
+// DerefOnceAndUnalias removes a single pointer indirection from typ
+// and resolves aliases before and after dereferencing.
+func DerefOnceAndUnalias(typ types.Type) types.Type {
+	typ = types.Unalias(typ)
+	typ = DerefOnce(typ)
+	return types.Unalias(typ)
 }
 
 // DerefOnce removes a single pointer indirection from typ.

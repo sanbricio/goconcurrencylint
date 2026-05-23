@@ -207,6 +207,60 @@ func makeNamedType(pkgPath, name string, isPtr bool) types.Type {
 	return named
 }
 
+func TestDerefOnceAndUnalias(t *testing.T) {
+	pkg := types.NewPackage("example.com/test", "test")
+	intType := types.Typ[types.Int]
+
+	objAliasInt := types.NewTypeName(token.NoPos, pkg, "AliasInt", nil)
+	aliasInt := types.NewAlias(objAliasInt, intType)
+
+	ptrToInt := types.NewPointer(intType)
+
+	ptrToAliasInt := types.NewPointer(aliasInt)
+
+	objAliasPtr := types.NewTypeName(token.NoPos, pkg, "AliasPtr", nil)
+	aliasPtr := types.NewAlias(objAliasPtr, ptrToAliasInt)
+
+	tests := []struct {
+		name  string
+		input types.Type
+		want  types.Type
+	}{
+		{
+			name:  "Basic type (int) returns itself",
+			input: intType,
+			want:  intType,
+		},
+		{
+			name:  "Direct alias to basic type (AliasInt) unaliases to int",
+			input: aliasInt,
+			want:  intType,
+		},
+		{
+			name:  "Standard pointer (*int) dereferences directly to int",
+			input: ptrToInt,
+			want:  intType,
+		},
+		{
+			name:  "Pointer to alias (*AliasInt) dereferences and unaliases to int",
+			input: ptrToAliasInt,
+			want:  intType,
+		},
+		{
+			name:  "Alias to pointer to alias (AliasPtr -> *AliasInt -> int) fully resolves to int",
+			input: aliasPtr,
+			want:  intType,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DerefOnceAndUnalias(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestDerefOnce(t *testing.T) {
 	intType := types.Typ[types.Int]
 	ptrToInt := types.NewPointer(intType)

@@ -3,7 +3,6 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
-	"go/types"
 	"maps"
 	"sort"
 
@@ -595,8 +594,7 @@ func (ma *Analyzer) callMayBlock(call *ast.CallExpr) bool {
 	}
 
 	typ := ma.typesInfo.TypeOf(sel.X)
-	typ = types.Unalias(typ)
-	typ = common.DerefOnce(typ)
+	typ = common.DerefOnceAndUnalias(typ)
 
 	return common.MatchesPkgAndName(typ, "sync", "WaitGroup", "Cond")
 }
