@@ -31,9 +31,10 @@ type Analyzer struct {
 	tryLockResults         map[string]*tryLockResult
 	collectionLengths      map[string]int
 
-	// memoizes functionIsCallerManagedReleaseFor; validation.go calls it
-	// repeatedly with the same args per validation pass.
-	callerManagedCache map[callerManagedKey]bool
+	// Memoize hot validation lookups. The cached map in explicitTransferCache
+	// is shared by reference; callers must treat it as read-only.
+	callerManagedCache    map[callerManagedKey]bool
+	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
 }
 
 // goroutineLockConflict records a goroutine that was launched while the parent
@@ -79,14 +80,15 @@ type deferErrorCollector struct {
 // NewAnalyzer creates a new mutex analyzer
 func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
 	return &Analyzer{
-		mutexNames:         mutexNames,
-		rwMutexNames:       rwMutexNames,
-		errorCollector:     errorCollector,
-		commentFilter:      cf,
-		typesInfo:          typesInfo,
-		receiverMethods:    buildReceiverMethodMap(files),
-		functions:          collectFunctionDecls(files),
-		callerManagedCache: make(map[callerManagedKey]bool),
+		mutexNames:            mutexNames,
+		rwMutexNames:          rwMutexNames,
+		errorCollector:        errorCollector,
+		commentFilter:         cf,
+		typesInfo:             typesInfo,
+		receiverMethods:       buildReceiverMethodMap(files),
+		functions:             collectFunctionDecls(files),
+		callerManagedCache:    make(map[callerManagedKey]bool),
+		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
 		deferErrors: &deferErrorCollector{
 			badDeferUnlock:  make(map[string]bool),
 			badDeferRUnlock: make(map[string]bool),
@@ -112,6 +114,8 @@ func (ma *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.reportUnmatchedLocks(finalStats)
 }
 
+// Indexes generated files too so sibling-method lookups (e.g. wrapper
+// Lock/Unlock pairs split across the boundary) resolve.
 func buildReceiverMethodMap(files []*ast.File) map[string]map[string]*ast.FuncDecl {
 	methods := make(map[string]map[string]*ast.FuncDecl)
 
@@ -137,6 +141,8 @@ func buildReceiverMethodMap(files []*ast.File) map[string]map[string]*ast.FuncDe
 	return methods
 }
 
+// Includes generated files so functionIsCallerManagedReleaseFor sees every
+// call site of the current method.
 func collectFunctionDecls(files []*ast.File) []*ast.FuncDecl {
 	var functions []*ast.FuncDecl
 
@@ -755,10 +761,13 @@ func (ma *Analyzer) callTargetsCurrentMethod(call *ast.CallExpr, receiverType st
 }
 
 func (ma *Analyzer) explicitTransferCallPositions(body *ast.BlockStmt) map[token.Pos]struct{} {
-	positions := make(map[token.Pos]struct{})
 	if body == nil {
-		return positions
+		return nil
 	}
+	if cached, ok := ma.explicitTransferCache[body]; ok {
+		return cached
+	}
+	positions := make(map[token.Pos]struct{})
 	var (
 		visitStmt     func(ast.Stmt)
 		visitStmtList func([]ast.Stmt)
@@ -835,6 +844,7 @@ func (ma *Analyzer) explicitTransferCallPositions(body *ast.BlockStmt) map[token
 	}
 
 	visitStmtList(body.List)
+	ma.explicitTransferCache[body] = positions
 	return positions
 }
 

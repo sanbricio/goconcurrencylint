@@ -8,6 +8,13 @@ import (
 	"strconv"
 )
 
+// IsGeneratedFile reports whether file has the standard
+// `// Code generated ... DO NOT EDIT.` header. Apply at the report boundary
+// only: cross-file symbol maps must keep generated declarations.
+func IsGeneratedFile(file *ast.File) bool {
+	return ast.IsGenerated(file)
+}
+
 // IsMutex returns true if the given type is sync.Mutex or *sync.Mutex.
 func IsMutex(typ types.Type) bool {
 	if ptr, ok := typ.(*types.Pointer); ok {

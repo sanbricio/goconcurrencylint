@@ -65,6 +65,8 @@ func (wga *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
 	wga.validateUsage(stats)
 }
 
+// Includes generated files so relatedWaitGroupForCall can resolve helpers
+// that complete the Add/Done pair across the boundary.
 func buildFunctionDeclMap(files []*ast.File) map[token.Pos]*ast.FuncDecl {
 	functionDecls := make(map[token.Pos]*ast.FuncDecl)
 	for _, file := range files {
