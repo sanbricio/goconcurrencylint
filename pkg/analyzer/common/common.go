@@ -52,6 +52,7 @@ func IsWaitGroup(typ types.Type) bool {
 // or a compound name for selector expressions (e.g., "s.mu" for struct field access).
 // Returns "?" if the expression cannot be reduced to a name.
 func GetVarName(expr ast.Expr) string {
+	expr = UnwrapParenExpr(expr)
 	switch e := expr.(type) {
 	case *ast.Ident:
 		return e.Name
@@ -62,6 +63,22 @@ func GetVarName(expr ast.Expr) string {
 		}
 	}
 	return "?"
+}
+
+// UnwrapParenExpr returns the underlying expression stripped of any surrounding parentheses.
+//
+// It iteratively removes all layers of *ast.ParenExpr until a non-parenthesized
+// expression is found. If the input expression is not parenthesized or is nil,
+// it returns the original expression unchanged.
+func UnwrapParenExpr(expr ast.Expr) ast.Expr {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			return expr
+		}
+
+		expr = paren.X
+	}
 }
 
 // GetAddValue extracts the integer value from an Add() call.
