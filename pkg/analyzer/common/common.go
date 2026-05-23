@@ -17,17 +17,9 @@ func IsGeneratedFile(file *ast.File) bool {
 	return ast.IsGenerated(file)
 }
 
-
+// DerefOnce removes a single pointer indirection from typ.
 // Non-pointer types are returned unchanged.
 func DerefOnce(typ types.Type) types.Type {
-	if ptr, ok := typ.(*types.Pointer); ok {
-		return ptr.Elem()
-	}
-	return typ
-}
-
-// IsMutex returns true if the given type is sync.Mutex or *sync.Mutex.
-func IsMutex(typ types.Type) bool {
 	if ptr, ok := typ.(*types.Pointer); ok {
 		return ptr.Elem()
 	}
