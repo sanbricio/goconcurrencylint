@@ -737,84 +737,45 @@ func containsRecoverCall(node ast.Node) bool {
 
 // containsUnlock checks if a block contains an unlock call for a specific mutex
 func (ma *Analyzer) containsUnlock(block *ast.BlockStmt, mutexName string) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if ma.commentFilter.ShouldSkipCall(call) {
-				return true
-			}
-
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Unlock" && common.GetVarName(sel.X) == mutexName {
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return found
+	return ma.containsMutexMethodCall(block, mutexName, "Unlock")
 }
 
 // containsLock checks if a block contains a lock call for a specific mutex
 func (ma *Analyzer) containsLock(block *ast.BlockStmt, mutexName string) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if ma.commentFilter.ShouldSkipCall(call) {
-				return true
-			}
-
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "Lock" && common.GetVarName(sel.X) == mutexName {
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return found
+	return ma.containsMutexMethodCall(block, mutexName, "Lock")
 }
 
 // containsRUnlock checks if a block contains an runlock call for a specific rwmutex
 func (ma *Analyzer) containsRUnlock(block *ast.BlockStmt, mutexName string) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if ma.commentFilter.ShouldSkipCall(call) {
-				return true
-			}
-
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "RUnlock" && common.GetVarName(sel.X) == mutexName {
-					found = true
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return found
+	return ma.containsMutexMethodCall(block, mutexName, "RUnlock")
 }
 
 // containsRLock checks if a block contains an rlock call for a specific rwmutex
 func (ma *Analyzer) containsRLock(block *ast.BlockStmt, mutexName string) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if ma.commentFilter.ShouldSkipCall(call) {
-				return true
-			}
+	return ma.containsMutexMethodCall(block, mutexName, "RLock")
+}
 
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if sel.Sel.Name == "RLock" && common.GetVarName(sel.X) == mutexName {
-					found = true
-					return false
-				}
-			}
+// containsMutexMethodCall checks if a block contains a call to a specific
+// method on the given mutex variable.
+func (ma *Analyzer) containsMutexMethodCall(block *ast.BlockStmt, mutexName, method string) bool {
+	var found bool
+	ast.Inspect(block, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || ma.commentFilter.ShouldSkipCall(call) {
+			return true
 		}
-		return true
+
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+
+		if sel.Sel.Name == method &&
+			common.GetVarName(sel.X) == mutexName {
+			found = true
+		}
+
+		return !found
 	})
 	return found
 }
