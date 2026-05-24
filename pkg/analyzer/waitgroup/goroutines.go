@@ -3,6 +3,8 @@ package waitgroup
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
+	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
@@ -226,8 +228,18 @@ func (wga *Analyzer) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName st
 			var loopInfo doneCallInfo
 			if forStmt, ok := s.(*ast.ForStmt); ok && forStmt.Body != nil {
 				loopInfo = wga.analyzeDoneCallsWithVisited(forStmt.Body, wgName, visited)
+				if wga.loopHasCancellationDoneExit(forStmt.Body, wgName, visited) && !mightExitEarly {
+					info.hasAnyDone = true
+					info.hasGuaranteedDone = true
+					return info
+				}
 			} else if rangeStmt, ok := s.(*ast.RangeStmt); ok && rangeStmt.Body != nil {
 				loopInfo = wga.analyzeDoneCallsWithVisited(rangeStmt.Body, wgName, visited)
+				if wga.loopHasCancellationDoneExit(rangeStmt.Body, wgName, visited) && !mightExitEarly {
+					info.hasAnyDone = true
+					info.hasGuaranteedDone = true
+					return info
+				}
 			}
 			info.hasAnyDone = info.hasAnyDone || loopInfo.hasAnyDone
 			// Note: We don't set hasGuaranteedDone for loops
@@ -237,6 +249,14 @@ func (wga *Analyzer) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName st
 			blockInfo := wga.analyzeDoneCallsWithVisited(s, wgName, visited)
 			info.hasAnyDone = info.hasAnyDone || blockInfo.hasAnyDone
 			if blockInfo.hasGuaranteedDone {
+				info.hasGuaranteedDone = true
+				return info
+			}
+
+		case *ast.LabeledStmt:
+			labeledInfo := wga.analyzeDoneCallsWithVisited(&ast.BlockStmt{List: []ast.Stmt{s.Stmt}}, wgName, visited)
+			info.hasAnyDone = info.hasAnyDone || labeledInfo.hasAnyDone
+			if labeledInfo.hasGuaranteedDone {
 				info.hasGuaranteedDone = true
 				return info
 			}
@@ -344,6 +364,84 @@ func (wga *Analyzer) analyzeSelectStatementWithVisited(selectStmt *ast.SelectStm
 	}
 
 	return info
+}
+
+func (wga *Analyzer) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName string, visited map[token.Pos]bool) bool {
+	if body == nil {
+		return false
+	}
+
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		selectStmt, ok := n.(*ast.SelectStmt)
+		if !ok {
+			return true
+		}
+		for _, stmt := range selectStmt.Body.List {
+			cc, ok := stmt.(*ast.CommClause)
+			if !ok || !wga.commClauseReceivesDoneSignal(cc) {
+				continue
+			}
+			caseBlock := &ast.BlockStmt{List: cc.Body}
+			caseInfo := wga.analyzeDoneCallsWithVisited(caseBlock, wgName, visited)
+			if caseInfo.hasGuaranteedDone && wga.blockAlwaysTerminates(caseBlock) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func (wga *Analyzer) commClauseReceivesDoneSignal(cc *ast.CommClause) bool {
+	if cc == nil || cc.Comm == nil {
+		return false
+	}
+
+	switch comm := cc.Comm.(type) {
+	case *ast.ExprStmt:
+		return wga.exprReceivesDoneSignal(comm.X)
+	case *ast.AssignStmt:
+		if slices.ContainsFunc(comm.Rhs, wga.exprReceivesDoneSignal) {
+			return true
+		}
+	}
+	return false
+}
+
+func (wga *Analyzer) exprReceivesDoneSignal(expr ast.Expr) bool {
+	unary, ok := expr.(*ast.UnaryExpr)
+	if !ok || unary.Op != token.ARROW {
+		return false
+	}
+	call, ok := unary.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Done" && wga.callReturnsContextDoneSignal(sel.X, call)
+}
+
+func (wga *Analyzer) callReturnsContextDoneSignal(receiver ast.Expr, call *ast.CallExpr) bool {
+	if wga.typesInfo == nil {
+		return false
+	}
+	receiverType := types.Unalias(wga.typesInfo.TypeOf(receiver))
+	if !common.MatchesPkgAndName(receiverType, "context", "Context") {
+		return false
+	}
+	typ := types.Unalias(wga.typesInfo.TypeOf(call))
+	ch, ok := typ.(*types.Chan)
+	if !ok || ch.Dir() == types.SendOnly {
+		return false
+	}
+	elem := types.Unalias(ch.Elem()).Underlying()
+	st, ok := elem.(*types.Struct)
+	return ok && st.NumFields() == 0
 }
 
 func (wga *Analyzer) analyzeRelatedCall(call *ast.CallExpr, wgName string, visited map[token.Pos]bool) (doneCallInfo, bool) {
@@ -464,7 +562,7 @@ func (wga *Analyzer) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName s
 
 	typ := wga.typesInfo.TypeOf(sel.X)
 	typ = common.DerefOnce(typ)
-	
+
 	return common.MatchesPkgAndName(typ, "sync", "Once")
 }
 

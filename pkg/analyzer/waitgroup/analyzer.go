@@ -30,6 +30,7 @@ type Analyzer struct {
 type addCall struct {
 	pos   token.Pos
 	value int
+	known bool
 }
 
 // Stats tracks the state of a WaitGroup within a function
@@ -119,11 +120,13 @@ func (wga *Analyzer) handleAddCall(call *ast.CallExpr, wgName string, stats map[
 	}
 
 	addValue := common.GetAddValue(call)
+	addKnown := false
 	if len(call.Args) > 0 {
-		if constantValue, ok := common.ConstantIntValue(call.Args[0], wga.typesInfo); ok {
+		if constantValue, ok := wga.addValueAt(call.Args[0], call.Pos()); ok {
 			// Keep exact typed constants so balance and literal loop checks see
 			// wg.Add(workers) the same way they see wg.Add(4).
 			addValue = constantValue
+			addKnown = true
 			if addValue < 0 {
 				wga.errorCollector.AddError(call.Pos(), category.AddNegative, "waitgroup '"+wgName+"' has negative Add("+strconv.Itoa(addValue)+")")
 			}
@@ -135,8 +138,28 @@ func (wga *Analyzer) handleAddCall(call *ast.CallExpr, wgName string, stats map[
 	stats[wgName].addCalls = append(stats[wgName].addCalls, addCall{
 		pos:   call.Pos(),
 		value: addValue,
+		known: addKnown,
 	})
 	stats[wgName].totalAdd += addValue
+}
+
+func (wga *Analyzer) addValueAt(expr ast.Expr, pos token.Pos) (int, bool) {
+	if value, ok := common.ConstantIntValue(expr, wga.typesInfo); ok {
+		return value, true
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return 0, false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "len" {
+		return 0, false
+	}
+	argIdent, ok := call.Args[0].(*ast.Ident)
+	if !ok {
+		return 0, false
+	}
+	return wga.collectionLengthBefore(argIdent.Name, pos)
 }
 
 // handleDoneCall processes Done() calls
@@ -225,6 +248,11 @@ func (wga *Analyzer) isWaitGroupPassedToOtherFunctions(wgName string) bool {
 					return false
 				}
 			}
+		case *ast.SendStmt:
+			if wga.sendEscapesWaitGroup(node, wgName, localCallbacks) {
+				found = true
+				return false
+			}
 		case *ast.ReturnStmt:
 			for _, result := range node.Results {
 				if wga.exprEscapesWaitGroup(result, wgName, localCallbacks, make(map[string]bool)) {
@@ -236,6 +264,17 @@ func (wga *Analyzer) isWaitGroupPassedToOtherFunctions(wgName string) bool {
 		return true
 	})
 	return found
+}
+
+func (wga *Analyzer) sendEscapesWaitGroup(send *ast.SendStmt, wgName string, callbacks map[string]ast.Expr) bool {
+	if send == nil || !wga.exprEscapesWaitGroup(send.Value, wgName, callbacks, make(map[string]bool)) {
+		return false
+	}
+	chanName := common.GetVarName(send.Chan)
+	if chanName == "" || chanName == "?" {
+		return true
+	}
+	return !wga.isLocallyCreatedChannel(chanName)
 }
 
 func (wga *Analyzer) collectLocalCallbackExprs() map[string]ast.Expr {
@@ -495,6 +534,9 @@ func (wga *Analyzer) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) 
 
 		for i := 0; i < fieldArity && argIndex < len(call.Args); i++ {
 			if !wga.isWaitGroupArgument(call.Args[argIndex], wgName) {
+				if calleeWGName, ok := wga.calleeWaitGroupNameForArg(call.Args[argIndex], wgName, field, i); ok {
+					return fn, calleeWGName, true
+				}
 				argIndex++
 				continue
 			}
@@ -512,4 +554,18 @@ func (wga *Analyzer) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) 
 	}
 
 	return nil, "", false
+}
+
+func (wga *Analyzer) calleeWaitGroupNameForArg(arg ast.Expr, wgName string, field *ast.Field, fieldIndex int) (string, bool) {
+	argName := common.GetVarName(arg)
+	if argName == "" || argName == "?" {
+		return "", false
+	}
+
+	prefix := argName + "."
+	if !strings.HasPrefix(wgName, prefix) || fieldIndex >= len(field.Names) {
+		return "", false
+	}
+
+	return field.Names[fieldIndex].Name + strings.TrimPrefix(wgName, argName), true
 }

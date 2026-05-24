@@ -59,6 +59,53 @@ func BadGoroutineWaitGroupWaitsBeforeParentUnlocks() {
 	mu.Unlock()
 }
 
+func BadCrossGoroutineUnlockCompletedBeforeLaterLockOrder() {
+	var fsMu, blockMu sync.RWMutex
+	var ready sync.WaitGroup
+	var wg sync.WaitGroup
+
+	ready.Add(1)
+	wg.Add(1)
+	blockMu.Lock()
+	go func() {
+		ready.Done()
+		defer wg.Done()
+		fsMu.Lock()
+		fsMu.Unlock()
+		blockMu.Unlock() // want "mutex 'blockMu' is unlocked in a different goroutine than it was locked"
+	}()
+
+	ready.Wait()
+	wg.Wait()
+
+	fsMu.RLock()
+	blockMu.RLock()
+	blockMu.RUnlock()
+	fsMu.RUnlock()
+}
+
+func BadFutureWaitGroupReleaseDoesNotBreakCurrentLockOrder() {
+	var a, b sync.Mutex
+	var wg sync.WaitGroup
+
+	b.Lock()
+	a.Lock()
+	a.Unlock()
+	b.Unlock()
+
+	wg.Add(1)
+	a.Lock()
+	wg.Wait()
+
+	b.Lock() // want "mutex lock order cycle between 'a' and 'b'"
+	b.Unlock()
+
+	go func() {
+		defer wg.Done()
+		a.Unlock() // want "mutex 'a' is unlocked in a different goroutine than it was locked"
+	}()
+}
+
 type customWaiter struct{}
 
 func (customWaiter) Wait() {}

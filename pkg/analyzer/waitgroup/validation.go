@@ -50,7 +50,6 @@ func (wga *Analyzer) validateBalance(wgName string, stats *Stats) {
 	guaranteedFromGoroutines := wga.countGuaranteedDoneInGoroutines(wgName)
 	totalDone += guaranteedFromGoroutines
 
-	// Check for balance and report errors
 	if stats.totalAdd > totalDone {
 		wga.reportUnmatchedAdds(wgName, stats, totalDone)
 	}
@@ -260,8 +259,15 @@ func (wga *Analyzer) countGuaranteedDoneInStatements(stmts []ast.Stmt, wgName st
 }
 
 func (wga *Analyzer) estimateForIterations(forStmt *ast.ForStmt) int {
+	if iterations, ok := wga.estimateForIterationsKnown(forStmt); ok {
+		return iterations
+	}
+	return 1
+}
+
+func (wga *Analyzer) estimateForIterationsKnown(forStmt *ast.ForStmt) (int, bool) {
 	if forStmt == nil {
-		return 1
+		return 0, false
 	}
 
 	start := 0
@@ -277,73 +283,285 @@ func (wga *Analyzer) estimateForIterations(forStmt *ast.ForStmt) int {
 	}
 
 	if counterName == "" {
-		return 1
+		return 0, false
 	}
 
 	cond, ok := forStmt.Cond.(*ast.BinaryExpr)
 	if !ok {
-		return 1
+		return 0, false
 	}
 	left, ok := cond.X.(*ast.Ident)
 	if !ok || left.Name != counterName {
-		return 1
+		return 0, false
 	}
 	limit, ok := common.ConstantIntValue(cond.Y, wga.typesInfo)
 	if !ok {
-		return 1
+		return 0, false
 	}
 
-	switch post := forStmt.Post.(type) {
-	case *ast.IncDecStmt:
-		if ident, ok := post.X.(*ast.Ident); !ok || ident.Name != counterName || post.Tok != token.INC {
-			return 1
-		}
-	case *ast.AssignStmt:
-		if len(post.Lhs) != 1 || len(post.Rhs) != 1 {
-			return 1
-		}
-		ident, ok := post.Lhs[0].(*ast.Ident)
-		if !ok || ident.Name != counterName {
-			return 1
-		}
-		if post.Tok != token.ADD_ASSIGN {
-			return 1
-		}
-		if lit, ok := post.Rhs[0].(*ast.BasicLit); !ok || lit.Kind != token.INT || parseIntLiteral(lit) != 1 {
-			return 1
-		}
-	default:
-		return 1
+	if !wga.loopIncrementsCounterByOne(forStmt, counterName) {
+		return 0, false
 	}
 
 	switch cond.Op {
 	case token.LSS:
 		if limit <= start {
-			return 1
+			return 1, true
 		}
-		return limit - start
+		return limit - start, true
 	case token.LEQ:
 		if limit < start {
-			return 1
+			return 1, true
 		}
-		return limit - start + 1
+		return limit - start + 1, true
 	default:
-		return 1
+		return 0, false
 	}
 }
 
 func (wga *Analyzer) estimateRangeIterations(rangeStmt *ast.RangeStmt) int {
+	if iterations, ok := wga.estimateRangeIterationsKnown(rangeStmt); ok {
+		return iterations
+	}
+	return 1
+}
+
+func (wga *Analyzer) estimateRangeIterationsKnown(rangeStmt *ast.RangeStmt) (int, bool) {
 	if rangeStmt == nil || rangeStmt.X == nil {
-		return 1
+		return 0, false
+	}
+
+	if lit, ok := rangeStmt.X.(*ast.CompositeLit); ok {
+		return len(lit.Elts), true
+	}
+	if ident, ok := rangeStmt.X.(*ast.Ident); ok {
+		if length, ok := wga.collectionLengthBefore(ident.Name, rangeStmt.Pos()); ok {
+			return length, true
+		}
 	}
 
 	if tv, ok := wga.typesInfo.Types[rangeStmt.X]; ok && tv.Value != nil {
 		if value, ok := constant.Int64Val(tv.Value); ok && value > 0 {
-			return int(value)
+			return int(value), true
 		}
 	}
 
-	return 1
+	return 0, false
+}
+
+func (wga *Analyzer) loopIncrementsCounterByOne(forStmt *ast.ForStmt, counterName string) bool {
+	if forStmt == nil || counterName == "" {
+		return false
+	}
+	if forStmt.Post != nil {
+		return wga.statementIncrementsCounterByOne(forStmt.Post, counterName)
+	}
+	for _, stmt := range forStmt.Body.List {
+		if wga.statementIncrementsCounterByOne(stmt, counterName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (wga *Analyzer) statementIncrementsCounterByOne(stmt ast.Stmt, counterName string) bool {
+	switch post := stmt.(type) {
+	case *ast.IncDecStmt:
+		ident, ok := post.X.(*ast.Ident)
+		return ok && ident.Name == counterName && post.Tok == token.INC
+	case *ast.AssignStmt:
+		if len(post.Lhs) != 1 || len(post.Rhs) != 1 || post.Tok != token.ADD_ASSIGN {
+			return false
+		}
+		ident, ok := post.Lhs[0].(*ast.Ident)
+		if !ok || ident.Name != counterName {
+			return false
+		}
+		lit, ok := post.Rhs[0].(*ast.BasicLit)
+		return ok && lit.Kind == token.INT && parseIntLiteral(lit) == 1
+	default:
+		return false
+	}
+}
+
+func (wga *Analyzer) collectionLengthBefore(name string, before token.Pos) (int, bool) {
+	if wga.function == nil || wga.function.Body == nil || name == "" {
+		return 0, false
+	}
+
+	lengths := make(map[string]int)
+	known := make(map[string]bool)
+	wga.collectCollectionLengthsBefore(wga.function.Body.List, before, 1, lengths, known)
+	length, ok := lengths[name]
+	return length, ok && known[name]
+}
+
+func (wga *Analyzer) collectCollectionLengthsBefore(stmts []ast.Stmt, before token.Pos, multiplier int, lengths map[string]int, known map[string]bool) bool {
+	for _, stmt := range stmts {
+		if stmt == nil || stmt.Pos() >= before {
+			return false
+		}
+		if wga.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.DeclStmt:
+			wga.recordCollectionDeclLengths(s, lengths, known)
+		case *ast.AssignStmt:
+			wga.recordCollectionAssignLengths(s, multiplier, lengths, known)
+		case *ast.ForStmt:
+			iterations, ok := wga.estimateForIterationsKnown(s)
+			if !ok || s.Body == nil {
+				continue
+			}
+			if !wga.collectCollectionLengthsBefore(s.Body.List, before, multiplier*iterations, lengths, known) {
+				return false
+			}
+		case *ast.RangeStmt:
+			iterations, ok := wga.estimateRangeIterationsKnown(s)
+			if !ok || s.Body == nil {
+				continue
+			}
+			if !wga.collectCollectionLengthsBefore(s.Body.List, before, multiplier*iterations, lengths, known) {
+				return false
+			}
+		case *ast.BlockStmt:
+			if !wga.collectCollectionLengthsBefore(s.List, before, multiplier, lengths, known) {
+				return false
+			}
+		case *ast.LabeledStmt:
+			if !wga.collectCollectionLengthsBefore([]ast.Stmt{s.Stmt}, before, multiplier, lengths, known) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (wga *Analyzer) recordCollectionDeclLengths(stmt *ast.DeclStmt, lengths map[string]int, known map[string]bool) {
+	gen, ok := stmt.Decl.(*ast.GenDecl)
+	if !ok {
+		return
+	}
+	for _, spec := range gen.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, name := range vs.Names {
+			if i < len(vs.Values) {
+				wga.setCollectionLength(name.Name, vs.Values[i], lengths, known)
+				continue
+			}
+			if length, ok := wga.collectionLengthFromType(vs.Type); ok {
+				lengths[name.Name] = length
+				known[name.Name] = true
+			}
+		}
+	}
+}
+
+func (wga *Analyzer) recordCollectionAssignLengths(stmt *ast.AssignStmt, multiplier int, lengths map[string]int, known map[string]bool) {
+	for i, lhs := range stmt.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || i >= len(stmt.Rhs) {
+			continue
+		}
+		if wga.recordAppendLength(ident.Name, stmt.Rhs[i], multiplier, lengths, known) {
+			continue
+		}
+		wga.setCollectionLength(ident.Name, stmt.Rhs[i], lengths, known)
+	}
+}
+
+func (wga *Analyzer) setCollectionLength(name string, expr ast.Expr, lengths map[string]int, known map[string]bool) {
+	length, ok := wga.collectionLengthFromExpr(expr, lengths, known)
+	if !ok {
+		delete(lengths, name)
+		delete(known, name)
+		return
+	}
+	lengths[name] = length
+	known[name] = true
+}
+
+func (wga *Analyzer) recordAppendLength(name string, expr ast.Expr, multiplier int, lengths map[string]int, known map[string]bool) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "append" || len(call.Args) < 2 {
+		return false
+	}
+	target, ok := call.Args[0].(*ast.Ident)
+	if !ok || target.Name != name || !known[name] || call.Ellipsis.IsValid() {
+		delete(lengths, name)
+		delete(known, name)
+		return true
+	}
+	lengths[name] += (len(call.Args) - 1) * multiplier
+	return true
+}
+
+func (wga *Analyzer) collectionLengthFromExpr(expr ast.Expr, lengths map[string]int, known map[string]bool) (int, bool) {
+	switch e := expr.(type) {
+	case *ast.CompositeLit:
+		return len(e.Elts), true
+	case *ast.Ident:
+		length, ok := lengths[e.Name]
+		return length, ok && known[e.Name]
+	case *ast.SliceExpr:
+		return wga.sliceExprLength(e, lengths, known)
+	case *ast.CallExpr:
+		return wga.makeCollectionLength(e)
+	default:
+		return 0, false
+	}
+}
+
+func (wga *Analyzer) sliceExprLength(expr *ast.SliceExpr, lengths map[string]int, known map[string]bool) (int, bool) {
+	low := 0
+	if expr.Low != nil {
+		value, ok := common.ConstantIntValue(expr.Low, wga.typesInfo)
+		if !ok {
+			return 0, false
+		}
+		low = value
+	}
+	if expr.High != nil {
+		high, ok := common.ConstantIntValue(expr.High, wga.typesInfo)
+		if !ok || high < low {
+			return 0, false
+		}
+		return high - low, true
+	}
+	if ident, ok := expr.X.(*ast.Ident); ok {
+		length, ok := lengths[ident.Name]
+		return length - low, ok && known[ident.Name] && length >= low
+	}
+	return 0, false
+}
+
+func (wga *Analyzer) makeCollectionLength(call *ast.CallExpr) (int, bool) {
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != "make" || len(call.Args) < 2 {
+		return 0, false
+	}
+	length, ok := common.ConstantIntValue(call.Args[1], wga.typesInfo)
+	return length, ok
+}
+
+func (wga *Analyzer) collectionLengthFromType(expr ast.Expr) (int, bool) {
+	switch typ := expr.(type) {
+	case *ast.ArrayType:
+		if typ.Len == nil {
+			return 0, true
+		}
+		return common.ConstantIntValue(typ.Len, wga.typesInfo)
+	default:
+		return 0, false
+	}
 }
 
 func parseIntLiteral(lit *ast.BasicLit) int {
@@ -370,10 +588,87 @@ func (wga *Analyzer) reportUnmatchedAdds(wgName string, stats *Stats, totalExpec
 	for _, addCall := range stats.addCalls {
 		if remainingDone >= addCall.value {
 			remainingDone -= addCall.value
+		} else if !addCall.known && wga.addCoveredByVariableDoneLoop(addCall.pos, wgName) {
+			continue
 		} else {
 			wga.errorCollector.AddError(addCall.pos, category.AddWithoutDone, "waitgroup '"+wgName+"' has Add without corresponding Done")
 		}
 	}
+}
+
+func (wga *Analyzer) addCoveredByVariableDoneLoop(addPos token.Pos, wgName string) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch loop := n.(type) {
+		case *ast.ForStmt:
+			if nodeContainsPos(loop.Body, addPos) && wga.loopBodyHasVariableDoneWorker(loop.Body, addPos, wgName) {
+				found = true
+				return false
+			}
+		case *ast.RangeStmt:
+			if nodeContainsPos(loop.Body, addPos) && wga.loopBodyHasVariableDoneWorker(loop.Body, addPos, wgName) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func (wga *Analyzer) loopBodyHasVariableDoneWorker(body *ast.BlockStmt, after token.Pos, wgName string) bool {
+	if body == nil {
+		return false
+	}
+	for _, stmt := range body.List {
+		if stmt == nil || stmt.Pos() <= after {
+			continue
+		}
+		goStmt, ok := stmt.(*ast.GoStmt)
+		if !ok {
+			continue
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			continue
+		}
+		if wga.blockHasVariableDoneLoop(fnLit.Body, wgName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (wga *Analyzer) blockHasVariableDoneLoop(body *ast.BlockStmt, wgName string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch loop := n.(type) {
+		case *ast.ForStmt:
+			if _, ok := wga.estimateForIterationsKnown(loop); ok {
+				return true
+			}
+			if wga.containsDoneCall(loop.Body, wgName) {
+				found = true
+				return false
+			}
+		case *ast.RangeStmt:
+			if _, ok := wga.estimateRangeIterationsKnown(loop); ok {
+				return true
+			}
+			if wga.containsDoneCall(loop.Body, wgName) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // reportExcessDones reports Done calls that don't have corresponding Add calls
