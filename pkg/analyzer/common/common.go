@@ -154,6 +154,23 @@ func ConstantIntValue(expr ast.Expr, info *types.Info) (int, bool) {
 	return int(value), true
 }
 
+// IsConstantIntExpr reports whether expr is a compile-time integer constant
+// (literal, named const, or unary +/- of those). Returns false for runtime
+// expressions like len(x), variables, or function calls.
+func IsConstantIntExpr(expr ast.Expr, info *types.Info) bool {
+	if expr == nil {
+		return false
+	}
+	if _, ok := IntegerLiteralValue(expr); ok {
+		return true
+	}
+	if info == nil {
+		return false
+	}
+	tv, ok := info.Types[expr]
+	return ok && tv.Value != nil && tv.Value.Kind() == constant.Int
+}
+
 // IntegerLiteralValue extracts a signed integer literal value when expr is a
 // basic integer literal or a unary +/- integer literal.
 func IntegerLiteralValue(expr ast.Expr) (int, bool) {

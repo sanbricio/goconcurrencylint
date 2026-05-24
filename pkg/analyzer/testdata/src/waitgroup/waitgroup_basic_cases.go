@@ -136,6 +136,43 @@ func GoodAddPositive() {
 	wg.Wait()
 }
 
+// Slice mutated through a captured closure before the Add: len(senders) is
+// statically 0 but non-zero at runtime, so Add(0) must not fire.
+func GoodAddLenSliceMutatedThroughClosure() {
+	var senders []int
+	createSenders := func() {
+		for i := 0; i < 25; i++ {
+			senders = append(senders, i)
+		}
+	}
+	createSenders()
+	var wg sync.WaitGroup
+	wg.Add(len(senders))
+	for range senders {
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+// Map populated dynamically from an input parameter: len() is a runtime
+// expression, Add(0) must not fire.
+func GoodAddLenMapPopulatedDynamically(inputs []int) {
+	taskInfoPerShard := map[int]int{}
+	for _, taskInfo := range inputs {
+		taskInfoPerShard[taskInfo] = taskInfo
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(taskInfoPerShard))
+	for range taskInfoPerShard {
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
 // ---------- Wait Ordering Patterns ----------
 
 // Add after Wait (illegal, Wait should be called after all Adds)
