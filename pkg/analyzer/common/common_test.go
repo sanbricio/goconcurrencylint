@@ -159,6 +159,36 @@ func TestIntegerLiteralValue(t *testing.T) {
 	}
 }
 
+func TestIsConstantIntExpr(t *testing.T) {
+	literalZero := &ast.BasicLit{Kind: token.INT, Value: "0"}
+	literalFive := &ast.BasicLit{Kind: token.INT, Value: "5"}
+	constIdent := &ast.Ident{Name: "K"}
+	unaryNegLit := &ast.UnaryExpr{Op: token.SUB, X: &ast.BasicLit{Kind: token.INT, Value: "3"}}
+	lenCall := &ast.CallExpr{Fun: &ast.Ident{Name: "len"}, Args: []ast.Expr{&ast.Ident{Name: "s"}}}
+	varIdent := &ast.Ident{Name: "n"}
+
+	info := &types.Info{
+		Types: map[ast.Expr]types.TypeAndValue{
+			constIdent: {Value: constant.MakeInt64(7)},
+			lenCall:    {Value: nil},
+			varIdent:   {Value: nil},
+		},
+	}
+
+	assert.True(t, IsConstantIntExpr(literalZero, info))
+	assert.True(t, IsConstantIntExpr(literalFive, info))
+	assert.True(t, IsConstantIntExpr(unaryNegLit, info))
+	assert.True(t, IsConstantIntExpr(constIdent, info))
+
+	assert.False(t, IsConstantIntExpr(lenCall, info))
+	assert.False(t, IsConstantIntExpr(varIdent, info))
+	assert.False(t, IsConstantIntExpr(nil, info))
+
+	// Literals resolve without types.Info; non-literal idents do not.
+	assert.True(t, IsConstantIntExpr(literalZero, nil))
+	assert.False(t, IsConstantIntExpr(constIdent, nil))
+}
+
 func TestConstantBoolValue(t *testing.T) {
 	trueExpr := &ast.Ident{Name: "always"}
 	falseExpr := &ast.Ident{Name: "never"}

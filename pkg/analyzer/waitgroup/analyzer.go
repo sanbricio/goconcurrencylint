@@ -130,7 +130,9 @@ func (wga *Analyzer) handleAddCall(call *ast.CallExpr, wgName string, stats map[
 			if addValue < 0 {
 				wga.errorCollector.AddError(call.Pos(), category.AddNegative, "waitgroup '"+wgName+"' has negative Add("+strconv.Itoa(addValue)+")")
 			}
-			if addValue == 0 {
+			// Require a compile-time constant: the len(ident) heuristic above
+			// can underestimate when the collection is mutated through a closure.
+			if addValue == 0 && common.IsConstantIntExpr(call.Args[0], wga.typesInfo) {
 				wga.errorCollector.AddError(call.Pos(), category.AddZero, "waitgroup '"+wgName+"' Add(0) is a no-op")
 			}
 		}
