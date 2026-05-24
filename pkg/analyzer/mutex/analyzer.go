@@ -30,11 +30,15 @@ type Analyzer struct {
 	goroutineLockConflicts []goroutineLockConflict
 	tryLockResults         map[string]*tryLockResult
 	collectionLengths      map[string]int
+	terminatingTailDepth   int
 
 	// Memoize hot validation lookups. The cached map in explicitTransferCache
 	// is shared by reference; callers must treat it as read-only.
 	callerManagedCache    map[callerManagedKey]bool
 	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
+
+	// labelGotoSnapshots stores lock state from `goto label` edges.
+	labelGotoSnapshots map[string]map[string]*Stats
 }
 
 // goroutineLockConflict records a goroutine that was launched while the parent
@@ -103,6 +107,8 @@ func (ma *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.goroutineLockConflicts = nil
 	ma.tryLockResults = make(map[string]*tryLockResult)
 	ma.collectionLengths = make(map[string]int)
+	ma.labelGotoSnapshots = nil
+	ma.terminatingTailDepth = 0
 	ma.deferErrors = &deferErrorCollector{
 		badDeferUnlock:  make(map[string]bool),
 		badDeferRUnlock: make(map[string]bool),
@@ -914,6 +920,82 @@ func (ma *Analyzer) computeCallerManagedReleaseFor(mutexName string, methodNames
 	}
 
 	return totalCallSites > 0
+}
+
+// functionIsParameterUnlockHelper reports helpers that only release a mutex
+// parameter.
+func (ma *Analyzer) functionIsParameterUnlockHelper(varName string, acquireMethods []string) bool {
+	if ma.function == nil || ma.function.Body == nil {
+		return false
+	}
+	if !ma.varRootIsFunctionParameter(varName) {
+		return false
+	}
+
+	releaseSet := make(map[string]struct{})
+	for _, acquire := range acquireMethods {
+		if release := matchingUnlockMethod(acquire); release != "" {
+			releaseSet[release] = struct{}{}
+		}
+	}
+	if len(releaseSet) == 0 {
+		return false
+	}
+
+	acquireSet := make(map[string]struct{}, len(acquireMethods))
+	for _, acquire := range acquireMethods {
+		acquireSet[acquire] = struct{}{}
+	}
+
+	sawRelease := false
+	sawAcquire := false
+	ast.Inspect(ma.function.Body, func(n ast.Node) bool {
+		if sawAcquire {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if common.GetVarName(sel.X) != varName {
+			return true
+		}
+		if _, ok := acquireSet[sel.Sel.Name]; ok {
+			sawAcquire = true
+			return false
+		}
+		if _, ok := releaseSet[sel.Sel.Name]; ok {
+			sawRelease = true
+		}
+		return true
+	})
+	return sawRelease && !sawAcquire
+}
+
+// varRootIsFunctionParameter reports whether `varName` starts at a parameter.
+func (ma *Analyzer) varRootIsFunctionParameter(varName string) bool {
+	if ma.function == nil || ma.function.Type == nil || ma.function.Type.Params == nil {
+		return false
+	}
+	base := varName
+	if dot := strings.IndexByte(varName, '.'); dot != -1 {
+		base = varName[:dot]
+	}
+	for _, field := range ma.function.Type.Params.List {
+		for _, name := range field.Names {
+			if name.Name == base {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (ma *Analyzer) clearStats(stats map[string]*Stats) {

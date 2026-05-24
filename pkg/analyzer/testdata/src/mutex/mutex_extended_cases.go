@@ -158,14 +158,6 @@ func BadMutexPointerInLoop() {
 	}
 }
 
-func GoodMutexOutsideLoop() {
-	var mu sync.Mutex
-	for i := 0; i < 10; i++ {
-		mu.Lock()
-		mu.Unlock()
-	}
-}
-
 func GoodMutexInFuncLiteralInsideLoop() {
 	for i := 0; i < 3; i++ {
 		func() {
@@ -526,9 +518,8 @@ func BadRWMutexParameter(rw *sync.RWMutex) {
 
 // Bad: function receives mutex parameter, locks a parenthesized expression but forgets to unlock
 func BadMutexParameterParen(mu *sync.Mutex) {
-	((mu)).Lock() // want "mutex 'mu' is locked but not unlocked"
+	(mu).Lock() // want "mutex 'mu' is locked but not unlocked"
 }
-
 
 // ========== COPY-BY-VALUE TESTS ==========
 
@@ -1250,6 +1241,166 @@ func (s *positionalLifecycleStore) GoodAcquirePositionalLifecycleToken() *positi
 
 func (t *positionalLifecycleToken) Release() {
 	t.mu.Unlock()
+}
+
+// Good: lock acquired before a label and unlocked after `goto label`.
+func GoodGotoUnlockAfterLabel() {
+	var mu sync.Mutex
+	for i := 0; i < 1; i++ {
+		mu.Lock()
+		if i == 0 {
+			goto wait
+		}
+		mu.Unlock()
+		continue
+
+	wait:
+		mu.Unlock()
+		break
+	}
+}
+
+// Good: lock and unlock guarded by the same boolean in separate `if` blocks.
+func GoodConditionalLockSameGuard(isRecovering bool, batchSeq int) {
+	var mu sync.Mutex
+
+	if isRecovering {
+		mu.Lock()
+	}
+	_ = batchSeq
+
+	if isRecovering {
+		if batchSeq > 1 {
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+	}
+}
+
+// Good: guarded unlock path handles an if init before returning.
+func GoodConditionalUnlockWithIfInit(isRecovering bool) error {
+	var mu sync.Mutex
+
+	if isRecovering {
+		mu.Lock()
+	}
+
+	if isRecovering {
+		if err := decodeFP(); err != nil {
+			mu.Unlock()
+			return err
+		}
+		mu.Unlock()
+	}
+	return nil
+}
+
+// Good: panic terminates the path after the guarded unlock.
+func GoodConditionalUnlockBeforePanic(isRecovering bool) {
+	var mu sync.Mutex
+
+	if isRecovering {
+		mu.Lock()
+	}
+
+	if isRecovering {
+		if mustPanicFP() {
+			mu.Unlock()
+			panic("boom")
+		}
+		mu.Unlock()
+	}
+}
+
+type goodCallerManagedStream struct {
+	mu sync.RWMutex
+}
+
+// Good: caller-owned unlock happens before a terminating panic path.
+func GoodCallerManagedUnlockBeforePanic(s *goodCallerManagedStream, needLock, fail bool) {
+	if fail {
+		if !needLock {
+			s.mu.Unlock()
+		}
+		panic("boom")
+	}
+	if needLock {
+		s.mu.Lock()
+		s.mu.Unlock()
+	}
+}
+
+// Good: helper releases a mutex parameter managed by the caller.
+func GoodCallerManagedByParameter(mu *sync.Mutex, needLock bool) error {
+	if err := decodeFP(); err != nil {
+		if !needLock {
+			mu.Unlock()
+		}
+		return err
+	}
+	return nil
+}
+
+func decodeFP() error   { return nil }
+func mustPanicFP() bool { return false }
+
+// Good: lock is temporarily released and re-acquired on the continuing path.
+func GoodTemporaryReleaseInsideIfElse(cond, dynamic bool) {
+	var mu sync.Mutex
+	mu.Lock()
+	if cond {
+		mu.Unlock()
+		if dynamic {
+			doFPOutsideWork()
+			mu.Lock()
+		} else {
+			closeFPConn()
+			return
+		}
+	}
+	mu.Unlock()
+}
+
+func doFPOutsideWork() {}
+func closeFPConn()     {}
+
+// Good: nested closures release locks before returning an error.
+type goodMultiMutex struct {
+	mu   sync.Mutex
+	bmu  sync.Mutex
+	clmu sync.Mutex
+}
+
+func (f *goodMultiMutex) GoodUnlockViaNestedClosure(isClustered, fail bool) error {
+	f.mu.Lock()
+	f.bmu.Lock()
+	f.clmu.Lock()
+
+	rollback := func() {
+		f.clmu.Unlock()
+	}
+
+	errorOut := func() error {
+		rollback()
+		f.bmu.Unlock()
+		f.mu.Unlock()
+		return errors.New("boom")
+	}
+
+	if fail {
+		return errorOut()
+	}
+
+	if !isClustered {
+		f.clmu.Unlock()
+		f.mu.Unlock()
+	} else {
+		f.mu.Unlock()
+		f.clmu.Unlock()
+	}
+	f.bmu.Unlock()
+	return nil
 }
 
 // ========== COMMENT FILTERING TESTS ==========

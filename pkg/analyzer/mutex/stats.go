@@ -20,6 +20,7 @@ func (ma *Analyzer) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats
 func (ma *Analyzer) analyzeStatementList(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
 	blockStats := ma.cloneStatsMap(initial)
 	skip := make(map[token.Pos]bool)
+	terminatingTail := ma.terminatingTailByIndex(stmts)
 
 	for i, stmt := range stmts {
 		if ma.commentFilter.ShouldSkipStatement(stmt) {
@@ -31,10 +32,29 @@ func (ma *Analyzer) analyzeStatementList(stmts []ast.Stmt, initial map[string]*S
 		if ma.skipBalancedGuardedLock(stmt, stmts[i+1:], skip) {
 			continue
 		}
-		ma.analyzeStatement(stmt, blockStats)
+		ma.analyzeStatementWithTail(stmt, blockStats, terminatingTail[i+1])
 	}
 
 	return blockStats
+}
+
+func (ma *Analyzer) analyzeStatementWithTail(stmt ast.Stmt, stats map[string]*Stats, tailTerminates bool) {
+	if _, ok := stmt.(*ast.IfStmt); !ok || !tailTerminates {
+		ma.analyzeStatement(stmt, stats)
+		return
+	}
+
+	ma.terminatingTailDepth++
+	defer func() { ma.terminatingTailDepth-- }()
+	ma.analyzeStatement(stmt, stats)
+}
+
+func (ma *Analyzer) terminatingTailByIndex(stmts []ast.Stmt) []bool {
+	tail := make([]bool, len(stmts)+1)
+	for i := len(stmts) - 1; i >= 0; i-- {
+		tail[i] = tail[i+1] || ma.statementAlwaysTerminates(stmts[i])
+	}
+	return tail
 }
 
 func (ma *Analyzer) skipBalancedGuardedLock(stmt ast.Stmt, rest []ast.Stmt, skip map[token.Pos]bool) bool {
@@ -49,8 +69,7 @@ func (ma *Analyzer) skipBalancedGuardedLock(stmt ast.Stmt, rest []ast.Stmt, skip
 	}
 
 	for _, later := range rest {
-		laterGuard, laterVarName, laterMethodName, ok := ma.guardedMutexCall(later)
-		if ok && laterGuard == guard && laterVarName == varName && laterMethodName == releaseMethod {
+		if ma.guardedReleaseMatches(later, guard, varName, releaseMethod) {
 			skip[later.Pos()] = true
 			return true
 		}
@@ -60,6 +79,20 @@ func (ma *Analyzer) skipBalancedGuardedLock(stmt ast.Stmt, rest []ast.Stmt, skip
 	}
 
 	return false
+}
+
+// guardedReleaseMatches reports whether `stmt` releases `varName` under
+// `guard` on every reachable path.
+func (ma *Analyzer) guardedReleaseMatches(stmt ast.Stmt, guard, varName, releaseMethod string) bool {
+	if laterGuard, laterVar, laterMethod, ok := ma.guardedMutexCall(stmt); ok {
+		return laterGuard == guard && laterVar == varName && laterMethod == releaseMethod
+	}
+
+	cond, body, ok := ma.guardedIf(stmt)
+	if !ok || cond != guard {
+		return false
+	}
+	return ma.bodyReleasesOnEveryPath(body, varName, releaseMethod)
 }
 
 func (ma *Analyzer) statementMayExit(stmt ast.Stmt) bool {
@@ -150,15 +183,26 @@ func isFatalMethod(methodName string) bool {
 	return methodName == "Fatal" || methodName == "Fatalf" || methodName == "Fatalln"
 }
 
-func (ma *Analyzer) guardedMutexCall(stmt ast.Stmt) (string, string, string, bool) {
+// guardedIf returns the condition and body for a plain `if cond { body }`.
+func (ma *Analyzer) guardedIf(stmt ast.Stmt) (string, *ast.BlockStmt, bool) {
 	ifStmt, ok := stmt.(*ast.IfStmt)
 	if !ok || ifStmt.Init != nil || ifStmt.Else != nil || ifStmt.Body == nil {
+		return "", nil, false
+	}
+	return exprString(ifStmt.Cond), ifStmt.Body, true
+}
+
+// guardedMutexCall detects `if cond { mu.Lock() }` and
+// `if cond { mu.Unlock() }` forms with one mutex call.
+func (ma *Analyzer) guardedMutexCall(stmt ast.Stmt) (string, string, string, bool) {
+	cond, body, ok := ma.guardedIf(stmt)
+	if !ok {
 		return "", "", "", false
 	}
 
 	var varName, methodName string
 	foundCalls := 0
-	for _, bodyStmt := range ifStmt.Body.List {
+	for _, bodyStmt := range body.List {
 		if ma.statementMayExit(bodyStmt) {
 			return "", "", "", false
 		}
@@ -192,7 +236,166 @@ func (ma *Analyzer) guardedMutexCall(stmt ast.Stmt) (string, string, string, boo
 		return "", "", "", false
 	}
 
-	return exprString(ifStmt.Cond), varName, methodName, true
+	return cond, varName, methodName, true
+}
+
+// bodyReleasesOnEveryPath reports whether `body` unlocks exactly once before
+// each reachable exit.
+func (ma *Analyzer) bodyReleasesOnEveryPath(body *ast.BlockStmt, varName, methodName string) bool {
+	if body == nil {
+		return false
+	}
+	sim := pathReleaseSimulator{analyzer: ma, varName: varName, method: methodName}
+	count, terminated, ok := sim.run(body.List, 0)
+	if !ok {
+		return false
+	}
+	if terminated {
+		return true
+	}
+	return count == 1
+}
+
+// pathReleaseSimulator checks simple paths for one matching unlock before exit.
+type pathReleaseSimulator struct {
+	analyzer *Analyzer
+	varName  string
+	method   string
+}
+
+// run returns the release count, whether all paths terminate, and whether the
+// statement list can be modelled.
+func (s *pathReleaseSimulator) run(stmts []ast.Stmt, incoming int) (count int, terminated bool, ok bool) {
+	count = incoming
+	for _, stmt := range stmts {
+		if stmt == nil || s.analyzer.commentFilter.ShouldSkipStatement(stmt) {
+			continue
+		}
+		switch n := stmt.(type) {
+		case *ast.ExprStmt:
+			if s.isMatchingRelease(n.X) {
+				count++
+				continue
+			}
+			if s.exprTerminates(n.X) {
+				return releasePathTerminated(count)
+			}
+		case *ast.AssignStmt, *ast.DeclStmt, *ast.IncDecStmt, *ast.SendStmt:
+		case *ast.ReturnStmt:
+			return releasePathTerminated(count)
+		case *ast.BranchStmt:
+			if branchTerminatesBlock(n.Tok) {
+				return releasePathTerminated(count)
+			}
+			return 0, false, false
+		case *ast.IfStmt:
+			next, term, branchOK := s.simulateIf(n, count)
+			if !branchOK {
+				return 0, false, false
+			}
+			if term {
+				return next, true, true
+			}
+			count = next
+		case *ast.BlockStmt:
+			bc, bt, bo := s.run(n.List, count)
+			if !bo {
+				return 0, false, false
+			}
+			if bt {
+				return bc, true, true
+			}
+			count = bc
+		default:
+			return 0, false, false
+		}
+	}
+	return count, false, true
+}
+
+func releasePathTerminated(count int) (int, bool, bool) {
+	if count != 1 {
+		return 0, true, false
+	}
+	return count, true, true
+}
+
+// simulateIf merges the release counts from the then and else branches.
+func (s *pathReleaseSimulator) simulateIf(n *ast.IfStmt, incoming int) (int, bool, bool) {
+	if n.Init != nil {
+		initCount, initTerm, initOK := s.run([]ast.Stmt{n.Init}, incoming)
+		if !initOK {
+			return 0, false, false
+		}
+		if initTerm {
+			return initCount, true, true
+		}
+		incoming = initCount
+	}
+
+	thenCount, thenTerm, thenOK := s.run(n.Body.List, incoming)
+	if !thenOK {
+		return 0, false, false
+	}
+
+	var elseCount int
+	elseTerm := false
+	if n.Else != nil {
+		ec, et, eo := s.runElse(n.Else, incoming)
+		if !eo {
+			return 0, false, false
+		}
+		elseCount, elseTerm = ec, et
+	} else {
+		// Skipping the `if` keeps the incoming count unchanged.
+		elseCount = incoming
+	}
+
+	switch {
+	case thenTerm && elseTerm:
+		return incoming, true, true
+	case thenTerm:
+		return elseCount, false, true
+	case elseTerm:
+		return thenCount, false, true
+	}
+
+	if thenCount != elseCount {
+		return 0, false, false
+	}
+	return thenCount, false, true
+}
+
+func (s *pathReleaseSimulator) runElse(elseNode ast.Stmt, incoming int) (int, bool, bool) {
+	switch e := elseNode.(type) {
+	case *ast.BlockStmt:
+		return s.run(e.List, incoming)
+	case *ast.IfStmt:
+		return s.run([]ast.Stmt{e}, incoming)
+	default:
+		return 0, false, false
+	}
+}
+
+func (s *pathReleaseSimulator) exprTerminates(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	return ok && s.analyzer.callTerminatesExecution(call)
+}
+
+// isMatchingRelease reports whether `expr` calls the tracked unlock method.
+func (s *pathReleaseSimulator) isMatchingRelease(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || s.analyzer.commentFilter.ShouldSkipCall(call) {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	if common.GetVarName(sel.X) != s.varName {
+		return false
+	}
+	return sel.Sel.Name == s.method
 }
 
 func exprString(expr ast.Expr) string {
@@ -253,7 +456,14 @@ func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	case *ast.SelectStmt:
 		ma.analyzeSelectStatement(s, stats)
 	case *ast.LabeledStmt:
+		if s.Label != nil {
+			ma.applyLabelSnapshot(s.Label.Name, stats)
+		}
 		ma.analyzeStatement(s.Stmt, stats)
+	case *ast.BranchStmt:
+		if s.Tok == token.GOTO && s.Label != nil {
+			ma.captureGotoSnapshot(s.Label.Name, stats)
+		}
 	case *ast.BlockStmt:
 		nestedStats := ma.analyzeBlock(s, stats)
 		ma.copyStatsMap(stats, nestedStats)
@@ -439,7 +649,10 @@ func (ma *Analyzer) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[strin
 	for _, result := range stmt.Results {
 		call, ok := result.(*ast.CallExpr)
 		if ok && !ma.commentFilter.ShouldSkipCall(call) {
-			ma.applyLocalMethodLifecycleEffects(call, stats)
+			// Apply callee effects for `return helper()` forms.
+			if !ma.applyLocalFunctionLiteralLifecycleEffects(call, stats) {
+				ma.applyLocalMethodLifecycleEffects(call, stats)
+			}
 		}
 
 		fnlit, ok := result.(*ast.FuncLit)
