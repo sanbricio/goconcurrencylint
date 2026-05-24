@@ -207,6 +207,54 @@ func makeNamedType(pkgPath, name string, isPtr bool) types.Type {
 	return named
 }
 
+func TestUnwrapParenExpr(t *testing.T) {
+	identMu := &ast.Ident{Name: "mu"}
+
+	singleParen := &ast.ParenExpr{X: identMu}
+
+	multiParen := &ast.ParenExpr{
+		X: &ast.ParenExpr{
+			X: &ast.ParenExpr{
+				X: identMu,
+			},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		input ast.Expr
+		want  ast.Expr
+	}{
+		{
+			name:  "Non-parenthesized expression (Ident) returns itself",
+			input: identMu,
+			want:  identMu,
+		},
+		{
+			name:  "Single parenthesized expression (x) unwraps to x",
+			input: singleParen,
+			want:  identMu,
+		},
+		{
+			name:  "Nested parenthesized expression (((x))) unwraps completely to x",
+			input: multiParen,
+			want:  identMu,
+		},
+		{
+			name:  "Nil input returns nil without panicking",
+			input: nil,
+			want:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := UnwrapParenExpr(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestDerefOnceAndUnalias(t *testing.T) {
 	pkg := types.NewPackage("example.com/test", "test")
 	intType := types.Typ[types.Int]
@@ -383,7 +431,6 @@ func TestMatchPkgAndName(t *testing.T) {
 			assert.Equal(t, tt.wantName, gotName)
 			assert.Equal(t, tt.wantMatched, gotMatched)
 
-			
 			gotMatchesOnly := MatchesPkgAndName(tt.typ, tt.pkg, tt.names...)
 			assert.Equal(t, tt.wantMatched, gotMatchesOnly)
 		})

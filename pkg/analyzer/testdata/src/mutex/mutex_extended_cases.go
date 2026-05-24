@@ -524,6 +524,12 @@ func BadRWMutexParameter(rw *sync.RWMutex) {
 	rw.RLock() // want "rwmutex 'rw' is rlocked but not runlocked"
 }
 
+// Bad: function receives mutex parameter, locks a parenthesized expression but forgets to unlock
+func BadMutexParameterParen(mu *sync.Mutex) {
+	((mu)).Lock() // want "mutex 'mu' is locked but not unlocked"
+}
+
+
 // ========== COPY-BY-VALUE TESTS ==========
 
 func takesMutexByValue(mu sync.Mutex) { // want "mutex 'mu' is copied by value"
