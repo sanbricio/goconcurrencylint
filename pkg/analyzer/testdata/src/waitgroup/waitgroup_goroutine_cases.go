@@ -592,3 +592,50 @@ func GoodWorkerDoneOnContextCancellationInTickerRange() {
 	cancel()
 	wg.Wait()
 }
+
+// Slice declared empty then reassigned from a multi-return call inside an
+// if/else: its length is not statically knowable, so the range multiplier
+// must not collapse to 0 and drop the per-iteration Done from the balance.
+func GoodAddDonePairedInsideRangeOverAssignedSlice(items []int, err error) {
+	var clusters []int
+	if len(items) > 0 {
+		clusters, err = loadItems(items)
+	} else {
+		clusters, err = loadItems(nil)
+	}
+	if err != nil {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, cluster := range clusters {
+		wg.Add(1)
+		go func(c int) {
+			defer wg.Done()
+			_ = c
+		}(cluster)
+	}
+	wg.Wait()
+}
+
+// Cancellation via close() of a local channel: `case <-chClose` drains when
+// the channel is closed, equivalent to `<-ctx.Done()` for context cancellation.
+func GoodWorkerDoneOnCloseOfLocalChannel() {
+	chClose := make(chan struct{})
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+
+	go func() {
+		for {
+			select {
+			case <-chClose:
+				wg.Done()
+				return
+			default:
+			}
+		}
+	}()
+
+	close(chClose)
+	wg.Wait()
+}
