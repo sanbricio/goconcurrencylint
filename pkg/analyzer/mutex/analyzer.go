@@ -985,8 +985,8 @@ func (ma *Analyzer) varRootIsFunctionParameter(varName string) bool {
 		return false
 	}
 	base := varName
-	if dot := strings.IndexByte(varName, '.'); dot != -1 {
-		base = varName[:dot]
+	if before, _, ok := strings.Cut(varName, "."); ok {
+		base = before
 	}
 	for _, field := range ma.function.Type.Params.List {
 		for _, name := range field.Names {
