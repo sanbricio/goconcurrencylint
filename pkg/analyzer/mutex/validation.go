@@ -1,6 +1,7 @@
 package mutex
 
 import (
+	"slices"
 	"go/ast"
 	"go/token"
 	"maps"
@@ -102,21 +103,51 @@ func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats
 
 	thenBase, elseBase := ma.branchInitialStatsForCondition(stmt.Cond, stats)
 	thenStats := ma.analyzeBlock(stmt.Body, thenBase)
+	thenTerminates := ma.blockAlwaysTerminates(stmt.Body)
 
 	if stmt.Else != nil {
 		elseStats := ma.analyzeElseBranch(stmt.Else, elseBase)
+		elseTerminates := ma.elseAlwaysTerminates(stmt.Else)
+
 		if ma.canMergeBranchStates(thenStats, elseStats) {
 			ma.copyStatsMap(stats, thenStats)
 			return
 		}
+
+		// Only merge states from branches that can reach the next statement.
+		switch {
+		case thenTerminates && elseTerminates:
+			return
+		case thenTerminates:
+			ma.copyStatsMap(stats, elseStats)
+			return
+		case elseTerminates:
+			ma.copyStatsMap(stats, thenStats)
+			return
+		}
+
 		ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
 		ma.reportUnmatchedLocksInBranch(stats, elseStats, "else")
 		return
 	}
 
-	ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
-	if ma.blockAlwaysTerminates(stmt.Body) {
+	if thenTerminates {
 		ma.copyStatsMap(stats, elseBase)
+		return
+	}
+	ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
+}
+
+// elseAlwaysTerminates reports whether every path through `elseNode`
+// terminates.
+func (ma *Analyzer) elseAlwaysTerminates(elseNode ast.Stmt) bool {
+	switch e := elseNode.(type) {
+	case *ast.BlockStmt:
+		return ma.blockAlwaysTerminates(e)
+	case *ast.IfStmt:
+		return ma.blockAlwaysTerminates(&ast.BlockStmt{List: []ast.Stmt{e}})
+	default:
+		return false
 	}
 }
 
@@ -307,40 +338,33 @@ func (ma *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
 		return false
 	}
 
-	for _, stmt := range block.List {
-		switch s := stmt.(type) {
-		case *ast.ReturnStmt:
-			return true
-		case *ast.BranchStmt:
-			return s.Tok == token.BREAK || s.Tok == token.GOTO
-		case *ast.ExprStmt:
-			call, ok := s.X.(*ast.CallExpr)
-			if !ok {
-				continue
-			}
-			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "panic" {
-				return true
-			}
-		case *ast.IfStmt:
-			if s.Else == nil {
-				continue
-			}
-			if !ma.blockAlwaysTerminates(s.Body) {
-				continue
-			}
-			switch elseNode := s.Else.(type) {
-			case *ast.BlockStmt:
-				if ma.blockAlwaysTerminates(elseNode) {
-					return true
-				}
-			case *ast.IfStmt:
-				if ma.blockAlwaysTerminates(&ast.BlockStmt{List: []ast.Stmt{elseNode}}) {
-					return true
-				}
-			}
+	return slices.ContainsFunc(block.List, ma.statementAlwaysTerminates)
+}
+
+func (ma *Analyzer) statementAlwaysTerminates(stmt ast.Stmt) bool {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.BranchStmt:
+		return branchTerminatesBlock(s.Tok)
+	case *ast.ExprStmt:
+		call, ok := s.X.(*ast.CallExpr)
+		return ok && ma.callTerminatesExecution(call)
+	case *ast.IfStmt:
+		if s.Else == nil || !ma.blockAlwaysTerminates(s.Body) {
+			return false
 		}
+		return ma.elseAlwaysTerminates(s.Else)
+	default:
+		return false
 	}
-	return false
+}
+
+func branchTerminatesBlock(tok token.Token) bool {
+	return tok == token.BREAK ||
+		tok == token.CONTINUE ||
+		tok == token.GOTO ||
+		tok == token.FALLTHROUGH
 }
 
 func (ma *Analyzer) reportDeferredUnlocksInLoop(body *ast.BlockStmt) {
@@ -709,8 +733,8 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 		}
 	}
 
-	suppressBorrowedUnlock := ma.functionIsLifecycleReleaseFor(mutexName, []string{"Lock", "TryLock"}) ||
-		ma.functionIsCallerManagedReleaseFor(mutexName, []string{"Lock", "TryLock"})
+	suppressBorrowedUnlock := ma.unlockDiagnosticSuppressed(mutexName, []string{"Lock", "TryLock"}) ||
+		ma.terminatingTailUnlockSuppressed(mutexName)
 	unlockMessage := mutexType + " '" + mutexName + "' is unlocked but not locked"
 	if delta := final.borrowedLock - initial.borrowedLock; delta > 0 && !suppressBorrowedUnlock {
 		for _, pos := range ma.trailingPositions(final.borrowedUnlockPos, delta) {
@@ -726,8 +750,8 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 			}
 		}
 
-		suppressBorrowedRUnlock := ma.functionIsLifecycleReleaseFor(mutexName, []string{"RLock", "TryRLock"}) ||
-			ma.functionIsCallerManagedReleaseFor(mutexName, []string{"RLock", "TryRLock"})
+		suppressBorrowedRUnlock := ma.unlockDiagnosticSuppressed(mutexName, []string{"RLock", "TryRLock"}) ||
+			ma.terminatingTailUnlockSuppressed(mutexName)
 		runlockMessage := "rwmutex '" + mutexName + "' is runlocked but not rlocked"
 		if delta := final.borrowedRLock - initial.borrowedRLock; delta > 0 && !suppressBorrowedRUnlock {
 			for _, pos := range ma.trailingPositions(final.borrowedRUnlockPos, delta) {
@@ -735,6 +759,20 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 			}
 		}
 	}
+}
+
+// unlockDiagnosticSuppressed reports whether ownership is managed outside the
+// current lock/unlock pair.
+func (ma *Analyzer) unlockDiagnosticSuppressed(mutexName string, acquireMethods []string) bool {
+	return ma.functionIsLifecycleReleaseFor(mutexName, acquireMethods) ||
+		ma.functionIsCallerManagedReleaseFor(mutexName, acquireMethods) ||
+		ma.functionIsParameterUnlockHelper(mutexName, acquireMethods)
+}
+
+// terminatingTailUnlockSuppressed reports caller-owned unlocks before a
+// terminating tail.
+func (ma *Analyzer) terminatingTailUnlockSuppressed(mutexName string) bool {
+	return ma.terminatingTailDepth > 0 && ma.varRootIsFunctionParameter(mutexName)
 }
 
 func (ma *Analyzer) remainingLockCount(lockCount, deferredUnlocks int) int {
@@ -785,9 +823,7 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 		ma.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
 	}
 
-	suppressFunctionLevelUnlock := branchType == "" &&
-		(ma.functionIsLifecycleReleaseFor(mutexName, []string{"Lock", "TryLock"}) ||
-			ma.functionIsCallerManagedReleaseFor(mutexName, []string{"Lock", "TryLock"}))
+	suppressFunctionLevelUnlock := branchType == "" && ma.unlockDiagnosticSuppressed(mutexName, []string{"Lock", "TryLock"})
 	for _, pos := range stats.borrowedUnlockPos {
 		if suppressFunctionLevelUnlock {
 			continue
@@ -803,9 +839,7 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 			}
 			ma.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
 		}
-		suppressFunctionLevelRUnlock := branchType == "" &&
-			(ma.functionIsLifecycleReleaseFor(mutexName, []string{"RLock", "TryRLock"}) ||
-				ma.functionIsCallerManagedReleaseFor(mutexName, []string{"RLock", "TryRLock"}))
+		suppressFunctionLevelRUnlock := branchType == "" && ma.unlockDiagnosticSuppressed(mutexName, []string{"RLock", "TryRLock"})
 		for _, pos := range stats.borrowedRUnlockPos {
 			if suppressFunctionLevelRUnlock {
 				continue
