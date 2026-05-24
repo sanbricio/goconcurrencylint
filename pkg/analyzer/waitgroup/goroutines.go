@@ -418,12 +418,42 @@ func (wga *Analyzer) exprReceivesDoneSignal(expr ast.Expr) bool {
 	if !ok || unary.Op != token.ARROW {
 		return false
 	}
-	call, ok := unary.X.(*ast.CallExpr)
-	if !ok {
+	switch x := unary.X.(type) {
+	case *ast.CallExpr:
+		sel, ok := x.Fun.(*ast.SelectorExpr)
+		return ok && sel.Sel.Name == "Done" && wga.callReturnsContextDoneSignal(sel.X, x)
+	case *ast.Ident:
+		// `case <-chClose:` where chClose is closed in the enclosing function —
+		// the "close to broadcast cancellation" pattern.
+		return wga.identIsClosedChannel(x.Name)
+	}
+	return false
+}
+
+func (wga *Analyzer) identIsClosedChannel(name string) bool {
+	if name == "" || wga.function == nil || wga.function.Body == nil {
 		return false
 	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "Done" && wga.callReturnsContextDoneSignal(sel.X, call)
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		callee, ok := call.Fun.(*ast.Ident)
+		if !ok || callee.Name != "close" || len(call.Args) != 1 {
+			return true
+		}
+		if arg, ok := call.Args[0].(*ast.Ident); ok && arg.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func (wga *Analyzer) callReturnsContextDoneSignal(receiver ast.Expr, call *ast.CallExpr) bool {

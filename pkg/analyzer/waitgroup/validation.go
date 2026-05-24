@@ -555,8 +555,11 @@ func (wga *Analyzer) makeCollectionLength(call *ast.CallExpr) (int, bool) {
 func (wga *Analyzer) collectionLengthFromType(expr ast.Expr) (int, bool) {
 	switch typ := expr.(type) {
 	case *ast.ArrayType:
+		// `var x []T` starts at length 0 but can be mutated through control-flow
+		// branches the walker doesn't descend into; treating it as known-zero
+		// would zero out the loop multiplier and drop per-iteration Dones.
 		if typ.Len == nil {
-			return 0, true
+			return 0, false
 		}
 		return common.ConstantIntValue(typ.Len, wga.typesInfo)
 	default:

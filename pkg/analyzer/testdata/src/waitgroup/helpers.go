@@ -112,6 +112,10 @@ func doSomething() any {
 	return nil
 }
 
+func loadItems(items []int) ([]int, error) {
+	return items, nil
+}
+
 type readerLifecycleOwner struct {
 	pendingReaders sync.WaitGroup
 	closing        bool
