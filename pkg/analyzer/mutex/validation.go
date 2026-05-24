@@ -3,7 +3,6 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
-	"go/types"
 	"maps"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
@@ -925,9 +924,7 @@ func (ma *Analyzer) reportMutexInLoopAssign(s *ast.AssignStmt) {
 		if typ == nil {
 			continue
 		}
-		if ptr, ok := types.Unalias(typ).(*types.Pointer); ok {
-			typ = ptr.Elem()
-		}
+		typ = common.DerefOnceAndUnalias(typ)
 		switch {
 		case common.IsMutex(typ):
 			ma.errorCollector.AddError(ident.Pos(),
