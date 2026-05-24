@@ -1,8 +1,10 @@
 package waitgroup
 
 import (
+	"context"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // ---------- Loop Patterns ----------
@@ -488,5 +490,105 @@ func GoodIIFEGoroutineDoneForDynamicAdd(items map[int]string) {
 		}(item)
 	}
 
+	wg.Wait()
+}
+
+func GoodAddCountMatchesDynamicRangeWorkers() {
+	var wg sync.WaitGroup
+	base := [5]int{}
+	items := base[:0]
+	for i := 0; i < 5; i++ {
+		items = append(items, i)
+	}
+
+	wg.Add(5)
+	for _, item := range items {
+		item := item
+		go func() {
+			defer wg.Done()
+			_ = item
+		}()
+	}
+	wg.Wait()
+}
+
+func BadUnknownDynamicRangeMayNotCoverAdd(items []int) {
+	var wg sync.WaitGroup
+	wg.Add(2) // want "waitgroup 'wg' has Add without corresponding Done"
+	for _, item := range items {
+		item := item
+		go func() {
+			defer wg.Done()
+			_ = item
+		}()
+	}
+	wg.Wait()
+}
+
+func GoodWorkerDoneOnContextCancellation() {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		tick := time.NewTicker(time.Millisecond)
+		for {
+			select {
+			case <-ctx.Done():
+				wg.Done()
+				return
+			case <-tick.C:
+				doSomething()
+			}
+		}
+	}()
+
+	cancel()
+	wg.Wait()
+}
+
+type customDoneSignal struct {
+	ch chan struct{}
+}
+
+func (s customDoneSignal) Done() <-chan struct{} {
+	return s.ch
+}
+
+func BadWorkerDoneOnNonContextSignalMissingDefaultDone(sig customDoneSignal) {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		for {
+			select {
+			case <-sig.Done():
+				wg.Done()
+				return
+			default:
+				return
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+func GoodWorkerDoneOnContextCancellationInTickerRange() {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	go func() {
+		for range time.NewTicker(time.Millisecond).C {
+			select {
+			case <-ctx.Done():
+				wg.Done()
+				return
+			default:
+			}
+			doSomething()
+		}
+	}()
+	wg.Add(1)
+
+	cancel()
 	wg.Wait()
 }

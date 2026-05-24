@@ -15,6 +15,12 @@ type lockOrderEdge struct {
 	to   string
 }
 
+type waitGroupReleaseEvent struct {
+	wgName    string
+	goPos     token.Pos
+	lockNames map[string]bool
+}
+
 type crossGoroutineReleases struct {
 	unlocks  map[string][]token.Pos
 	runlocks map[string][]token.Pos
@@ -27,10 +33,11 @@ func (ma *Analyzer) checkLockOrderCycles(block *ast.BlockStmt) {
 
 	edges := make(map[lockOrderEdge]token.Pos)
 	reported := make(map[lockOrderEdge]bool)
-	ma.scanLockOrderStatements(block.List, make(map[string]bool), edges, reported)
+	waitReleases := ma.waitGroupReleasedLocks(block)
+	ma.scanLockOrderStatements(block.List, make(map[string]bool), edges, reported, waitReleases)
 }
 
-func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool) {
+func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	for _, stmt := range stmts {
 		if stmt == nil || ma.commentFilter.ShouldSkipStatement(stmt) {
 			continue
@@ -39,13 +46,13 @@ func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bo
 		switch s := stmt.(type) {
 		case *ast.ExprStmt:
 			if call, ok := s.X.(*ast.CallExpr); ok {
-				ma.scanLockOrderCall(call, held, edges, reported)
+				ma.scanLockOrderCall(call, held, edges, reported, waitReleases)
 			}
 		case *ast.DeferStmt:
-			ma.scanLockOrderDefer(s, held, edges, reported)
+			ma.scanLockOrderDefer(s, held, edges, reported, waitReleases)
 		case *ast.GoStmt:
 			if fnLit, ok := s.Call.Fun.(*ast.FuncLit); ok && fnLit.Body != nil {
-				ma.scanLockOrderStatements(fnLit.Body.List, make(map[string]bool), edges, reported)
+				ma.scanLockOrderStatements(fnLit.Body.List, make(map[string]bool), edges, reported, waitReleases)
 			}
 		case *ast.IfStmt:
 			thenHeld := maps.Clone(held)
@@ -53,45 +60,45 @@ func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bo
 				ma.recordHeldLockOrderEdges(varName, s.Cond.Pos(), thenHeld, edges, reported)
 				thenHeld[varName] = true
 			}
-			ma.scanLockOrderStatements(s.Body.List, thenHeld, edges, reported)
+			ma.scanLockOrderStatements(s.Body.List, thenHeld, edges, reported, waitReleases)
 			if s.Else != nil {
-				ma.scanLockOrderElse(s.Else, maps.Clone(held), edges, reported)
+				ma.scanLockOrderElse(s.Else, maps.Clone(held), edges, reported, waitReleases)
 			}
 		case *ast.ForStmt:
 			if s.Body != nil {
-				ma.scanLockOrderStatements(s.Body.List, maps.Clone(held), edges, reported)
+				ma.scanLockOrderStatements(s.Body.List, maps.Clone(held), edges, reported, waitReleases)
 			}
 		case *ast.RangeStmt:
 			if s.Body != nil {
-				ma.scanLockOrderStatements(s.Body.List, maps.Clone(held), edges, reported)
+				ma.scanLockOrderStatements(s.Body.List, maps.Clone(held), edges, reported, waitReleases)
 			}
 		case *ast.BlockStmt:
-			ma.scanLockOrderStatements(s.List, held, edges, reported)
+			ma.scanLockOrderStatements(s.List, held, edges, reported, waitReleases)
 		case *ast.LabeledStmt:
-			ma.scanLockOrderStatements([]ast.Stmt{s.Stmt}, held, edges, reported)
+			ma.scanLockOrderStatements([]ast.Stmt{s.Stmt}, held, edges, reported, waitReleases)
 		case *ast.SwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported)
+					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported, waitReleases)
 				}
 			}
 		case *ast.TypeSwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported)
+					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported, waitReleases)
 				}
 			}
 		case *ast.SelectStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CommClause); ok {
-					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported)
+					ma.scanLockOrderStatements(cc.Body, maps.Clone(held), edges, reported, waitReleases)
 				}
 			}
 		}
 	}
 }
 
-func (ma *Analyzer) scanLockOrderCall(call *ast.CallExpr, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool) {
+func (ma *Analyzer) scanLockOrderCall(call *ast.CallExpr, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
 		return
 	}
@@ -109,24 +116,179 @@ func (ma *Analyzer) scanLockOrderCall(call *ast.CallExpr, held map[string]bool, 
 	case ma.isLockOrderRelease(varName, sel.Sel.Name):
 		delete(held, varName)
 	}
+
+	if sel.Sel.Name == "Wait" && ma.isWaitGroupReceiver(sel.X) {
+		ma.applyWaitGroupReleaseEvents(held, varName, call.Pos(), waitReleases)
+	}
 }
 
-func (ma *Analyzer) scanLockOrderDefer(stmt *ast.DeferStmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool) {
+func (ma *Analyzer) scanLockOrderDefer(stmt *ast.DeferStmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	if stmt == nil || ma.commentFilter.ShouldSkipCall(stmt.Call) {
 		return
 	}
 	if call, ok := stmt.Call.Fun.(*ast.FuncLit); ok && call.Body != nil {
-		ma.scanLockOrderStatements(call.Body.List, maps.Clone(held), edges, reported)
+		ma.scanLockOrderStatements(call.Body.List, maps.Clone(held), edges, reported, waitReleases)
 	}
 }
 
-func (ma *Analyzer) scanLockOrderElse(stmt ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool) {
+func (ma *Analyzer) scanLockOrderElse(stmt ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
-		ma.scanLockOrderStatements(s.List, held, edges, reported)
+		ma.scanLockOrderStatements(s.List, held, edges, reported, waitReleases)
 	case *ast.IfStmt:
-		ma.scanLockOrderStatements([]ast.Stmt{s}, held, edges, reported)
+		ma.scanLockOrderStatements([]ast.Stmt{s}, held, edges, reported, waitReleases)
 	}
+}
+
+func (ma *Analyzer) applyWaitGroupReleaseEvents(held map[string]bool, wgName string, waitPos token.Pos, waitReleases []waitGroupReleaseEvent) {
+	for _, event := range waitReleases {
+		if event.wgName != wgName || event.goPos >= waitPos {
+			continue
+		}
+		for releasedName := range event.lockNames {
+			delete(held, releasedName)
+		}
+	}
+}
+
+func (ma *Analyzer) waitGroupReleasedLocks(block *ast.BlockStmt) []waitGroupReleaseEvent {
+	var releases []waitGroupReleaseEvent
+	if block == nil {
+		return releases
+	}
+
+	ast.Inspect(block, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok || ma.commentFilter.ShouldSkipStatement(goStmt) {
+			return true
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			return false
+		}
+		for wgName, lockNames := range ma.goroutineReleasedLocksBeforeDone(fnLit.Body) {
+			releases = append(releases, waitGroupReleaseEvent{
+				wgName:    wgName,
+				goPos:     goStmt.Pos(),
+				lockNames: lockNames,
+			})
+		}
+		return false
+	})
+	return releases
+}
+
+func (ma *Analyzer) goroutineReleasedLocksBeforeDone(body *ast.BlockStmt) map[string]map[string]bool {
+	releases := make(map[string]map[string]bool)
+	if body == nil {
+		return releases
+	}
+
+	deferredDone := make(map[string]bool)
+	directDone := make(map[string][]token.Pos)
+	unlocks := make(map[string][]token.Pos)
+
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.DeferStmt:
+			if wgName, ok := ma.waitGroupDoneCallName(node.Call); ok {
+				deferredDone[wgName] = true
+			}
+			return false
+		case *ast.CallExpr:
+			if ma.commentFilter.ShouldSkipCall(node) {
+				return true
+			}
+			if wgName, ok := ma.waitGroupDoneCallName(node); ok {
+				directDone[wgName] = append(directDone[wgName], node.Pos())
+				return true
+			}
+			if lockName, ok := ma.lockOrderReleaseCallName(node); ok {
+				unlocks[lockName] = append(unlocks[lockName], node.Pos())
+			}
+		}
+		return true
+	})
+
+	for wgName := range deferredDone {
+		ma.addReleasedLocks(releases, wgName, unlocks)
+	}
+	for wgName, donePositions := range directDone {
+		firstDone := firstPos(donePositions)
+		beforeDone := make(map[string][]token.Pos)
+		for lockName, positions := range unlocks {
+			for _, pos := range positions {
+				if pos < firstDone {
+					beforeDone[lockName] = append(beforeDone[lockName], pos)
+				}
+			}
+		}
+		ma.addReleasedLocks(releases, wgName, beforeDone)
+	}
+
+	return releases
+}
+
+func (ma *Analyzer) addReleasedLocks(releases map[string]map[string]bool, wgName string, unlocks map[string][]token.Pos) {
+	if len(unlocks) == 0 {
+		return
+	}
+	if releases[wgName] == nil {
+		releases[wgName] = make(map[string]bool)
+	}
+	for lockName := range unlocks {
+		releases[wgName][lockName] = true
+	}
+}
+
+func firstPos(positions []token.Pos) token.Pos {
+	first := token.NoPos
+	for _, pos := range positions {
+		if first == token.NoPos || pos < first {
+			first = pos
+		}
+	}
+	return first
+}
+
+func (ma *Analyzer) waitGroupDoneCallName(call *ast.CallExpr) (string, bool) {
+	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
+		return "", false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Done" || !ma.isWaitGroupReceiver(sel.X) {
+		return "", false
+	}
+	return common.GetVarName(sel.X), true
+}
+
+func (ma *Analyzer) lockOrderReleaseCallName(call *ast.CallExpr) (string, bool) {
+	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
+		return "", false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	varName := common.GetVarName(sel.X)
+	if !ma.isLockOrderRelease(varName, sel.Sel.Name) {
+		return "", false
+	}
+	return varName, true
+}
+
+func (ma *Analyzer) isWaitGroupReceiver(expr ast.Expr) bool {
+	if ma.typesInfo == nil {
+		return false
+	}
+	typ := ma.typesInfo.TypeOf(expr)
+	typ = common.DerefOnceAndUnalias(typ)
+	return common.MatchesPkgAndName(typ, "sync", "WaitGroup")
 }
 
 func (ma *Analyzer) tryLockCallVar(expr ast.Expr) (string, bool) {

@@ -6,6 +6,7 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
@@ -51,7 +52,7 @@ func (ma *Analyzer) analyzeStatementWithTail(stmt ast.Stmt, stats map[string]*St
 
 func (ma *Analyzer) terminatingTailByIndex(stmts []ast.Stmt) []bool {
 	tail := make([]bool, len(stmts)+1)
-	for i := len(stmts) - 1; i >= 0; i-- {
+	for i := range slices.Backward(stmts) {
 		tail[i] = tail[i+1] || ma.statementAlwaysTerminates(stmts[i])
 	}
 	return tail

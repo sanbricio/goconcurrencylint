@@ -37,6 +37,13 @@ func runWithOnceCallback(done func()) {
 	once.Do(done)
 }
 
+type startRoutineHelper struct{}
+
+func (startRoutineHelper) startGoRoutine(fn func()) bool {
+	go fn()
+	return true
+}
+
 func registerCallback(callback func()) {
 	go callback()
 }
@@ -90,6 +97,15 @@ func trySpawnHelper(wg *sync.WaitGroup, fn func()) {
 
 func (o *callbackOwner) markDone() {
 	o.wg.Done()
+}
+
+type mirrorWorkerLike struct {
+	wg sync.WaitGroup
+}
+
+func processMirrorLike(mirror *mirrorWorkerLike, ready *sync.WaitGroup) {
+	defer mirror.wg.Done()
+	ready.Done()
 }
 
 func doSomething() any {

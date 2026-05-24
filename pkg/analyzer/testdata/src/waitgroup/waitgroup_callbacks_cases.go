@@ -124,6 +124,77 @@ func GoodWaitGroupDoneInRegisteredCallback() {
 	wg.Wait()
 }
 
+func GoodWaitGroupDoneInClosureSentToExternalWorkerQueue(tasks chan<- func()) {
+	var wg sync.WaitGroup
+	items := []int{1, 2, 3}
+
+	wg.Add(3)
+	for _, item := range items {
+		item := item
+		tasks <- func() {
+			_ = item
+			wg.Done()
+		}
+	}
+	wg.Wait()
+}
+
+func BadWaitGroupDoneInClosureSentToLocalQueueOnly() {
+	var wg sync.WaitGroup
+	tasks := make(chan func(), 1)
+
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	tasks <- func() {
+		wg.Done()
+	}
+	wg.Wait()
+}
+
+func GoodWaitGroupDoneViaStartGoRoutineHelper() {
+	var ready sync.WaitGroup
+	mirror := &mirrorWorkerLike{}
+	runner := startRoutineHelper{}
+
+	mirror.wg.Add(1)
+	ready.Add(1)
+	if !runner.startGoRoutine(func() {
+		processMirrorLike(mirror, &ready)
+	}) {
+		mirror.wg.Done()
+		ready.Done()
+	}
+
+	ready.Wait()
+	mirror.wg.Wait()
+}
+
+func GoodWaitGroupDoneViaStartGoRoutineUnderLabel() {
+	responses := make(chan struct{})
+	runner := startRoutineHelper{}
+
+	go func() {
+	SELECT:
+		select {
+		case <-responses:
+			ready := sync.WaitGroup{}
+			mirror := &mirrorWorkerLike{}
+			mirror.wg.Add(1)
+			ready.Add(1)
+			if !runner.startGoRoutine(func() {
+				processMirrorLike(mirror, &ready)
+			}) {
+				mirror.wg.Done()
+				ready.Done()
+			}
+			ready.Wait()
+			mirror.wg.Wait()
+		default:
+			responses <- struct{}{}
+			goto SELECT
+		}
+	}()
+}
+
 func GoodWaitGroupDoneInCallbackVariable() {
 	var wg sync.WaitGroup
 	wg.Add(3)

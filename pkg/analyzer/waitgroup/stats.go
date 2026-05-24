@@ -75,6 +75,14 @@ func (wga *Analyzer) traverseWithContext(n ast.Node, forStack []*ast.ForStmt, st
 		wga.handleBlockStatement(node, forStack, stats, alreadyReported)
 	case *ast.IfStmt:
 		wga.handleIfStatement(node, forStack, stats, alreadyReported)
+	case *ast.SwitchStmt:
+		wga.handleSwitchStatement(node, forStack, stats, alreadyReported)
+	case *ast.TypeSwitchStmt:
+		wga.handleTypeSwitchStatement(node, forStack, stats, alreadyReported)
+	case *ast.SelectStmt:
+		wga.handleSelectStatement(node, forStack, stats, alreadyReported)
+	case *ast.LabeledStmt:
+		wga.traverseWithContext(node.Stmt, forStack, stats, alreadyReported)
 	case *ast.ExprStmt:
 		if wga.handleImmediatelyInvokedFunction(node, forStack, stats, alreadyReported) {
 			return
@@ -134,6 +142,57 @@ func (wga *Analyzer) handleIfStatement(stmt *ast.IfStmt, forStack []*ast.ForStmt
 	wga.traverseWithContext(stmt.Body, forStack, stats, alreadyReported)
 	if stmt.Else != nil {
 		wga.traverseWithContext(stmt.Else, forStack, stats, alreadyReported)
+	}
+}
+
+func (wga *Analyzer) handleSwitchStatement(stmt *ast.SwitchStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+	if stmt.Init != nil {
+		wga.traverseWithContext(stmt.Init, forStack, stats, alreadyReported)
+	}
+	for _, nestedStmt := range stmt.Body.List {
+		if cc, ok := nestedStmt.(*ast.CaseClause); ok {
+			for _, caseStmt := range cc.Body {
+				wga.traverseWithContext(caseStmt, forStack, stats, alreadyReported)
+			}
+		}
+	}
+}
+
+func (wga *Analyzer) handleTypeSwitchStatement(stmt *ast.TypeSwitchStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+	if stmt.Init != nil {
+		wga.traverseWithContext(stmt.Init, forStack, stats, alreadyReported)
+	}
+	if stmt.Assign != nil {
+		wga.traverseWithContext(stmt.Assign, forStack, stats, alreadyReported)
+	}
+	for _, nestedStmt := range stmt.Body.List {
+		if cc, ok := nestedStmt.(*ast.CaseClause); ok {
+			for _, caseStmt := range cc.Body {
+				wga.traverseWithContext(caseStmt, forStack, stats, alreadyReported)
+			}
+		}
+	}
+}
+
+func (wga *Analyzer) handleSelectStatement(stmt *ast.SelectStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+	if wga.commentFilter.ShouldSkipStatement(stmt) {
+		return
+	}
+	for _, nestedStmt := range stmt.Body.List {
+		if cc, ok := nestedStmt.(*ast.CommClause); ok {
+			if cc.Comm != nil {
+				wga.traverseWithContext(cc.Comm, forStack, stats, alreadyReported)
+			}
+			for _, caseStmt := range cc.Body {
+				wga.traverseWithContext(caseStmt, forStack, stats, alreadyReported)
+			}
+		}
 	}
 }
 
@@ -198,6 +257,14 @@ func (wga *Analyzer) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, 
 		wga.handleBlockStatement(node, forStack, stats, alreadyReported)
 	case *ast.IfStmt:
 		wga.handleIfStatement(node, forStack, stats, alreadyReported)
+	case *ast.SwitchStmt:
+		wga.handleSwitchStatement(node, forStack, stats, alreadyReported)
+	case *ast.TypeSwitchStmt:
+		wga.handleTypeSwitchStatement(node, forStack, stats, alreadyReported)
+	case *ast.SelectStmt:
+		wga.handleSelectStatement(node, forStack, stats, alreadyReported)
+	case *ast.LabeledStmt:
+		wga.traverseWithReportMap(node.Stmt, forStack, stats, alreadyReported)
 	case *ast.ExprStmt:
 		if wga.handleImmediatelyInvokedFunction(node, forStack, stats, alreadyReported) {
 			return
