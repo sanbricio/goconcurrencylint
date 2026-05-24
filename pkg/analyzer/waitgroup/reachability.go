@@ -74,6 +74,51 @@ func (wga *Analyzer) containsDoneCall(stmt ast.Stmt, wgName string) bool {
 	return found
 }
 
+// waitInEarlyExitBranch reports whether the Wait at waitPos is the last
+// meaningful statement of its branch: the next stmt in the enclosing list
+// is a return / break / goto / abort. Such a Wait belongs to a control-flow
+// branch that never reaches the surrounding code — e.g.
+//
+//	case <-done:
+//	    wg.Wait()
+//	    return
+func (wga *Analyzer) waitInEarlyExitBranch(waitPos token.Pos) bool {
+	found := false
+	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		stmts := stmtListOf(n)
+		for i, stmt := range stmts {
+			if !nodeContainsPos(stmt, waitPos) {
+				continue
+			}
+			if i+1 < len(stmts) && wga.isTerminatingStatement(stmts[i+1]) {
+				found = true
+				return false
+			}
+			break // Let Inspect descend to the directly-enclosing list.
+		}
+		return true
+	})
+	return found
+}
+
+// stmtListOf returns the statement list directly held by n, or nil for nodes
+// that don't carry one. Centralises the BlockStmt / CaseClause / CommClause
+// dispatch so callers can iterate stmts uniformly.
+func stmtListOf(n ast.Node) []ast.Stmt {
+	switch s := n.(type) {
+	case *ast.BlockStmt:
+		return s.List
+	case *ast.CaseClause:
+		return s.Body
+	case *ast.CommClause:
+		return s.Body
+	}
+	return nil
+}
+
 // blockAlwaysTerminates checks if a block always terminates execution (return, panic, etc.)
 func (wga *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
 	for _, stmt := range block.List {
