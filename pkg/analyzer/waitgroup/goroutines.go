@@ -3,7 +3,6 @@ package waitgroup
 import (
 	"go/ast"
 	"go/token"
-	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
 )
@@ -464,17 +463,9 @@ func (wga *Analyzer) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName s
 	}
 
 	typ := wga.typesInfo.TypeOf(sel.X)
-	if typ == nil {
-		return false
-	}
-	if ptr, isPointer := typ.(*types.Pointer); isPointer {
-		typ = ptr.Elem()
-	}
-
-	named, ok := typ.(*types.Named)
-	return ok && named.Obj().Pkg() != nil &&
-		named.Obj().Pkg().Path() == "sync" &&
-		named.Obj().Name() == "Once"
+	typ = common.DerefOnce(typ)
+	
+	return common.MatchesPkgAndName(typ, "sync", "Once")
 }
 
 // isRecoverCheck checks if an if statement is checking recover() result
