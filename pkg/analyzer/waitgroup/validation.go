@@ -845,6 +845,12 @@ func (wga *Analyzer) checkAddAfterWaitInMainFlow(wgName string, st *Stats) {
 		return
 	}
 	for _, wait := range st.waitCalls {
+		// Early-exit Waits don't gate later Adds (their branch never returns
+		// to the surrounding flow).
+		if wga.waitInEarlyExitBranch(wait) {
+			continue
+		}
+
 		// Check if this Wait has any Add or Done operations before it in main flow
 		hasOperationsBefore := false
 

@@ -201,6 +201,31 @@ func GoodAddInsideGoroutineWithWaitInsideSameGoroutine() {
 	<-done
 }
 
+// A Wait inside an early-exit branch (select case followed by return) must
+// not gate later Adds: control flow never reaches the surrounding code from
+// that branch, so the WaitGroup is reused legitimately across loop iterations.
+func GoodWaitInEarlyExitBranchDoesNotGateLaterAdd(batches [][]int, doneCh <-chan struct{}) {
+	var wg sync.WaitGroup
+	for _, batch := range batches {
+		for _, idx := range batch {
+			_ = idx
+			select {
+			case <-doneCh:
+				wg.Wait()
+				return
+			default:
+			}
+			if len(batch) > 1 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+				}()
+			}
+		}
+		wg.Wait()
+	}
+}
+
 // Edge case where Add is called after Wait, but in a different flow
 func EdgeCaseAddAfterWaitMainFlow() {
 	var wg sync.WaitGroup
