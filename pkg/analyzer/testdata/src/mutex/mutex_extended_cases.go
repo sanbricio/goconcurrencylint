@@ -933,13 +933,19 @@ func (h *HelperUnlockedState) releaseHelper() {
 	h.mu.Unlock()
 }
 
-func (h *HelperUnlockedState) GoodHelperReleasesCallerLock(async bool) {
+// Synchronous release: the helper Unlock runs in the caller's flow before
+// the function returns, so the lock is paired correctly.
+func (h *HelperUnlockedState) GoodHelperReleasesCallerLockSync() {
 	h.mu.Lock()
-	if async {
-		go h.releaseHelper()
-		return
-	}
 	h.releaseHelper()
+}
+
+// Asynchronous release: `go h.releaseHelper()` runs the Unlock in a separate
+// goroutine that may not have started by the time the function returns, so
+// the caller exits while the lock is still held. Flag as locked-but-not-unlocked.
+func (h *HelperUnlockedState) BadHelperReleasesCallerLockAsync() {
+	h.mu.Lock() // want "mutex 'h.mu' is locked but not unlocked"
+	go h.releaseHelper()
 }
 
 func (s *RecursiveLifecycleStore) releaseAndMaybeRetry(retry bool) {
@@ -965,6 +971,65 @@ func (s *RecursiveLifecycleStore) finishRetry(retry bool) {
 func (s *RecursiveLifecycleStore) GoodMutualRecursiveLifecycleRelease(retry bool) {
 	s.mu.Lock()
 	s.releaseAndMaybeRetry(retry)
+}
+
+type AsyncWorker struct {
+	mu sync.Mutex
+}
+
+func (a *AsyncWorker) backgroundReleaser() {
+	a.mu.Lock()
+	a.mu.Unlock()
+}
+
+// `go a.backgroundReleaser()` runs in another goroutine; its Lock/Unlock
+// must not affect the caller's state. The caller's Lock/Unlock pair stays
+// balanced and must not be reported as unlocked-without-lock.
+func (a *AsyncWorker) GoodCallerLockUnchangedByGoMethod() {
+	a.mu.Lock()
+	go a.backgroundReleaser()
+	a.mu.Unlock()
+}
+
+type HelperRUnlockedState struct {
+	mu sync.RWMutex
+}
+
+func (h *HelperRUnlockedState) releaseReadHelper() {
+	h.mu.RUnlock()
+}
+
+// Synchronous release: the helper RUnlock runs in the caller's flow before
+// the function returns, so the read lock is paired correctly.
+func (h *HelperRUnlockedState) GoodHelperReleasesCallerRLockSync() {
+	h.mu.RLock()
+	h.releaseReadHelper()
+}
+
+// Asynchronous release: `go h.releaseReadHelper()` runs the RUnlock in a
+// separate goroutine that may not have started by the time the function
+// returns, so the caller exits while the read lock is still held.
+func (h *HelperRUnlockedState) BadHelperReleasesCallerRLockAsync() {
+	h.mu.RLock() // want "rwmutex 'h.mu' is rlocked but not runlocked"
+	go h.releaseReadHelper()
+}
+
+type AsyncRWWorker struct {
+	mu sync.RWMutex
+}
+
+func (a *AsyncRWWorker) backgroundReadReleaser() {
+	a.mu.RLock()
+	a.mu.RUnlock()
+}
+
+// `go a.backgroundReadReleaser()` runs in another goroutine; its RLock/RUnlock
+// must not affect the caller's state. The caller's RLock/RUnlock pair stays
+// balanced and must not be reported as runlocked-without-rlock.
+func (a *AsyncRWWorker) GoodCallerRLockUnchangedByGoMethod() {
+	a.mu.RLock()
+	go a.backgroundReadReleaser()
+	a.mu.RUnlock()
 }
 
 func (s *RecursiveReadLifecycleStore) releaseReadAndMaybeRetry(retry bool) {

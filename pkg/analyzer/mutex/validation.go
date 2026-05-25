@@ -288,7 +288,8 @@ func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats
 		return
 	}
 
-	ma.applyLocalMethodLifecycleEffects(stmt.Call, stats)
+	// `go someMethod()` runs the method asynchronously in another goroutine;
+	// its Lock/Unlock effects belong to that goroutine, not the caller's state.
 }
 
 // analyzeForStatement handles for loop statements
