@@ -55,12 +55,22 @@ func (ec *ErrorCollector) AddError(pos token.Pos, cat category.Category, message
 	ec.errors = append(ec.errors, report)
 }
 
+type preparedError struct {
+	err ErrorReport
+	pos token.Position
+}
+
 // ReportAll emits every collected diagnostic via pass.Report. When ignore is
 // non-nil, diagnostics for which it returns true are dropped.
 func (ec *ErrorCollector) ReportAll(pass *analysis.Pass, ignore IgnoreFunc) {
-	sort.Slice(ec.errors, func(i, j int) bool {
-		posI := pass.Fset.Position(ec.errors[i].Pos)
-		posJ := pass.Fset.Position(ec.errors[j].Pos)
+	prepared := ec.filterAndPrepare(pass, ignore)
+	if len(prepared) == 0 {
+		return
+	}
+
+	sort.Slice(prepared, func(i, j int) bool {
+		posI := prepared[i].pos
+		posJ := prepared[j].pos
 		if posI.Filename != posJ.Filename {
 			return posI.Filename < posJ.Filename
 		}
@@ -70,23 +80,41 @@ func (ec *ErrorCollector) ReportAll(pass *analysis.Pass, ignore IgnoreFunc) {
 		if posI.Column != posJ.Column {
 			return posI.Column < posJ.Column
 		}
-		if ec.errors[i].Category != ec.errors[j].Category {
-			return ec.errors[i].Category < ec.errors[j].Category
+
+		errI := prepared[i].err
+		errJ := prepared[j].err
+		if errI.Category != errJ.Category {
+			return errI.Category < errJ.Category
 		}
-		return ec.errors[i].Message < ec.errors[j].Message
+
+		return errI.Message < errJ.Message
 	})
 
-	for _, err := range ec.errors {
-		if ignore != nil {
-			pos := pass.Fset.Position(err.Pos)
-			if ignore(pos.Filename, pos.Line, err.Category) {
-				continue
-			}
-		}
+	for _, item := range prepared {
 		pass.Report(analysis.Diagnostic{
-			Pos:      err.Pos,
-			Category: string(err.Category),
-			Message:  err.Message,
+			Pos:      item.err.Pos,
+			Category: string(item.err.Category),
+			Message:  item.err.Message,
 		})
 	}
+}
+
+// filterAndPrepare resolves token positions once per diagnostic,
+// filters ignored entries, and prepares the remaining data for sorting.
+func (ec *ErrorCollector) filterAndPrepare(pass *analysis.Pass, ignore IgnoreFunc) []preparedError {
+	cache := make([]preparedError, 0, len(ec.errors))
+
+	for _, err := range ec.errors {
+		pos := pass.Fset.Position(err.Pos)
+		if ignore != nil && ignore(pos.Filename, pos.Line, err.Category) {
+			continue
+		}
+
+		cache = append(cache, preparedError{
+			err: err,
+			pos: pos,
+		})
+	}
+
+	return cache
 }
