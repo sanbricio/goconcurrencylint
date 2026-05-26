@@ -1,4 +1,4 @@
-package analyzer
+package primitives
 
 import (
 	"go/ast"
@@ -11,7 +11,7 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-func TestGetVariableTypeNilCases(t *testing.T) {
+func TestVariableTypeNilCases(t *testing.T) {
 	vs := &ast.ValueSpec{
 		Names:  []*ast.Ident{{Name: "test"}},
 		Type:   nil,
@@ -24,11 +24,11 @@ func TestGetVariableTypeNilCases(t *testing.T) {
 		},
 	}
 
-	result := getVariableType(vs, pass)
+	result := variableType(vs, pass)
 	assert.Nil(t, result, "Should return nil when no type info available")
 }
 
-func TestGetVariableTypeWithValuesButNoTypeInfo(t *testing.T) {
+func TestVariableTypeWithValuesButNoTypeInfo(t *testing.T) {
 	unknownExpr := &ast.BasicLit{Value: "123"}
 
 	vs := &ast.ValueSpec{
@@ -44,7 +44,7 @@ func TestGetVariableTypeWithValuesButNoTypeInfo(t *testing.T) {
 		},
 	}
 
-	result := getVariableType(vs, pass)
+	result := variableType(vs, pass)
 	assert.Nil(t, result, "Should return nil when TypeOf returns nil for value")
 }
 
@@ -75,8 +75,13 @@ func TestFunc() {
 		}
 	}
 
-	primitives := findSyncPrimitives(testFunc, pass)
+	pkg := &Result{
+		Mutexes:    map[string]bool{},
+		RWMutexes:  map[string]bool{},
+		WaitGroups: map[string]bool{},
+	}
+	fr := ForFunction(testFunc, pass, pkg)
 
-	assert.False(t, hasMutexes(primitives), "Should not have mutexes")
-	assert.False(t, hasWaitGroups(primitives), "Should not have waitgroups")
+	assert.False(t, HasMutexes(fr), "Should not have mutexes")
+	assert.False(t, HasWaitGroups(fr), "Should not have waitgroups")
 }

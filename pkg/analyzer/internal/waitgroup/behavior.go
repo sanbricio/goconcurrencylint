@@ -4,8 +4,8 @@ import (
 	"go/ast"
 	"go/token"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
 type waitDonePositions struct {
@@ -14,7 +14,7 @@ type waitDonePositions struct {
 	deferDones []token.Pos
 }
 
-func (wga *Analyzer) checkWaitAndDoneInSameGoroutine() {
+func (wga *Checker) checkWaitAndDoneInSameGoroutine() {
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		goStmt, ok := n.(*ast.GoStmt)
 		if !ok {
@@ -39,7 +39,7 @@ func (wga *Analyzer) checkWaitAndDoneInSameGoroutine() {
 	})
 }
 
-func (wga *Analyzer) waitDependsOnDoneInSameGoroutine(waitPos token.Pos, positions waitDonePositions) bool {
+func (wga *Checker) waitDependsOnDoneInSameGoroutine(waitPos token.Pos, positions waitDonePositions) bool {
 	for _, donePos := range positions.dones {
 		if donePos > waitPos {
 			return true
@@ -51,7 +51,7 @@ func (wga *Analyzer) waitDependsOnDoneInSameGoroutine(waitPos token.Pos, positio
 	return false
 }
 
-func (wga *Analyzer) collectWaitDonePositions(block *ast.BlockStmt, wgName string) waitDonePositions {
+func (wga *Checker) collectWaitDonePositions(block *ast.BlockStmt, wgName string) waitDonePositions {
 	positions := waitDonePositions{}
 
 	var visitStmt func(ast.Stmt)
@@ -169,7 +169,7 @@ func (wga *Analyzer) collectWaitDonePositions(block *ast.BlockStmt, wgName strin
 	return positions
 }
 
-func (wga *Analyzer) visitWaitDoneElse(stmt ast.Stmt, visitStmt func(ast.Stmt), visitStmts func([]ast.Stmt)) {
+func (wga *Checker) visitWaitDoneElse(stmt ast.Stmt, visitStmt func(ast.Stmt), visitStmts func([]ast.Stmt)) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
 		visitStmts(s.List)
@@ -178,7 +178,7 @@ func (wga *Analyzer) visitWaitDoneElse(stmt ast.Stmt, visitStmt func(ast.Stmt), 
 	}
 }
 
-func (wga *Analyzer) recordWaitDoneCall(call *ast.CallExpr, wgName string, positions *waitDonePositions) {
+func (wga *Checker) recordWaitDoneCall(call *ast.CallExpr, wgName string, positions *waitDonePositions) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || common.GetVarName(sel.X) != wgName {
 		return
@@ -192,7 +192,7 @@ func (wga *Analyzer) recordWaitDoneCall(call *ast.CallExpr, wgName string, posit
 	}
 }
 
-func (wga *Analyzer) deferInvokesDone(deferStmt *ast.DeferStmt, wgName string) bool {
+func (wga *Checker) deferInvokesDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	if wga.isSimpleDeferDone(deferStmt, wgName) || wga.isCallbackDeferDone(deferStmt, wgName) {
 		return true
 	}
@@ -202,13 +202,13 @@ func (wga *Analyzer) deferInvokesDone(deferStmt *ast.DeferStmt, wgName string) b
 	return false
 }
 
-func (wga *Analyzer) checkDoneOutsideWorkerGoroutine() {
+func (wga *Checker) checkDoneOutsideWorkerGoroutine() {
 	for wgName := range wga.waitGroupNames {
 		wga.checkDoneOutsideWorkerForWaitGroup(wgName)
 	}
 }
 
-func (wga *Analyzer) checkDoneOutsideWorkerForWaitGroup(wgName string) {
+func (wga *Checker) checkDoneOutsideWorkerForWaitGroup(wgName string) {
 	pendingAdds := 0
 	// Keep this intentionally narrow: only an Add immediately followed by a
 	// worker goroutine is treated as an ownership handoff.
@@ -331,7 +331,7 @@ func (wga *Analyzer) checkDoneOutsideWorkerForWaitGroup(wgName string) {
 	}
 }
 
-func (wga *Analyzer) visitMainFlowElse(stmt ast.Stmt, visitStmt func(ast.Stmt), visitStmts func([]ast.Stmt)) {
+func (wga *Checker) visitMainFlowElse(stmt ast.Stmt, visitStmt func(ast.Stmt), visitStmts func([]ast.Stmt)) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
 		visitStmts(s.List)
@@ -340,7 +340,7 @@ func (wga *Analyzer) visitMainFlowElse(stmt ast.Stmt, visitStmt func(ast.Stmt), 
 	}
 }
 
-func (wga *Analyzer) addDelta(call *ast.CallExpr, wgName string) (int, bool) {
+func (wga *Checker) addDelta(call *ast.CallExpr, wgName string) (int, bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Add" || common.GetVarName(sel.X) != wgName {
 		return 0, false
@@ -355,7 +355,7 @@ func (wga *Analyzer) addDelta(call *ast.CallExpr, wgName string) (int, bool) {
 	return addValue, true
 }
 
-func (wga *Analyzer) checkWaitGroupGoPanic() {
+func (wga *Checker) checkWaitGroupGoPanic() {
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || wga.commentFilter.ShouldSkipCall(call) {
@@ -382,7 +382,7 @@ func (wga *Analyzer) checkWaitGroupGoPanic() {
 	})
 }
 
-func (wga *Analyzer) functionLiteralMayPanic(fnLit *ast.FuncLit) bool {
+func (wga *Checker) functionLiteralMayPanic(fnLit *ast.FuncLit) bool {
 	if fnLit == nil || fnLit.Body == nil || wga.functionLiteralRecovers(fnLit) {
 		return false
 	}
@@ -409,7 +409,7 @@ func (wga *Analyzer) functionLiteralMayPanic(fnLit *ast.FuncLit) bool {
 	return found
 }
 
-func (wga *Analyzer) functionLiteralRecovers(fnLit *ast.FuncLit) bool {
+func (wga *Checker) functionLiteralRecovers(fnLit *ast.FuncLit) bool {
 	if fnLit == nil || fnLit.Body == nil {
 		return false
 	}
@@ -435,7 +435,7 @@ func (wga *Analyzer) functionLiteralRecovers(fnLit *ast.FuncLit) bool {
 	return found
 }
 
-func (wga *Analyzer) deferCallRecovers(call *ast.CallExpr) bool {
+func (wga *Checker) deferCallRecovers(call *ast.CallExpr) bool {
 	if call == nil {
 		return false
 	}
@@ -471,7 +471,7 @@ func (wga *Analyzer) deferCallRecovers(call *ast.CallExpr) bool {
 	return found
 }
 
-func (wga *Analyzer) checkAddInsideGoroutine() {
+func (wga *Checker) checkAddInsideGoroutine() {
 	mainFlowWaits := make(map[string]bool)
 	hasMainFlowWait := func(wgName string) bool {
 		if cached, ok := mainFlowWaits[wgName]; ok {
@@ -516,7 +516,7 @@ func (wga *Analyzer) checkAddInsideGoroutine() {
 	})
 }
 
-func (wga *Analyzer) hasMainFlowWait(wgName string) bool {
+func (wga *Checker) hasMainFlowWait(wgName string) bool {
 	found := false
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		if found {
@@ -536,7 +536,7 @@ func (wga *Analyzer) hasMainFlowWait(wgName string) bool {
 	return found
 }
 
-func (wga *Analyzer) waitGroupIdentDefinedInside(body *ast.BlockStmt, expr ast.Expr) bool {
+func (wga *Checker) waitGroupIdentDefinedInside(body *ast.BlockStmt, expr ast.Expr) bool {
 	ident, ok := expr.(*ast.Ident)
 	if !ok || body == nil || wga.typesInfo == nil {
 		return false
@@ -548,7 +548,7 @@ func (wga *Analyzer) waitGroupIdentDefinedInside(body *ast.BlockStmt, expr ast.E
 	return obj != nil && body.Pos() <= obj.Pos() && obj.Pos() <= body.End()
 }
 
-func (wga *Analyzer) checkMultipleDoneSameWorkerBranch() {
+func (wga *Checker) checkMultipleDoneSameWorkerBranch() {
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		goStmt, ok := n.(*ast.GoStmt)
 		if !ok || wga.commentFilter.ShouldSkipStatement(goStmt) {
@@ -565,7 +565,7 @@ func (wga *Analyzer) checkMultipleDoneSameWorkerBranch() {
 	})
 }
 
-func (wga *Analyzer) checkMultipleDoneInBranch(stmts []ast.Stmt, wgName string, count int) int {
+func (wga *Checker) checkMultipleDoneInBranch(stmts []ast.Stmt, wgName string, count int) int {
 	current := count
 	for _, stmt := range stmts {
 		if stmt == nil || wga.commentFilter.ShouldSkipStatement(stmt) {
@@ -600,7 +600,7 @@ func (wga *Analyzer) checkMultipleDoneInBranch(stmts []ast.Stmt, wgName string, 
 	return current
 }
 
-func (wga *Analyzer) checkMultipleDoneInElse(stmt ast.Stmt, wgName string, count int) {
+func (wga *Checker) checkMultipleDoneInElse(stmt ast.Stmt, wgName string, count int) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
 		wga.checkMultipleDoneInBranch(s.List, wgName, count)
@@ -609,7 +609,7 @@ func (wga *Analyzer) checkMultipleDoneInElse(stmt ast.Stmt, wgName string, count
 	}
 }
 
-func (wga *Analyzer) checkNestedWaitGroupDeadlock() {
+func (wga *Checker) checkNestedWaitGroupDeadlock() {
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		goStmt, ok := n.(*ast.GoStmt)
 		if !ok || wga.commentFilter.ShouldSkipStatement(goStmt) {
@@ -629,7 +629,7 @@ func (wga *Analyzer) checkNestedWaitGroupDeadlock() {
 	})
 }
 
-func (wga *Analyzer) workerDoneWaitGroups(body *ast.BlockStmt) map[string]bool {
+func (wga *Checker) workerDoneWaitGroups(body *ast.BlockStmt) map[string]bool {
 	outerGroups := make(map[string]bool)
 	for wgName := range wga.waitGroupNames {
 		if wga.analyzeDoneCallsWithVisited(body, wgName, make(map[token.Pos]bool)).hasAnyDone {
@@ -639,7 +639,7 @@ func (wga *Analyzer) workerDoneWaitGroups(body *ast.BlockStmt) map[string]bool {
 	return outerGroups
 }
 
-func (wga *Analyzer) reportNestedWaitsForWorker(goStmt *ast.GoStmt, body *ast.BlockStmt, outerGroups map[string]bool) {
+func (wga *Checker) reportNestedWaitsForWorker(goStmt *ast.GoStmt, body *ast.BlockStmt, outerGroups map[string]bool) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || wga.commentFilter.ShouldSkipCall(call) {
@@ -670,7 +670,7 @@ func (wga *Analyzer) reportNestedWaitsForWorker(goStmt *ast.GoStmt, body *ast.Bl
 	})
 }
 
-func (wga *Analyzer) workerReleasesWaitGroupBefore(body *ast.BlockStmt, wgName string, before token.Pos) bool {
+func (wga *Checker) workerReleasesWaitGroupBefore(body *ast.BlockStmt, wgName string, before token.Pos) bool {
 	if body == nil {
 		return false
 	}
@@ -688,7 +688,7 @@ func (wga *Analyzer) workerReleasesWaitGroupBefore(body *ast.BlockStmt, wgName s
 	return false
 }
 
-func (wga *Analyzer) topLevelStatementReleasesWaitGroup(stmt ast.Stmt, wgName string) bool {
+func (wga *Checker) topLevelStatementReleasesWaitGroup(stmt ast.Stmt, wgName string) bool {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		call, ok := s.X.(*ast.CallExpr)
@@ -700,7 +700,7 @@ func (wga *Analyzer) topLevelStatementReleasesWaitGroup(stmt ast.Stmt, wgName st
 	}
 }
 
-func (wga *Analyzer) callReleasesWaitGroup(call *ast.CallExpr, wgName string) bool {
+func (wga *Checker) callReleasesWaitGroup(call *ast.CallExpr, wgName string) bool {
 	if call == nil || wga.commentFilter.ShouldSkipCall(call) {
 		return false
 	}
@@ -718,7 +718,7 @@ func (wga *Analyzer) callReleasesWaitGroup(call *ast.CallExpr, wgName string) bo
 	return ok && delta < 0
 }
 
-func (wga *Analyzer) outerWaitBeforeInnerRelease(goPos token.Pos, outerWG, innerWG string) bool {
+func (wga *Checker) outerWaitBeforeInnerRelease(goPos token.Pos, outerWG, innerWG string) bool {
 	var outerWait token.Pos
 	var innerRelease token.Pos
 	hasInnerAdd := false

@@ -3,11 +3,11 @@ package mutex
 import (
 	"go/ast"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
-func (ma *Analyzer) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]*Stats) {
 	ma.recordCollectionLengthsFromAssign(stmt)
 	ma.reportPotentialPanicWhileLocked(stmt, stats)
 
@@ -36,12 +36,12 @@ func (ma *Analyzer) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[strin
 	}
 }
 
-func (ma *Analyzer) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {
 	ma.recordCollectionLengthsFromDecl(stmt)
 	ma.reportPotentialPanicWhileLocked(stmt, stats)
 }
 
-func (ma *Analyzer) tryLockResultFromCall(call *ast.CallExpr) *tryLockResult {
+func (ma *Checker) tryLockResultFromCall(call *ast.CallExpr) *tryLockResult {
 	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
 		return nil
 	}
@@ -67,7 +67,7 @@ func (ma *Analyzer) tryLockResultFromCall(call *ast.CallExpr) *tryLockResult {
 	return nil
 }
 
-func (ma *Analyzer) markReturnedTryLockResultsChecked(stmt *ast.ReturnStmt) {
+func (ma *Checker) markReturnedTryLockResultsChecked(stmt *ast.ReturnStmt) {
 	for _, result := range stmt.Results {
 		ident, ok := result.(*ast.Ident)
 		if !ok {
@@ -79,7 +79,7 @@ func (ma *Analyzer) markReturnedTryLockResultsChecked(stmt *ast.ReturnStmt) {
 	}
 }
 
-func (ma *Analyzer) reportUncheckedTryLockResults() {
+func (ma *Checker) reportUncheckedTryLockResults() {
 	for _, result := range ma.tryLockResults {
 		if result != nil && !result.checked {
 			ma.reportUncheckedTryLockResult(result)
@@ -87,7 +87,7 @@ func (ma *Analyzer) reportUncheckedTryLockResults() {
 	}
 }
 
-func (ma *Analyzer) reportUncheckedTryLockResult(result *tryLockResult) {
+func (ma *Checker) reportUncheckedTryLockResult(result *tryLockResult) {
 	if result == nil {
 		return
 	}
@@ -98,7 +98,7 @@ func (ma *Analyzer) reportUncheckedTryLockResult(result *tryLockResult) {
 	ma.errorCollector.AddError(result.pos, category.UncheckedTryLock, mutexType+" '"+result.varName+"' "+result.method+" return value not checked, lock may not be held")
 }
 
-func (ma *Analyzer) applyTryLockResultToBranch(cond ast.Expr, stats map[string]*Stats) bool {
+func (ma *Checker) applyTryLockResultToBranch(cond ast.Expr, stats map[string]*Stats) bool {
 	ident, ok := cond.(*ast.Ident)
 	if !ok {
 		return false

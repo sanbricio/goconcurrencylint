@@ -1,475 +1,59 @@
+// Package analyzer is the public entry point for the goconcurrencylint
+// linter. It exposes a single *analysis.Analyzer that the singlechecker
+// binary and golangci-lint can consume.
+//
+// Internally the work is split across sub-analyzers wired together via
+// the go/analysis Requires graph. The umbrella Analyzer is the only
+// exported one; the rest live under internal/ and are composed through
+// pass.ResultOf.
+//
+//	Analyzer (umbrella, this package)
+//	│   re-emits the diagnostic slices below via pass.Report
+//	│
+//	├── mutex.SubAnalyzer ──────┐
+//	├── waitgroup.SubAnalyzer ──┤── requires primitives.Analyzer ─┐
+//	└── copycheck.Analyzer ─────┴── requires filesetup.Analyzer   │
+//	                                                              └── requires inspect.Analyzer
+//
+// "A requires B" means B runs first and exposes its Result through
+// pass.ResultOf[B]. Each sub-analyzer returns its diagnostic slice as a
+// Result instead of calling pass.Report directly. The umbrella below
+// re-emits them on its own pass so analysistest and any other consumer
+// that targets the umbrella sees the complete diagnostic set.
 package analyzer
 
 import (
-	"go/ast"
-	"go/token"
-	"go/types"
-	"maps"
-	"strings"
-
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/mutex"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/waitgroup"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/copycheck"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/mutex"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/waitgroup"
 	"golang.org/x/tools/go/analysis"
 )
 
-// Analyzer is the main entry point for the goconcurrencylint linter.
-// It performs control-flow-sensitive analysis to detect structural misuse
-// of sync.Mutex, sync.RWMutex, and sync.WaitGroup, plus copy-by-value of
-// these primitives. Each diagnostic is emitted with a stable Category
-// identifier so downstream tooling can filter by check.
 var Analyzer = &analysis.Analyzer{
-	Name:     "goconcurrencylint",
-	Doc:      "Detects misuse of sync.Mutex, sync.RWMutex and sync.WaitGroup, plus copy-by-value of sync primitives.",
-	Run:      run,
-	Requires: []*analysis.Analyzer{},
-}
-
-// syncPrimitive holds information about sync primitives found in a function
-type syncPrimitive struct {
-	mutexes    map[string]bool
-	rwMutexes  map[string]bool
-	waitGroups map[string]bool
+	Name: "goconcurrencylint",
+	Doc:  "Detects misuse of sync.Mutex, sync.RWMutex and sync.WaitGroup, plus copy-by-value of sync primitives.",
+	Run:  run,
+	Requires: []*analysis.Analyzer{
+		mutex.SubAnalyzer,
+		waitgroup.SubAnalyzer,
+		copycheck.Analyzer,
+	},
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	errorCollector := &report.ErrorCollector{}
-	pkgPrimitives := collectPackageLevelPrimitives(pass)
-
-	filtersByFile := make(map[string]*commentfilter.CommentFilter, len(pass.Files))
-	for _, file := range pass.Files {
-		if common.IsGeneratedFile(file) {
-			continue
-		}
-		cf := commentfilter.NewCommentFilter(pass.Fset, file)
-		if name := cf.FileName(); name != "" {
-			filtersByFile[name] = cf
-		}
-		analyzeFunctionsWithFilter(file, cf, pass, errorCollector, pkgPrimitives)
+	subs := []*analysis.Analyzer{
+		mutex.SubAnalyzer,
+		waitgroup.SubAnalyzer,
+		copycheck.Analyzer,
 	}
-	detectCopyByValue(pass, errorCollector)
-
-	errorCollector.ReportAll(pass, ignoreFromFilters(filtersByFile))
-	return nil, nil
-}
-
-// ignoreFromFilters returns an IgnoreFunc that consults the per-file
-// CommentFilter for inline directives. A nil map is treated as "no
-// directives present anywhere".
-func ignoreFromFilters(filters map[string]*commentfilter.CommentFilter) report.IgnoreFunc {
-	if len(filters) == 0 {
-		return nil
-	}
-	return func(filename string, line int, cat category.Category) bool {
-		cf, ok := filters[filename]
+	for _, sub := range subs {
+		diags, ok := pass.ResultOf[sub].([]analysis.Diagnostic)
 		if !ok {
-			return false
-		}
-		return cf.IsCategoryIgnored(line, cat)
-	}
-}
-
-// analyzeFunctionsWithFilter processes all function declarations in a file
-// using a pre-built CommentFilter, so the same instance is reused for
-// per-file ignore-directive lookups at report time.
-func analyzeFunctionsWithFilter(file *ast.File, commentFilter *commentfilter.CommentFilter, pass *analysis.Pass, errorCollector report.Reporter, pkgPrimitives *syncPrimitive) {
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
 			continue
 		}
-
-		primitives := findSyncPrimitives(fn, pass)
-		localWaitGroups := copyPrimitiveNames(primitives.waitGroups)
-		mergePrimitives(primitives, pkgPrimitives)
-
-		if hasMutexes(primitives) {
-			analyzeMutexUsage(fn, primitives, errorCollector, commentFilter, pass)
-		}
-
-		if hasWaitGroups(primitives) {
-			analyzeWaitGroupUsage(fn, primitives, localWaitGroups, pkgPrimitives.waitGroups, errorCollector, commentFilter, pass)
+		for _, d := range diags {
+			pass.Report(d)
 		}
 	}
-}
-
-// collectPackageLevelPrimitives scans package-level declarations for sync primitives,
-// including declarations that live in other files from the same package.
-func collectPackageLevelPrimitives(pass *analysis.Pass) *syncPrimitive {
-	primitives := &syncPrimitive{
-		mutexes:    make(map[string]bool),
-		rwMutexes:  make(map[string]bool),
-		waitGroups: make(map[string]bool),
-	}
-
-	scope := pass.Pkg.Scope()
-	for _, name := range scope.Names() {
-		obj := scope.Lookup(name)
-		varObj, ok := obj.(*types.Var)
-		if !ok || varObj.IsField() {
-			continue
-		}
-
-		if varObj.Pkg() != pass.Pkg {
-			continue
-		}
-
-		classifyAndAddPrimitive(name, varObj.Type(), primitives)
-	}
-
-	return primitives
-}
-
-// mergePrimitives merges src primitives into dst
-func mergePrimitives(dst, src *syncPrimitive) {
-	maps.Copy(dst.mutexes, src.mutexes)
-	maps.Copy(dst.rwMutexes, src.rwMutexes)
-	maps.Copy(dst.waitGroups, src.waitGroups)
-}
-
-func copyPrimitiveNames(src map[string]bool) map[string]bool {
-	dst := make(map[string]bool, len(src))
-	maps.Copy(dst, src)
-	return dst
-}
-
-// findSyncPrimitives identifies all sync primitives declared in a function,
-// including local variables, function parameters, and struct field accesses.
-func findSyncPrimitives(fn *ast.FuncDecl, pass *analysis.Pass) *syncPrimitive {
-	primitives := &syncPrimitive{
-		mutexes:    make(map[string]bool),
-		rwMutexes:  make(map[string]bool),
-		waitGroups: make(map[string]bool),
-	}
-
-	// Check function parameters for mutex primitives (e.g., func f(mu *sync.Mutex)).
-	// WaitGroup parameters are intentionally excluded: Done-only worker functions
-	// (e.g., func worker(wg *sync.WaitGroup) { defer wg.Done() }) would produce false positives.
-	if fn.Type != nil && fn.Type.Params != nil {
-		for _, field := range fn.Type.Params.List {
-			typ := pass.TypesInfo.TypeOf(field.Type)
-			if typ == nil {
-				continue
-			}
-			for _, name := range field.Names {
-				switch {
-				case common.IsMutex(typ):
-					primitives.mutexes[name.Name] = true
-				case common.IsRWMutex(typ):
-					primitives.rwMutexes[name.Name] = true
-				}
-			}
-		}
-	}
-
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.ValueSpec:
-			// Handle var declarations
-			for _, name := range node.Names {
-				typ := getVariableType(node, pass)
-				if typ == nil {
-					continue
-				}
-				classifyAndAddPrimitive(name.Name, typ, primitives)
-			}
-
-		case *ast.AssignStmt:
-			if node.Tok != token.DEFINE && node.Tok != token.ASSIGN {
-				break
-			}
-			for i, lhs := range node.Lhs {
-				ident, ok := lhs.(*ast.Ident)
-				if !ok || i >= len(node.Rhs) {
-					continue
-				}
-				if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
-					classifyAndAddPrimitive(ident.Name, typ, primitives)
-				}
-			}
-
-		case *ast.SelectorExpr:
-			// Handle struct field access (e.g., s.mu where mu is sync.Mutex)
-			if selection, ok := pass.TypesInfo.Selections[node]; ok && selection.Kind() == types.FieldVal {
-				fieldType := selection.Type()
-				parentName := common.GetVarName(node.X)
-				if parentName != "?" {
-					compoundName := parentName + "." + node.Sel.Name
-					classifyAndAddPrimitive(compoundName, fieldType, primitives)
-				}
-			}
-		}
-		return true
-	})
-
-	return primitives
-}
-
-// classifyAndAddPrimitive classifies a type and adds it to the appropriate primitive map
-func classifyAndAddPrimitive(varName string, typ types.Type, primitives *syncPrimitive) {
-	switch {
-	case common.IsMutex(typ):
-		primitives.mutexes[varName] = true
-	case common.IsRWMutex(typ):
-		primitives.rwMutexes[varName] = true
-	case common.IsWaitGroup(typ):
-		primitives.waitGroups[varName] = true
-	}
-}
-
-// getVariableType extracts the type information for a variable specification
-func getVariableType(vs *ast.ValueSpec, pass *analysis.Pass) types.Type {
-	// First try to get type from explicit type annotation
-	if vs.Type != nil {
-		typ := pass.TypesInfo.TypeOf(vs.Type)
-		if typ != nil {
-			return typ
-		}
-	}
-
-	// If no explicit type, try to infer from the first value
-	if len(vs.Values) > 0 {
-		typ := pass.TypesInfo.TypeOf(vs.Values[0])
-		if typ != nil {
-			return typ
-		}
-	}
-
-	// Last resort: try to get type info from the first name
-	if len(vs.Names) > 0 {
-		if obj := pass.TypesInfo.ObjectOf(vs.Names[0]); obj != nil {
-			return obj.Type()
-		}
-	}
-
-	return nil
-}
-
-// hasMutexes checks if any mutex or rwmutex primitives were found
-func hasMutexes(primitives *syncPrimitive) bool {
-	return len(primitives.mutexes) > 0 || len(primitives.rwMutexes) > 0
-}
-
-// hasWaitGroups checks if any waitgroup primitives were found
-func hasWaitGroups(primitives *syncPrimitive) bool {
-	return len(primitives.waitGroups) > 0
-}
-
-// analyzeMutexUsage handles mutex and rwmutex analysis
-func analyzeMutexUsage(fn *ast.FuncDecl, primitives *syncPrimitive, errorCollector report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
-	analyzer := mutex.NewAnalyzer(primitives.mutexes, primitives.rwMutexes, errorCollector, cf, pass.TypesInfo, pass.Files)
-	analyzer.AnalyzeFunction(fn)
-}
-
-// analyzeWaitGroupUsage handles waitgroup analysis
-func analyzeWaitGroupUsage(fn *ast.FuncDecl, primitives *syncPrimitive, localWaitGroups, packageLevelWaitGroups map[string]bool, errorCollector report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) {
-	analyzer := waitgroup.NewAnalyzer(primitives.waitGroups, localWaitGroups, packageLevelWaitGroups, errorCollector, cf, pass)
-	analyzer.AnalyzeFunction(fn)
-}
-
-func detectCopyByValue(pass *analysis.Pass, errorCollector report.Reporter) {
-	for _, file := range pass.Files {
-		if common.IsGeneratedFile(file) {
-			continue
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.FuncDecl:
-				reportCopyByValueParams(node, pass, errorCollector)
-			case *ast.FuncLit:
-				reportCopyByValueFuncLitParams(node, pass, errorCollector)
-			case *ast.ValueSpec:
-				reportCopyByValueValueSpec(node, pass, errorCollector)
-			case *ast.AssignStmt:
-				reportCopyByValueAssignments(node, pass, errorCollector)
-			case *ast.CallExpr:
-				reportCopyByValueArgs(node, pass, errorCollector)
-			}
-			return true
-		})
-	}
-}
-
-func reportCopyByValueFuncLitParams(fn *ast.FuncLit, pass *analysis.Pass, errorCollector report.Reporter) {
-	if fn == nil || fn.Type == nil || fn.Type.Params == nil {
-		return
-	}
-
-	reportCopyByValueFieldList(fn.Type.Params, pass, errorCollector)
-}
-
-func reportCopyByValueParams(fn *ast.FuncDecl, pass *analysis.Pass, errorCollector report.Reporter) {
-	if fn == nil || fn.Type == nil || fn.Type.Params == nil {
-		return
-	}
-
-	if fn.Recv != nil {
-		reportCopyByValueFieldList(fn.Recv, pass, errorCollector)
-	}
-	reportCopyByValueFieldList(fn.Type.Params, pass, errorCollector)
-}
-
-func reportCopyByValueFieldList(fields *ast.FieldList, pass *analysis.Pass, errorCollector report.Reporter) {
-	for _, field := range fields.List {
-		kind := syncPrimitiveValueKind(pass.TypesInfo.TypeOf(field.Type))
-		if kind == "" {
-			continue
-		}
-		for _, name := range field.Names {
-			errorCollector.AddError(name.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name.Name))
-		}
-	}
-}
-
-func reportCopyByValueValueSpec(vs *ast.ValueSpec, pass *analysis.Pass, errorCollector report.Reporter) {
-	if vs == nil {
-		return
-	}
-
-	for _, value := range vs.Values {
-		if kind, name, ok := copiedSyncPrimitive(value, pass); ok {
-			errorCollector.AddError(value.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name))
-		}
-	}
-}
-
-func reportCopyByValueAssignments(assign *ast.AssignStmt, pass *analysis.Pass, errorCollector report.Reporter) {
-	if assign == nil || (assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE) {
-		return
-	}
-
-	for i, rhs := range assign.Rhs {
-		if i < len(assign.Lhs) && isBlankIdentifier(assign.Lhs[i]) {
-			continue
-		}
-		if kind, name, ok := copiedSyncPrimitive(rhs, pass); ok {
-			errorCollector.AddError(rhs.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name))
-		}
-	}
-}
-
-func reportCopyByValueArgs(call *ast.CallExpr, pass *analysis.Pass, errorCollector report.Reporter) {
-	if call == nil {
-		return
-	}
-
-	for _, arg := range call.Args {
-		if kind, name, ok := copiedSyncPrimitive(arg, pass); ok {
-			errorCollector.AddError(arg.Pos(), category.SyncPrimitiveCopy, copyByValueMessage(kind, name))
-		}
-	}
-}
-
-func copiedSyncPrimitive(expr ast.Expr, pass *analysis.Pass) (string, string, bool) {
-	if expr == nil || isTypeExpression(expr, pass.TypesInfo) || isFreshSyncPrimitiveValue(expr) {
-		return "", "", false
-	}
-
-	kind := syncPrimitiveValueKind(pass.TypesInfo.TypeOf(expr))
-	if kind == "" {
-		return "", "", false
-	}
-
-	name := common.GetVarName(expr)
-	if name == "" || name == "?" {
-		return "", "", false
-	}
-	return kind, name, true
-}
-
-func isBlankIdentifier(expr ast.Expr) bool {
-	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == "_"
-}
-
-func isTypeExpression(expr ast.Expr, info *types.Info) bool {
-	if expr == nil || info == nil {
-		return false
-	}
-	tv, ok := info.Types[expr]
-	return ok && tv.IsType()
-}
-
-func isFreshSyncPrimitiveValue(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.CompositeLit:
-		return true
-	case *ast.UnaryExpr:
-		return e.Op == token.AND || isFreshSyncPrimitiveValue(e.X)
-	}
-	return false
-}
-
-func syncPrimitiveValueKind(typ types.Type) string {
-	if kind := directSyncPrimitiveValueKind(typ); kind != "" {
-		return kind
-	}
-	if kind := containedSyncPrimitiveValueKind(typ, make(map[types.Type]bool)); kind != "" {
-		return "struct containing " + kind
-	}
-	return ""
-}
-
-func directSyncPrimitiveValueKind(typ types.Type) string {
-	typ = types.Unalias(typ)
-
-	if match, ok := common.MatchPkgAndName(
-		typ, "sync", "Mutex", "RWMutex", "WaitGroup",
-	); ok {
-		switch match {
-		case "Mutex":
-			return "mutex"
-		case "RWMutex":
-			return "rwmutex"
-		case "WaitGroup":
-			return "waitgroup"
-		}
-	}
-
-	return ""
-}
-
-func copyByValueMessage(kind, name string) string {
-	if contained, ok := strings.CutPrefix(kind, "struct containing "); ok {
-		return "struct '" + name + "' containing " + contained + " is copied by value"
-	}
-	return kind + " '" + name + "' is copied by value"
-}
-
-func containedSyncPrimitiveValueKind(typ types.Type, visited map[types.Type]bool) string {
-	if typ == nil {
-		return ""
-	}
-
-	typ = types.Unalias(typ)
-	if visited[typ] {
-		return ""
-	}
-	visited[typ] = true
-
-	switch t := typ.(type) {
-	case *types.Named:
-		if kind := directSyncPrimitiveValueKind(t); kind != "" {
-			return kind
-		}
-		return containedSyncPrimitiveValueKind(t.Underlying(), visited)
-	case *types.Struct:
-		for field := range t.Fields() {
-			fieldType := types.Unalias(field.Type())
-			if _, ok := fieldType.(*types.Pointer); ok {
-				continue
-			}
-			if kind := directSyncPrimitiveValueKind(fieldType); kind != "" {
-				return kind
-			}
-			if kind := containedSyncPrimitiveValueKind(fieldType, visited); kind != "" {
-				return kind
-			}
-		}
-	}
-
-	return ""
+	return nil, nil
 }

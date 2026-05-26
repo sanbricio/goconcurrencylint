@@ -6,12 +6,12 @@ import (
 	"go/token"
 	"maps"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
 // handleDeferUnlock processes defer unlock calls
-func (ma *Analyzer) handleDeferUnlock(varName string, pos token.Pos, stats map[string]*Stats, isRWMutex bool) {
+func (ma *Checker) handleDeferUnlock(varName string, pos token.Pos, stats map[string]*Stats, isRWMutex bool) {
 	if stats[varName].lock == 0 {
 		mutexType := "mutex"
 		if isRWMutex {
@@ -25,7 +25,7 @@ func (ma *Analyzer) handleDeferUnlock(varName string, pos token.Pos, stats map[s
 }
 
 // handleDeferRUnlock processes defer runlock calls
-func (ma *Analyzer) handleDeferRUnlock(varName string, pos token.Pos, stats map[string]*Stats) {
+func (ma *Checker) handleDeferRUnlock(varName string, pos token.Pos, stats map[string]*Stats) {
 	if stats[varName].rlock == 0 {
 		ma.errorCollector.AddError(pos, category.DeferUnlockWithoutLock, "rwmutex '"+varName+"' has defer runlock but no corresponding rlock")
 		ma.deferErrors.badDeferRUnlock[varName] = true
@@ -35,7 +35,7 @@ func (ma *Analyzer) handleDeferRUnlock(varName string, pos token.Pos, stats map[
 }
 
 // analyzeRangeStatement handles range statements
-func (ma *Analyzer) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
 	ma.checkMutexDeclaredInLoop(stmt.Body)
 	ma.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := ma.analyzeBlock(stmt.Body, stats)
@@ -43,7 +43,7 @@ func (ma *Analyzer) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]
 }
 
 // analyzeSwitchStatement handles switch statements
-func (ma *Analyzer) analyzeSwitchStatement(stmt *ast.SwitchStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeSwitchStatement(stmt *ast.SwitchStmt, stats map[string]*Stats) {
 	for _, caseStmt := range stmt.Body.List {
 		if cc, ok := caseStmt.(*ast.CaseClause); ok {
 			caseStats := ma.analyzeStatements(cc.Body, stats)
@@ -53,7 +53,7 @@ func (ma *Analyzer) analyzeSwitchStatement(stmt *ast.SwitchStmt, stats map[strin
 }
 
 // analyzeTypeSwitchStatement handles type switch statements
-func (ma *Analyzer) analyzeTypeSwitchStatement(stmt *ast.TypeSwitchStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeTypeSwitchStatement(stmt *ast.TypeSwitchStmt, stats map[string]*Stats) {
 	for _, caseStmt := range stmt.Body.List {
 		if cc, ok := caseStmt.(*ast.CaseClause); ok {
 			caseStats := ma.analyzeStatements(cc.Body, stats)
@@ -63,7 +63,7 @@ func (ma *Analyzer) analyzeTypeSwitchStatement(stmt *ast.TypeSwitchStmt, stats m
 }
 
 // analyzeSelectStatement handles select statements
-func (ma *Analyzer) analyzeSelectStatement(stmt *ast.SelectStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeSelectStatement(stmt *ast.SelectStmt, stats map[string]*Stats) {
 	for _, commClause := range stmt.Body.List {
 		if cc, ok := commClause.(*ast.CommClause); ok {
 			commStats := ma.analyzeStatements(cc.Body, stats)
@@ -73,12 +73,12 @@ func (ma *Analyzer) analyzeSelectStatement(stmt *ast.SelectStmt, stats map[strin
 }
 
 // analyzeStatements is a helper to analyze a list of statements
-func (ma *Analyzer) analyzeStatements(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
+func (ma *Checker) analyzeStatements(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
 	return ma.analyzeStatementList(stmts, initial)
 }
 
 // analyzeIfStatement handles if statements with proper branch analysis
-func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) {
 	if ma.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -140,7 +140,7 @@ func (ma *Analyzer) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats
 
 // elseAlwaysTerminates reports whether every path through `elseNode`
 // terminates.
-func (ma *Analyzer) elseAlwaysTerminates(elseNode ast.Stmt) bool {
+func (ma *Checker) elseAlwaysTerminates(elseNode ast.Stmt) bool {
 	switch e := elseNode.(type) {
 	case *ast.BlockStmt:
 		return ma.blockAlwaysTerminates(e)
@@ -151,7 +151,7 @@ func (ma *Analyzer) elseAlwaysTerminates(elseNode ast.Stmt) bool {
 	}
 }
 
-func (ma *Analyzer) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
+func (ma *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
 	thenStats := ma.cloneStatsMap(stats)
 	elseStats := ma.cloneStatsMap(stats)
 
@@ -192,7 +192,7 @@ func (ma *Analyzer) branchInitialStatsForCondition(cond ast.Expr, stats map[stri
 }
 
 // analyzeElseBranch handles else branches (both else and else if)
-func (ma *Analyzer) analyzeElseBranch(elseNode ast.Stmt, stats map[string]*Stats) map[string]*Stats {
+func (ma *Checker) analyzeElseBranch(elseNode ast.Stmt, stats map[string]*Stats) map[string]*Stats {
 	switch e := elseNode.(type) {
 	case *ast.BlockStmt:
 		return ma.analyzeBlock(e, stats)
@@ -205,7 +205,7 @@ func (ma *Analyzer) analyzeElseBranch(elseNode ast.Stmt, stats map[string]*Stats
 	}
 }
 
-func (ma *Analyzer) canMergeBranchStates(a, b map[string]*Stats) bool {
+func (ma *Checker) canMergeBranchStates(a, b map[string]*Stats) bool {
 	for name := range ma.mutexNames {
 		if !ma.sameBranchState(a[name], b[name]) {
 			return false
@@ -221,7 +221,7 @@ func (ma *Analyzer) canMergeBranchStates(a, b map[string]*Stats) bool {
 	return true
 }
 
-func (ma *Analyzer) sameBranchState(a, b *Stats) bool {
+func (ma *Checker) sameBranchState(a, b *Stats) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
@@ -235,7 +235,7 @@ func (ma *Analyzer) sameBranchState(a, b *Stats) bool {
 }
 
 // analyzeGoStatement handles goroutine statements
-func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats) {
 	if ma.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -293,7 +293,7 @@ func (ma *Analyzer) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats
 }
 
 // analyzeForStatement handles for loop statements
-func (ma *Analyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stats) {
 	if ma.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -309,7 +309,7 @@ func (ma *Analyzer) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Sta
 	ma.copyStatsMap(stats, forStats)
 }
 
-func (ma *Analyzer) blockContainsReturn(block *ast.BlockStmt) bool {
+func (ma *Checker) blockContainsReturn(block *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(block, func(n ast.Node) bool {
 		if _, ok := n.(*ast.ReturnStmt); ok {
@@ -321,7 +321,7 @@ func (ma *Analyzer) blockContainsReturn(block *ast.BlockStmt) bool {
 	return found
 }
 
-func (ma *Analyzer) blockContainsBreak(block *ast.BlockStmt) bool {
+func (ma *Checker) blockContainsBreak(block *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(block, func(n ast.Node) bool {
 		branch, ok := n.(*ast.BranchStmt)
@@ -334,7 +334,7 @@ func (ma *Analyzer) blockContainsBreak(block *ast.BlockStmt) bool {
 	return found
 }
 
-func (ma *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
+func (ma *Checker) blockAlwaysTerminates(block *ast.BlockStmt) bool {
 	if block == nil {
 		return false
 	}
@@ -342,7 +342,7 @@ func (ma *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
 	return slices.ContainsFunc(block.List, ma.statementAlwaysTerminates)
 }
 
-func (ma *Analyzer) statementAlwaysTerminates(stmt ast.Stmt) bool {
+func (ma *Checker) statementAlwaysTerminates(stmt ast.Stmt) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
 		return true
@@ -368,7 +368,7 @@ func branchTerminatesBlock(tok token.Token) bool {
 		tok == token.FALLTHROUGH
 }
 
-func (ma *Analyzer) reportDeferredUnlocksInLoop(body *ast.BlockStmt) {
+func (ma *Checker) reportDeferredUnlocksInLoop(body *ast.BlockStmt) {
 	if body == nil {
 		return
 	}
@@ -378,7 +378,7 @@ func (ma *Analyzer) reportDeferredUnlocksInLoop(body *ast.BlockStmt) {
 	ma.reportDeferredUnlocksInLoopStatements(body.List, locked, rlocked)
 }
 
-func (ma *Analyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, locked, rlocked map[string]bool) {
+func (ma *Checker) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, locked, rlocked map[string]bool) {
 	for i, stmt := range stmts {
 		if ma.commentFilter.ShouldSkipStatement(stmt) {
 			continue
@@ -472,7 +472,7 @@ func (ma *Analyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, lock
 	}
 }
 
-func (ma *Analyzer) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, locked, rlocked map[string]bool) {
+func (ma *Checker) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, locked, rlocked map[string]bool) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
 		ma.reportDeferredUnlocksInLoopStatements(s.List, locked, rlocked)
@@ -481,7 +481,7 @@ func (ma *Analyzer) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, locked, rlock
 	}
 }
 
-func (ma *Analyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[string]*Stats) {
+func (ma *Checker) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[string]*Stats) {
 	for mutexName := range ma.mutexNames {
 		if pos, ok := ma.loopMayBreakHoldingMutex(stmt.Body.List, mutexName, []string{"Lock", "TryLock"}, []string{"Unlock"}, 0, token.NoPos); ok {
 			if final[mutexName].lock <= initial[mutexName].lock {
@@ -507,7 +507,7 @@ func (ma *Analyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[str
 	}
 }
 
-func (ma *Analyzer) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int, lastLockPos token.Pos) (token.Pos, bool) {
+func (ma *Checker) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int, lastLockPos token.Pos) (token.Pos, bool) {
 	currentDepth := depth
 	currentLockPos := lastLockPos
 
@@ -571,7 +571,7 @@ func (ma *Analyzer) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName string, l
 	return token.NoPos, false
 }
 
-func (ma *Analyzer) isCarriedLoopUnlock(varName string, unlockPos token.Pos, lockMethods, unlockMethods []string) bool {
+func (ma *Checker) isCarriedLoopUnlock(varName string, unlockPos token.Pos, lockMethods, unlockMethods []string) bool {
 	if ma.function == nil || ma.function.Body == nil || unlockPos == token.NoPos {
 		return false
 	}
@@ -607,7 +607,7 @@ func (ma *Analyzer) isCarriedLoopUnlock(varName string, unlockPos token.Pos, loc
 	return found
 }
 
-func (ma *Analyzer) loopMayCarryMutexPastIteration(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int) bool {
+func (ma *Checker) loopMayCarryMutexPastIteration(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int) bool {
 	currentDepth := depth
 
 	for _, stmt := range stmts {
@@ -698,7 +698,7 @@ func (ma *Analyzer) loopMayCarryMutexPastIteration(stmts []ast.Stmt, varName str
 }
 
 // reportUnmatchedLocksInBranch reports unmatched locks in conditional branches
-func (ma *Analyzer) reportUnmatchedLocksInBranch(initial, final map[string]*Stats, branchType string) {
+func (ma *Checker) reportUnmatchedLocksInBranch(initial, final map[string]*Stats, branchType string) {
 	if ma.rawBodyEffects {
 		return
 	}
@@ -714,7 +714,7 @@ func (ma *Analyzer) reportUnmatchedLocksInBranch(initial, final map[string]*Stat
 
 // reportBranchDelta reports only the extra locks that remain held compared to
 // the branch entry state.
-func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, isRWMutex bool, branchType string) {
+func (ma *Checker) reportBranchDelta(mutexName string, initial, final *Stats, isRWMutex bool, branchType string) {
 	if final == nil {
 		return
 	}
@@ -764,7 +764,7 @@ func (ma *Analyzer) reportBranchDelta(mutexName string, initial, final *Stats, i
 
 // unlockDiagnosticSuppressed reports whether ownership is managed outside the
 // current lock/unlock pair.
-func (ma *Analyzer) unlockDiagnosticSuppressed(mutexName string, acquireMethods []string) bool {
+func (ma *Checker) unlockDiagnosticSuppressed(mutexName string, acquireMethods []string) bool {
 	return ma.functionIsLifecycleReleaseFor(mutexName, acquireMethods) ||
 		ma.functionIsCallerManagedReleaseFor(mutexName, acquireMethods) ||
 		ma.functionIsParameterUnlockHelper(mutexName, acquireMethods)
@@ -772,18 +772,18 @@ func (ma *Analyzer) unlockDiagnosticSuppressed(mutexName string, acquireMethods 
 
 // terminatingTailUnlockSuppressed reports caller-owned unlocks before a
 // terminating tail.
-func (ma *Analyzer) terminatingTailUnlockSuppressed(mutexName string) bool {
+func (ma *Checker) terminatingTailUnlockSuppressed(mutexName string) bool {
 	return ma.terminatingTailDepth > 0 && ma.varRootIsFunctionParameter(mutexName)
 }
 
-func (ma *Analyzer) remainingLockCount(lockCount, deferredUnlocks int) int {
+func (ma *Checker) remainingLockCount(lockCount, deferredUnlocks int) int {
 	if lockCount <= deferredUnlocks {
 		return 0
 	}
 	return lockCount - deferredUnlocks
 }
 
-func (ma *Analyzer) trailingPositions(positions []token.Pos, count int) []token.Pos {
+func (ma *Checker) trailingPositions(positions []token.Pos, count int) []token.Pos {
 	if count <= 0 {
 		return nil
 	}
@@ -794,7 +794,7 @@ func (ma *Analyzer) trailingPositions(positions []token.Pos, count int) []token.
 }
 
 // reportUnmatchedMutexLocksWithContext reports unmatched locks for a specific mutex with context
-func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats *Stats, isRWMutex bool, branchType string) {
+func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *Stats, isRWMutex bool, branchType string) {
 	if stats == nil {
 		return
 	}
@@ -851,13 +851,13 @@ func (ma *Analyzer) reportUnmatchedMutexLocksWithContext(mutexName string, stats
 }
 
 // reportUnmatchedMutexLocks reports unmatched locks for a specific mutex
-func (ma *Analyzer) reportUnmatchedMutexLocks(mutexName string, stats *Stats, isRWMutex bool) {
+func (ma *Checker) reportUnmatchedMutexLocks(mutexName string, stats *Stats, isRWMutex bool) {
 	// Call the context-aware version with empty context for function-level reporting
 	ma.reportUnmatchedMutexLocksWithContext(mutexName, stats, isRWMutex, "")
 }
 
 // reportUnmatchedLocks reports any remaining unmatched locks at function level
-func (ma *Analyzer) reportUnmatchedLocks(stats map[string]*Stats) {
+func (ma *Checker) reportUnmatchedLocks(stats map[string]*Stats) {
 	if ma.rawBodyEffects {
 		return
 	}
@@ -905,7 +905,7 @@ func (ma *Analyzer) reportUnmatchedLocks(stats map[string]*Stats) {
 // handled when they themselves are analysed as for/range statements.
 // Function literals inside the loop are skipped to avoid false positives for
 // patterns like `for { go func() { var mu sync.Mutex; … }() }`.
-func (ma *Analyzer) checkMutexDeclaredInLoop(loopBody *ast.BlockStmt) {
+func (ma *Checker) checkMutexDeclaredInLoop(loopBody *ast.BlockStmt) {
 	if loopBody == nil || ma.typesInfo == nil {
 		return
 	}
@@ -931,7 +931,7 @@ func (ma *Analyzer) checkMutexDeclaredInLoop(loopBody *ast.BlockStmt) {
 	}
 }
 
-func (ma *Analyzer) reportMutexInLoopValueSpec(vs *ast.ValueSpec) {
+func (ma *Checker) reportMutexInLoopValueSpec(vs *ast.ValueSpec) {
 	for _, name := range vs.Names {
 		obj := ma.typesInfo.Defs[name]
 		if obj == nil {
@@ -949,7 +949,7 @@ func (ma *Analyzer) reportMutexInLoopValueSpec(vs *ast.ValueSpec) {
 	}
 }
 
-func (ma *Analyzer) reportMutexInLoopAssign(s *ast.AssignStmt) {
+func (ma *Checker) reportMutexInLoopAssign(s *ast.AssignStmt) {
 	for i, lhs := range s.Lhs {
 		ident, ok := lhs.(*ast.Ident)
 		if !ok || i >= len(s.Rhs) {

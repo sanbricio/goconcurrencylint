@@ -199,6 +199,19 @@ func IntegerLiteralValue(expr ast.Expr) (int, bool) {
 	return 0, false
 }
 
+// ReceiverName returns the bound name of fn's receiver (e.g. "s" in
+// "func (s *Foo) Bar()"). It returns "" when fn has no receiver, when the
+// receiver list is empty, or when the receiver is unnamed.
+func ReceiverName(fn *ast.FuncDecl) string {
+	if fn == nil || fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return ""
+	}
+	if len(fn.Recv.List[0].Names) == 0 {
+		return ""
+	}
+	return fn.Recv.List[0].Names[0].Name
+}
+
 // ConstantBoolValue returns the constant boolean value of expr when one is
 // available in the type information.
 func ConstantBoolValue(expr ast.Expr, info *types.Info) (bool, bool) {

@@ -6,8 +6,8 @@ import (
 	"maps"
 	"sort"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
 type lockOrderEdge struct {
@@ -26,7 +26,7 @@ type crossGoroutineReleases struct {
 	runlocks map[string][]token.Pos
 }
 
-func (ma *Analyzer) checkLockOrderCycles(block *ast.BlockStmt) {
+func (ma *Checker) checkLockOrderCycles(block *ast.BlockStmt) {
 	if block == nil {
 		return
 	}
@@ -37,7 +37,7 @@ func (ma *Analyzer) checkLockOrderCycles(block *ast.BlockStmt) {
 	ma.scanLockOrderStatements(block.List, make(map[string]bool), edges, reported, waitReleases)
 }
 
-func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
+func (ma *Checker) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	for _, stmt := range stmts {
 		if stmt == nil || ma.commentFilter.ShouldSkipStatement(stmt) {
 			continue
@@ -98,7 +98,7 @@ func (ma *Analyzer) scanLockOrderStatements(stmts []ast.Stmt, held map[string]bo
 	}
 }
 
-func (ma *Analyzer) scanLockOrderCall(call *ast.CallExpr, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
+func (ma *Checker) scanLockOrderCall(call *ast.CallExpr, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
 		return
 	}
@@ -122,7 +122,7 @@ func (ma *Analyzer) scanLockOrderCall(call *ast.CallExpr, held map[string]bool, 
 	}
 }
 
-func (ma *Analyzer) scanLockOrderDefer(stmt *ast.DeferStmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
+func (ma *Checker) scanLockOrderDefer(stmt *ast.DeferStmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	if stmt == nil || ma.commentFilter.ShouldSkipCall(stmt.Call) {
 		return
 	}
@@ -131,7 +131,7 @@ func (ma *Analyzer) scanLockOrderDefer(stmt *ast.DeferStmt, held map[string]bool
 	}
 }
 
-func (ma *Analyzer) scanLockOrderElse(stmt ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
+func (ma *Checker) scanLockOrderElse(stmt ast.Stmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
 		ma.scanLockOrderStatements(s.List, held, edges, reported, waitReleases)
@@ -140,7 +140,7 @@ func (ma *Analyzer) scanLockOrderElse(stmt ast.Stmt, held map[string]bool, edges
 	}
 }
 
-func (ma *Analyzer) applyWaitGroupReleaseEvents(held map[string]bool, wgName string, waitPos token.Pos, waitReleases []waitGroupReleaseEvent) {
+func (ma *Checker) applyWaitGroupReleaseEvents(held map[string]bool, wgName string, waitPos token.Pos, waitReleases []waitGroupReleaseEvent) {
 	for _, event := range waitReleases {
 		if event.wgName != wgName || event.goPos >= waitPos {
 			continue
@@ -151,7 +151,7 @@ func (ma *Analyzer) applyWaitGroupReleaseEvents(held map[string]bool, wgName str
 	}
 }
 
-func (ma *Analyzer) waitGroupReleasedLocks(block *ast.BlockStmt) []waitGroupReleaseEvent {
+func (ma *Checker) waitGroupReleasedLocks(block *ast.BlockStmt) []waitGroupReleaseEvent {
 	var releases []waitGroupReleaseEvent
 	if block == nil {
 		return releases
@@ -181,7 +181,7 @@ func (ma *Analyzer) waitGroupReleasedLocks(block *ast.BlockStmt) []waitGroupRele
 	return releases
 }
 
-func (ma *Analyzer) goroutineReleasedLocksBeforeDone(body *ast.BlockStmt) map[string]map[string]bool {
+func (ma *Checker) goroutineReleasedLocksBeforeDone(body *ast.BlockStmt) map[string]map[string]bool {
 	releases := make(map[string]map[string]bool)
 	if body == nil {
 		return releases
@@ -234,7 +234,7 @@ func (ma *Analyzer) goroutineReleasedLocksBeforeDone(body *ast.BlockStmt) map[st
 	return releases
 }
 
-func (ma *Analyzer) addReleasedLocks(releases map[string]map[string]bool, wgName string, unlocks map[string][]token.Pos) {
+func (ma *Checker) addReleasedLocks(releases map[string]map[string]bool, wgName string, unlocks map[string][]token.Pos) {
 	if len(unlocks) == 0 {
 		return
 	}
@@ -256,7 +256,7 @@ func firstPos(positions []token.Pos) token.Pos {
 	return first
 }
 
-func (ma *Analyzer) waitGroupDoneCallName(call *ast.CallExpr) (string, bool) {
+func (ma *Checker) waitGroupDoneCallName(call *ast.CallExpr) (string, bool) {
 	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
 		return "", false
 	}
@@ -267,7 +267,7 @@ func (ma *Analyzer) waitGroupDoneCallName(call *ast.CallExpr) (string, bool) {
 	return common.GetVarName(sel.X), true
 }
 
-func (ma *Analyzer) lockOrderReleaseCallName(call *ast.CallExpr) (string, bool) {
+func (ma *Checker) lockOrderReleaseCallName(call *ast.CallExpr) (string, bool) {
 	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
 		return "", false
 	}
@@ -282,7 +282,7 @@ func (ma *Analyzer) lockOrderReleaseCallName(call *ast.CallExpr) (string, bool) 
 	return varName, true
 }
 
-func (ma *Analyzer) isWaitGroupReceiver(expr ast.Expr) bool {
+func (ma *Checker) isWaitGroupReceiver(expr ast.Expr) bool {
 	if ma.typesInfo == nil {
 		return false
 	}
@@ -291,7 +291,7 @@ func (ma *Analyzer) isWaitGroupReceiver(expr ast.Expr) bool {
 	return common.MatchesPkgAndName(typ, "sync", "WaitGroup")
 }
 
-func (ma *Analyzer) tryLockCallVar(expr ast.Expr) (string, bool) {
+func (ma *Checker) tryLockCallVar(expr ast.Expr) (string, bool) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return "", false
@@ -314,7 +314,7 @@ func (ma *Analyzer) tryLockCallVar(expr ast.Expr) (string, bool) {
 	return "", false
 }
 
-func (ma *Analyzer) recordHeldLockOrderEdges(varName string, pos token.Pos, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool) {
+func (ma *Checker) recordHeldLockOrderEdges(varName string, pos token.Pos, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool) {
 	for heldName := range held {
 		if heldName == varName {
 			continue
@@ -350,7 +350,7 @@ func orderedLockNames(a, b string) (string, string) {
 	return names[0], names[1]
 }
 
-func (ma *Analyzer) isLockOrderAcquire(varName, methodName string) bool {
+func (ma *Checker) isLockOrderAcquire(varName, methodName string) bool {
 	switch methodName {
 	case "Lock", "TryLock":
 		return ma.mutexNames[varName] || ma.rwMutexNames[varName]
@@ -361,7 +361,7 @@ func (ma *Analyzer) isLockOrderAcquire(varName, methodName string) bool {
 	}
 }
 
-func (ma *Analyzer) isLockOrderRelease(varName, methodName string) bool {
+func (ma *Checker) isLockOrderRelease(varName, methodName string) bool {
 	switch methodName {
 	case "Unlock":
 		return ma.mutexNames[varName] || ma.rwMutexNames[varName]
@@ -372,7 +372,7 @@ func (ma *Analyzer) isLockOrderRelease(varName, methodName string) bool {
 	}
 }
 
-func (ma *Analyzer) reportCrossGoroutineReleases(body *ast.BlockStmt, parentStats map[string]*Stats) crossGoroutineReleases {
+func (ma *Checker) reportCrossGoroutineReleases(body *ast.BlockStmt, parentStats map[string]*Stats) crossGoroutineReleases {
 	releases := crossGoroutineReleases{
 		unlocks:  make(map[string][]token.Pos),
 		runlocks: make(map[string][]token.Pos),
@@ -385,7 +385,7 @@ func (ma *Analyzer) reportCrossGoroutineReleases(body *ast.BlockStmt, parentStat
 	return releases
 }
 
-func (ma *Analyzer) scanCrossGoroutineReleaseStatements(stmts []ast.Stmt, parentStats map[string]*Stats, localLocks, localRLocks map[string]int, releases crossGoroutineReleases) {
+func (ma *Checker) scanCrossGoroutineReleaseStatements(stmts []ast.Stmt, parentStats map[string]*Stats, localLocks, localRLocks map[string]int, releases crossGoroutineReleases) {
 	for _, stmt := range stmts {
 		if stmt == nil || ma.commentFilter.ShouldSkipStatement(stmt) {
 			continue
@@ -437,7 +437,7 @@ func (ma *Analyzer) scanCrossGoroutineReleaseStatements(stmts []ast.Stmt, parent
 	}
 }
 
-func (ma *Analyzer) scanCrossGoroutineReleaseElse(stmt ast.Stmt, parentStats map[string]*Stats, localLocks, localRLocks map[string]int, releases crossGoroutineReleases) {
+func (ma *Checker) scanCrossGoroutineReleaseElse(stmt ast.Stmt, parentStats map[string]*Stats, localLocks, localRLocks map[string]int, releases crossGoroutineReleases) {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
 		ma.scanCrossGoroutineReleaseStatements(s.List, parentStats, localLocks, localRLocks, releases)
@@ -446,7 +446,7 @@ func (ma *Analyzer) scanCrossGoroutineReleaseElse(stmt ast.Stmt, parentStats map
 	}
 }
 
-func (ma *Analyzer) scanCrossGoroutineReleaseCall(call *ast.CallExpr, parentStats map[string]*Stats, localLocks, localRLocks map[string]int, releases crossGoroutineReleases) {
+func (ma *Checker) scanCrossGoroutineReleaseCall(call *ast.CallExpr, parentStats map[string]*Stats, localLocks, localRLocks map[string]int, releases crossGoroutineReleases) {
 	if call == nil || ma.commentFilter.ShouldSkipCall(call) {
 		return
 	}
@@ -491,7 +491,7 @@ func (ma *Analyzer) scanCrossGoroutineReleaseCall(call *ast.CallExpr, parentStat
 	}
 }
 
-func (ma *Analyzer) parentHoldsExclusiveLock(stats map[string]*Stats, varName string) bool {
+func (ma *Checker) parentHoldsExclusiveLock(stats map[string]*Stats, varName string) bool {
 	st := stats[varName]
 	if st == nil {
 		return false
@@ -499,7 +499,7 @@ func (ma *Analyzer) parentHoldsExclusiveLock(stats map[string]*Stats, varName st
 	return ma.remainingLockCount(st.lock, st.deferUnlock) > 0
 }
 
-func (ma *Analyzer) parentHoldsReadLock(stats map[string]*Stats, varName string) bool {
+func (ma *Checker) parentHoldsReadLock(stats map[string]*Stats, varName string) bool {
 	st := stats[varName]
 	if st == nil {
 		return false
@@ -507,7 +507,7 @@ func (ma *Analyzer) parentHoldsReadLock(stats map[string]*Stats, varName string)
 	return ma.remainingLockCount(st.rlock, st.deferRUnlock) > 0
 }
 
-func (ma *Analyzer) suppressCrossGoroutineBorrowedReleases(stats map[string]*Stats, releases crossGoroutineReleases) {
+func (ma *Checker) suppressCrossGoroutineBorrowedReleases(stats map[string]*Stats, releases crossGoroutineReleases) {
 	for varName, positions := range releases.unlocks {
 		st := stats[varName]
 		if st == nil {
@@ -533,7 +533,7 @@ func (ma *Analyzer) suppressCrossGoroutineBorrowedReleases(stats map[string]*Sta
 	}
 }
 
-func (ma *Analyzer) applyCrossGoroutineReleases(stats map[string]*Stats, releases crossGoroutineReleases) {
+func (ma *Checker) applyCrossGoroutineReleases(stats map[string]*Stats, releases crossGoroutineReleases) {
 	for varName, positions := range releases.unlocks {
 		st := stats[varName]
 		if st == nil {
@@ -575,7 +575,7 @@ func removePos(positions *[]token.Pos, pos token.Pos) bool {
 // goroutineBodyLockCallMethod returns the first direct lock method call found
 // for varName. Nested goroutines are not traversed so we only flag cases that
 // are directly reachable in this goroutine's frame.
-func (ma *Analyzer) goroutineBodyLockCallMethod(body *ast.BlockStmt, varName string, methodNames []string) (string, bool) {
+func (ma *Checker) goroutineBodyLockCallMethod(body *ast.BlockStmt, varName string, methodNames []string) (string, bool) {
 	var foundMethod string
 	ast.Inspect(body, func(n ast.Node) bool {
 		if foundMethod != "" {
@@ -601,7 +601,7 @@ func (ma *Analyzer) goroutineBodyLockCallMethod(body *ast.BlockStmt, varName str
 	return foundMethod, foundMethod != ""
 }
 
-func (ma *Analyzer) rwMutexRequestDescription(methodName string) string {
+func (ma *Checker) rwMutexRequestDescription(methodName string) string {
 	switch methodName {
 	case "RLock", "TryRLock":
 		return "read lock"
@@ -610,7 +610,7 @@ func (ma *Analyzer) rwMutexRequestDescription(methodName string) string {
 	}
 }
 
-func (ma *Analyzer) goroutineLockDeadlockMessage(varName string, isRWMutex bool, parentReadLock bool, requestMethod string, parentBlocks bool) string {
+func (ma *Checker) goroutineLockDeadlockMessage(varName string, isRWMutex bool, parentReadLock bool, requestMethod string, parentBlocks bool) string {
 	if !isRWMutex {
 		if parentBlocks {
 			return "mutex '" + varName + "' goroutine started while lock is held and also tries to acquire it before parent unlocks"
@@ -632,14 +632,14 @@ func (ma *Analyzer) goroutineLockDeadlockMessage(varName string, isRWMutex bool,
 	return "rwmutex '" + varName + "' goroutine started while write lock is held and also tries to acquire " + requestDescription + ", will deadlock if parent never releases"
 }
 
-func (ma *Analyzer) parentBlocksBeforeUnlock(goPos token.Pos, varName string, unlockMethods []string) bool {
+func (ma *Checker) parentBlocksBeforeUnlock(goPos token.Pos, varName string, unlockMethods []string) bool {
 	if ma.function == nil || ma.function.Body == nil {
 		return false
 	}
 	return ma.blockBlocksBeforeUnlock(ma.function.Body.List, goPos, varName, unlockMethods)
 }
 
-func (ma *Analyzer) blockBlocksBeforeUnlock(stmts []ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
+func (ma *Checker) blockBlocksBeforeUnlock(stmts []ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
 	for i, stmt := range stmts {
 		if stmt == nil {
 			continue
@@ -695,7 +695,7 @@ func (ma *Analyzer) blockBlocksBeforeUnlock(stmts []ast.Stmt, goPos token.Pos, v
 	return false
 }
 
-func (ma *Analyzer) elseBlocksBeforeUnlock(stmt ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
+func (ma *Checker) elseBlocksBeforeUnlock(stmt ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
 		return ma.blockBlocksBeforeUnlock(s.List, goPos, varName, unlockMethods)
@@ -706,7 +706,7 @@ func (ma *Analyzer) elseBlocksBeforeUnlock(stmt ast.Stmt, goPos token.Pos, varNa
 	}
 }
 
-func (ma *Analyzer) followingStatementsBlockBeforeUnlock(stmts []ast.Stmt, varName string, unlockMethods []string) bool {
+func (ma *Checker) followingStatementsBlockBeforeUnlock(stmts []ast.Stmt, varName string, unlockMethods []string) bool {
 	for _, stmt := range stmts {
 		if stmt == nil || ma.commentFilter.ShouldSkipStatement(stmt) {
 			continue
@@ -721,7 +721,7 @@ func (ma *Analyzer) followingStatementsBlockBeforeUnlock(stmts []ast.Stmt, varNa
 	return false
 }
 
-func (ma *Analyzer) statementUnlocks(stmt ast.Stmt, varName string, unlockMethods []string) bool {
+func (ma *Checker) statementUnlocks(stmt ast.Stmt, varName string, unlockMethods []string) bool {
 	exprStmt, ok := stmt.(*ast.ExprStmt)
 	if !ok {
 		return false
@@ -734,7 +734,7 @@ func (ma *Analyzer) statementUnlocks(stmt ast.Stmt, varName string, unlockMethod
 	return ok && common.GetVarName(sel.X) == varName && containsMethod(unlockMethods, sel.Sel.Name)
 }
 
-func (ma *Analyzer) statementMayBlock(stmt ast.Stmt) bool {
+func (ma *Checker) statementMayBlock(stmt ast.Stmt) bool {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		if unary, ok := s.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
@@ -749,7 +749,7 @@ func (ma *Analyzer) statementMayBlock(stmt ast.Stmt) bool {
 	return false
 }
 
-func (ma *Analyzer) callMayBlock(call *ast.CallExpr) bool {
+func (ma *Checker) callMayBlock(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Wait" || ma.typesInfo == nil {
 		return false

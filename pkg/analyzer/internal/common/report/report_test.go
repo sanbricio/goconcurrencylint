@@ -4,7 +4,7 @@ import (
 	"go/token"
 	"testing"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/tools/go/analysis"
 )

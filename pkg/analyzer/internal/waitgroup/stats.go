@@ -4,11 +4,11 @@ import (
 	"go/ast"
 	"go/token"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
 // findDeferDoneCalls identifies defer Done calls to avoid counting them as regular Done calls.
-func (wga *Analyzer) findDeferDoneCalls(stats map[string]*Stats) {
+func (wga *Checker) findDeferDoneCalls(stats map[string]*Stats) {
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		deferStmt, ok := n.(*ast.DeferStmt)
 		if !ok {
@@ -38,7 +38,7 @@ func (wga *Analyzer) findDeferDoneCalls(stats map[string]*Stats) {
 }
 
 // findDoneInFunctionLiteral looks for Done calls within function literals.
-func (wga *Analyzer) findDoneInFunctionLiteral(body *ast.BlockStmt, stats map[string]*Stats) {
+func (wga *Checker) findDoneInFunctionLiteral(body *ast.BlockStmt, stats map[string]*Stats) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if wga.commentFilter.ShouldSkipCall(call) {
@@ -57,13 +57,13 @@ func (wga *Analyzer) findDoneInFunctionLiteral(body *ast.BlockStmt, stats map[st
 }
 
 // collectCalls collects all Add, Done, and Wait calls in the function
-func (wga *Analyzer) collectCalls(stats map[string]*Stats) {
+func (wga *Checker) collectCalls(stats map[string]*Stats) {
 	alreadyReported := make(map[token.Pos]bool)
 	wga.traverseWithContext(wga.function.Body, nil, stats, alreadyReported)
 }
 
 // traverseWithContext traverses the AST while maintaining context about for loops
-func (wga *Analyzer) traverseWithContext(n ast.Node, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) traverseWithContext(n ast.Node, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	switch node := n.(type) {
 	case *ast.ForStmt:
 		wga.handleForStatement(node, forStack, stats, alreadyReported)
@@ -92,7 +92,7 @@ func (wga *Analyzer) traverseWithContext(n ast.Node, forStack []*ast.ForStmt, st
 }
 
 // handleForStatement processes for loop statements.
-func (wga *Analyzer) handleForStatement(stmt *ast.ForStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleForStatement(stmt *ast.ForStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -103,7 +103,7 @@ func (wga *Analyzer) handleForStatement(stmt *ast.ForStmt, forStack []*ast.ForSt
 }
 
 // handleRangeStatement processes range loop statements.
-func (wga *Analyzer) handleRangeStatement(stmt *ast.RangeStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleRangeStatement(stmt *ast.RangeStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -114,7 +114,7 @@ func (wga *Analyzer) handleRangeStatement(stmt *ast.RangeStmt, forStack []*ast.F
 }
 
 // handleGoStatement processes goroutine statements.
-func (wga *Analyzer) handleGoStatement(stmt *ast.GoStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleGoStatement(stmt *ast.GoStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -127,14 +127,14 @@ func (wga *Analyzer) handleGoStatement(stmt *ast.GoStmt, forStack []*ast.ForStmt
 }
 
 // handleBlockStatement processes block statements.
-func (wga *Analyzer) handleBlockStatement(stmt *ast.BlockStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleBlockStatement(stmt *ast.BlockStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	for _, nestedStmt := range stmt.List {
 		wga.traverseWithContext(nestedStmt, forStack, stats, alreadyReported)
 	}
 }
 
 // handleIfStatement processes if statements.
-func (wga *Analyzer) handleIfStatement(stmt *ast.IfStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleIfStatement(stmt *ast.IfStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -145,7 +145,7 @@ func (wga *Analyzer) handleIfStatement(stmt *ast.IfStmt, forStack []*ast.ForStmt
 	}
 }
 
-func (wga *Analyzer) handleSwitchStatement(stmt *ast.SwitchStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleSwitchStatement(stmt *ast.SwitchStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -161,7 +161,7 @@ func (wga *Analyzer) handleSwitchStatement(stmt *ast.SwitchStmt, forStack []*ast
 	}
 }
 
-func (wga *Analyzer) handleTypeSwitchStatement(stmt *ast.TypeSwitchStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleTypeSwitchStatement(stmt *ast.TypeSwitchStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -180,7 +180,7 @@ func (wga *Analyzer) handleTypeSwitchStatement(stmt *ast.TypeSwitchStmt, forStac
 	}
 }
 
-func (wga *Analyzer) handleSelectStatement(stmt *ast.SelectStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) handleSelectStatement(stmt *ast.SelectStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -197,7 +197,7 @@ func (wga *Analyzer) handleSelectStatement(stmt *ast.SelectStmt, forStack []*ast
 }
 
 // handleExpressionStatement processes expression statements (Add, Done, Wait calls).
-func (wga *Analyzer) handleExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
+func (wga *Checker) handleExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
 	if wga.commentFilter.ShouldSkipStatement(stmt) {
 		return
 	}
@@ -229,7 +229,7 @@ func (wga *Analyzer) handleExpressionStatement(stmt *ast.ExprStmt, stats map[str
 	}
 }
 
-func (wga *Analyzer) handleImmediatelyInvokedFunction(stmt *ast.ExprStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) bool {
+func (wga *Checker) handleImmediatelyInvokedFunction(stmt *ast.ExprStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) bool {
 	call, ok := stmt.X.(*ast.CallExpr)
 	if !ok {
 		return false
@@ -247,7 +247,7 @@ func (wga *Analyzer) handleImmediatelyInvokedFunction(stmt *ast.ExprStmt, forSta
 }
 
 // traverseWithReportMap is a helper for avoiding multiple diagnostics per loop
-func (wga *Analyzer) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
+func (wga *Checker) traverseWithReportMap(n ast.Node, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) {
 	switch node := n.(type) {
 	case *ast.ForStmt:
 		wga.handleForStatement(node, forStack, stats, alreadyReported)

@@ -6,7 +6,7 @@ import (
 )
 
 // captureGotoSnapshot records lock state at a `goto label`.
-func (ma *Analyzer) captureGotoSnapshot(labelName string, stats map[string]*Stats) {
+func (ma *Checker) captureGotoSnapshot(labelName string, stats map[string]*Stats) {
 	if labelName == "" || stats == nil {
 		return
 	}
@@ -23,7 +23,7 @@ func (ma *Analyzer) captureGotoSnapshot(labelName string, stats map[string]*Stat
 }
 
 // applyLabelSnapshot merges lock state captured for `labelName`.
-func (ma *Analyzer) applyLabelSnapshot(labelName string, stats map[string]*Stats) {
+func (ma *Checker) applyLabelSnapshot(labelName string, stats map[string]*Stats) {
 	if labelName == "" || ma.labelGotoSnapshots == nil {
 		return
 	}

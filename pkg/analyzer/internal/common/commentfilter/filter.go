@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
 const ignoreDirective = "goconcurrencylint:ignore"

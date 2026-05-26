@@ -7,13 +7,14 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/commentfilter"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/report"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/commentfilter"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/report"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/primitives"
 )
 
-// Analyzer handles the analysis of mutex and rwmutex usage
-type Analyzer struct {
+// Checker handles the analysis of mutex and rwmutex usage
+type Checker struct {
 	mutexNames             map[string]bool
 	rwMutexNames           map[string]bool
 	errorCollector         report.Reporter
@@ -81,11 +82,12 @@ type deferErrorCollector struct {
 	badDeferRUnlock map[string]bool
 }
 
-// NewAnalyzer creates a new mutex analyzer
-func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Analyzer {
-	return &Analyzer{
-		mutexNames:            mutexNames,
-		rwMutexNames:          rwMutexNames,
+// NewChecker creates a new mutex checker. fr supplies the mutex and
+// rwmutex names visible inside the function being analyzed.
+func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Checker {
+	return &Checker{
+		mutexNames:            fr.Mutexes,
+		rwMutexNames:          fr.RWMutexes,
 		errorCollector:        errorCollector,
 		commentFilter:         cf,
 		typesInfo:             typesInfo,
@@ -101,7 +103,7 @@ func NewAnalyzer(mutexNames, rwMutexNames map[string]bool, errorCollector report
 }
 
 // AnalyzeFunction analyzes mutex usage in a function
-func (ma *Analyzer) AnalyzeFunction(fn *ast.FuncDecl) {
+func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.function = fn
 	ma.rawBodyEffects = false
 	ma.goroutineLockConflicts = nil
@@ -165,16 +167,6 @@ func collectFunctionDecls(files []*ast.File) []*ast.FuncDecl {
 	return functions
 }
 
-func receiverName(fn *ast.FuncDecl) string {
-	if fn == nil || fn.Recv == nil || len(fn.Recv.List) == 0 {
-		return ""
-	}
-	if len(fn.Recv.List[0].Names) == 0 {
-		return ""
-	}
-	return fn.Recv.List[0].Names[0].Name
-}
-
 func receiverTypeName(fn *ast.FuncDecl) string {
 	if fn == nil || fn.Recv == nil || len(fn.Recv.List) == 0 {
 		return ""
@@ -217,7 +209,7 @@ func baseTypeNameFromType(typ types.Type) string {
 	return ""
 }
 
-func (ma *Analyzer) isBorrowedWrapperCall(varName, methodName string) bool {
+func (ma *Checker) isBorrowedWrapperCall(varName, methodName string) bool {
 	if ma.rawBodyEffects {
 		return false
 	}
@@ -226,7 +218,7 @@ func (ma *Analyzer) isBorrowedWrapperCall(varName, methodName string) bool {
 		return false
 	}
 
-	currentReceiver := receiverName(ma.function)
+	currentReceiver := common.ReceiverName(ma.function)
 	if currentReceiver == "" {
 		return false
 	}
@@ -268,11 +260,11 @@ func (ma *Analyzer) isBorrowedWrapperCall(varName, methodName string) bool {
 	}
 }
 
-func (ma *Analyzer) currentMethodContainsFieldCall(varName string, methodNames []string) bool {
+func (ma *Checker) currentMethodContainsFieldCall(varName string, methodNames []string) bool {
 	return functionBodyContainsFieldCall(ma.function.Body, varName, methodNames)
 }
 
-func (ma *Analyzer) siblingMethodContainsFieldCall(fieldSuffix string, siblingMethods, fieldMethods []string) bool {
+func (ma *Checker) siblingMethodContainsFieldCall(fieldSuffix string, siblingMethods, fieldMethods []string) bool {
 	receiverType := receiverTypeName(ma.function)
 	if receiverType == "" {
 		return false
@@ -289,7 +281,7 @@ func (ma *Analyzer) siblingMethodContainsFieldCall(fieldSuffix string, siblingMe
 			continue
 		}
 
-		siblingReceiver := receiverName(fn)
+		siblingReceiver := common.ReceiverName(fn)
 		if siblingReceiver == "" {
 			continue
 		}
@@ -303,7 +295,7 @@ func (ma *Analyzer) siblingMethodContainsFieldCall(fieldSuffix string, siblingMe
 	return false
 }
 
-func (ma *Analyzer) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
+func (ma *Checker) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
 	receiverType := receiverTypeName(ma.function)
 	if receiverType == "" {
 		return false
@@ -322,7 +314,7 @@ func (ma *Analyzer) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod
 			continue
 		}
 
-		siblingReceiver := receiverName(fn)
+		siblingReceiver := common.ReceiverName(fn)
 		if siblingReceiver == "" {
 			continue
 		}
@@ -336,7 +328,7 @@ func (ma *Analyzer) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod
 	return false
 }
 
-func (ma *Analyzer) anySiblingMethodContainsFieldSuffix(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
+func (ma *Checker) anySiblingMethodContainsFieldSuffix(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
 	receiverType := receiverTypeName(ma.function)
 	if receiverType == "" {
 		return false
@@ -570,7 +562,7 @@ func compositeLiteralUnkeyedVarNames(lit *ast.CompositeLit) []string {
 	return names
 }
 
-func (ma *Analyzer) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.CompositeLit {
+func (ma *Checker) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.CompositeLit {
 	if fn == nil || fn.Body == nil {
 		return nil
 	}
@@ -618,7 +610,7 @@ func (ma *Analyzer) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.Composite
 	return returned
 }
 
-func (ma *Analyzer) lifecycleReleaseMethodUnlocks(returnedType, fieldName, suffix string, methodNames []string) bool {
+func (ma *Checker) lifecycleReleaseMethodUnlocks(returnedType, fieldName, suffix string, methodNames []string) bool {
 	methods := ma.receiverMethods[returnedType]
 	if len(methods) == 0 {
 		return false
@@ -629,7 +621,7 @@ func (ma *Analyzer) lifecycleReleaseMethodUnlocks(returnedType, fieldName, suffi
 			continue
 		}
 
-		recv := receiverName(fn)
+		recv := common.ReceiverName(fn)
 		if recv == "" {
 			continue
 		}
@@ -646,7 +638,7 @@ func (ma *Analyzer) lifecycleReleaseMethodUnlocks(returnedType, fieldName, suffi
 	return false
 }
 
-func (ma *Analyzer) functionReturnsLifecycleHandleFor(mutexName string, methodNames []string) bool {
+func (ma *Checker) functionReturnsLifecycleHandleFor(mutexName string, methodNames []string) bool {
 	baseVar, suffix, ok := splitBaseAndSuffix(mutexName)
 	if !ok || ma.function == nil {
 		return false
@@ -688,12 +680,12 @@ func (ma *Analyzer) functionReturnsLifecycleHandleFor(mutexName string, methodNa
 	return false
 }
 
-func (ma *Analyzer) functionIsLifecycleReleaseFor(mutexName string, methodNames []string) bool {
+func (ma *Checker) functionIsLifecycleReleaseFor(mutexName string, methodNames []string) bool {
 	if ma.function == nil || ma.function.Name == nil || !methodNameMatchesAnyHint(ma.function.Name.Name, []string{"Close", "Unlock", "Release"}) {
 		return false
 	}
 
-	currentReceiver := receiverName(ma.function)
+	currentReceiver := common.ReceiverName(ma.function)
 	currentType := receiverTypeName(ma.function)
 	if currentReceiver == "" || currentType == "" {
 		return false
@@ -744,7 +736,7 @@ func (ma *Analyzer) functionIsLifecycleReleaseFor(mutexName string, methodNames 
 	return false
 }
 
-func (ma *Analyzer) callTargetsCurrentMethod(call *ast.CallExpr, receiverType string) (string, bool) {
+func (ma *Checker) callTargetsCurrentMethod(call *ast.CallExpr, receiverType string) (string, bool) {
 	if ma.function == nil || ma.function.Name == nil {
 		return "", false
 	}
@@ -766,7 +758,7 @@ func (ma *Analyzer) callTargetsCurrentMethod(call *ast.CallExpr, receiverType st
 	return baseVar, true
 }
 
-func (ma *Analyzer) explicitTransferCallPositions(body *ast.BlockStmt) map[token.Pos]struct{} {
+func (ma *Checker) explicitTransferCallPositions(body *ast.BlockStmt) map[token.Pos]struct{} {
 	if body == nil {
 		return nil
 	}
@@ -859,7 +851,7 @@ type callerManagedKey struct {
 	isRW      bool
 }
 
-func (ma *Analyzer) functionIsCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
+func (ma *Checker) functionIsCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
 	if ma.function == nil || ma.function.Name == nil {
 		return false
 	}
@@ -872,8 +864,8 @@ func (ma *Analyzer) functionIsCallerManagedReleaseFor(mutexName string, methodNa
 	return v
 }
 
-func (ma *Analyzer) computeCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
-	currentReceiver := receiverName(ma.function)
+func (ma *Checker) computeCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
+	currentReceiver := common.ReceiverName(ma.function)
 	currentType := receiverTypeName(ma.function)
 	if currentReceiver == "" || currentType == "" {
 		return false
@@ -924,7 +916,7 @@ func (ma *Analyzer) computeCallerManagedReleaseFor(mutexName string, methodNames
 
 // functionIsParameterUnlockHelper reports helpers that only release a mutex
 // parameter.
-func (ma *Analyzer) functionIsParameterUnlockHelper(varName string, acquireMethods []string) bool {
+func (ma *Checker) functionIsParameterUnlockHelper(varName string, acquireMethods []string) bool {
 	if ma.function == nil || ma.function.Body == nil {
 		return false
 	}
@@ -980,7 +972,7 @@ func (ma *Analyzer) functionIsParameterUnlockHelper(varName string, acquireMetho
 }
 
 // varRootIsFunctionParameter reports whether `varName` starts at a parameter.
-func (ma *Analyzer) varRootIsFunctionParameter(varName string) bool {
+func (ma *Checker) varRootIsFunctionParameter(varName string) bool {
 	if ma.function == nil || ma.function.Type == nil || ma.function.Type.Params == nil {
 		return false
 	}
@@ -998,13 +990,13 @@ func (ma *Analyzer) varRootIsFunctionParameter(varName string) bool {
 	return false
 }
 
-func (ma *Analyzer) clearStats(stats map[string]*Stats) {
+func (ma *Checker) clearStats(stats map[string]*Stats) {
 	for name := range stats {
 		stats[name] = &Stats{}
 	}
 }
 
-func (ma *Analyzer) emptyStatsLike(stats map[string]*Stats) map[string]*Stats {
+func (ma *Checker) emptyStatsLike(stats map[string]*Stats) map[string]*Stats {
 	empty := make(map[string]*Stats, len(stats))
 	for name := range stats {
 		empty[name] = &Stats{}
@@ -1012,7 +1004,7 @@ func (ma *Analyzer) emptyStatsLike(stats map[string]*Stats) map[string]*Stats {
 	return empty
 }
 
-func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
+func (ma *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
 	if fn == nil || fn.Body == nil {
 		return nil
 	}
@@ -1039,7 +1031,7 @@ func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWM
 		mutexNames[varName] = true
 	}
 
-	simulated := &Analyzer{
+	simulated := &Checker{
 		mutexNames:      mutexNames,
 		rwMutexNames:    rwMutexNames,
 		errorCollector:  &report.ErrorCollector{},
@@ -1063,7 +1055,7 @@ func (ma *Analyzer) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWM
 	return cloneStats(final[varName])
 }
 
-func (ma *Analyzer) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
+func (ma *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
 	ident, ok := call.Fun.(*ast.Ident)
 	if !ok {
 		return false
@@ -1086,7 +1078,7 @@ func (ma *Analyzer) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr
 	stack[fnlit] = true
 	defer delete(stack, fnlit)
 
-	simulated := &Analyzer{
+	simulated := &Checker{
 		mutexNames:      ma.mutexNames,
 		rwMutexNames:    ma.rwMutexNames,
 		errorCollector:  &report.ErrorCollector{},
@@ -1111,7 +1103,7 @@ func (ma *Analyzer) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr
 	return true
 }
 
-func (ma *Analyzer) localFunctionLiteralBefore(name string, before token.Pos) *ast.FuncLit {
+func (ma *Checker) localFunctionLiteralBefore(name string, before token.Pos) *ast.FuncLit {
 	if ma.function == nil || ma.function.Body == nil {
 		return nil
 	}
@@ -1150,7 +1142,7 @@ func (ma *Analyzer) localFunctionLiteralBefore(name string, before token.Pos) *a
 	return found
 }
 
-func (ma *Analyzer) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
+func (ma *Checker) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
 	for name, st := range stats {
 		baselineDeferUnlocks := 0
 		baselineDeferRUnlocks := 0
@@ -1174,7 +1166,7 @@ func (ma *Analyzer) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
 	}
 }
 
-func (ma *Analyzer) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
+func (ma *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
@@ -1195,7 +1187,7 @@ func (ma *Analyzer) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats m
 		return false
 	}
 
-	calleeReceiver := receiverName(callee)
+	calleeReceiver := common.ReceiverName(callee)
 	if calleeReceiver == "" {
 		return false
 	}
@@ -1236,7 +1228,7 @@ func (ma *Analyzer) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats m
 }
 
 // initializeStats initializes the stats map for all known mutexes
-func (ma *Analyzer) initializeStats() {
+func (ma *Checker) initializeStats() {
 	ma.stats = make(map[string]*Stats)
 
 	for mutexName := range ma.mutexNames {
@@ -1249,7 +1241,7 @@ func (ma *Analyzer) initializeStats() {
 }
 
 // cloneStatsMap returns a new map containing deep copies of every Stats in original.
-func (ma *Analyzer) cloneStatsMap(original map[string]*Stats) map[string]*Stats {
+func (ma *Checker) cloneStatsMap(original map[string]*Stats) map[string]*Stats {
 	copy := make(map[string]*Stats)
 	ma.copyStatsMap(copy, original)
 	return copy
@@ -1258,7 +1250,7 @@ func (ma *Analyzer) cloneStatsMap(original map[string]*Stats) map[string]*Stats 
 // copyStatsMap copies every entry from src into dst, performing a deep copy
 // of each Stats value via copyStats. Keys present in dst but not in src are
 // left untouched (merge semantics, not full replacement).
-func (ma *Analyzer) copyStatsMap(dst, src map[string]*Stats) {
+func (ma *Checker) copyStatsMap(dst, src map[string]*Stats) {
 	for name, srcStats := range src {
 		if _, exists := dst[name]; !exists {
 			dst[name] = &Stats{}
@@ -1302,26 +1294,26 @@ func copyStats(dst, src *Stats) {
 }
 
 // removeFirstLockPos removes the first lock position from the list
-func (ma *Analyzer) removeFirstLockPos(stats *Stats) {
+func (ma *Checker) removeFirstLockPos(stats *Stats) {
 	if len(stats.lockPos) > 0 {
 		stats.lockPos = stats.lockPos[1:]
 	}
 }
 
 // removeFirstRLockPos removes the first rlock position from the list
-func (ma *Analyzer) removeFirstRLockPos(stats *Stats) {
+func (ma *Checker) removeFirstRLockPos(stats *Stats) {
 	if len(stats.rlockPos) > 0 {
 		stats.rlockPos = stats.rlockPos[1:]
 	}
 }
 
-func (ma *Analyzer) removeFirstBorrowedUnlockPos(stats *Stats) {
+func (ma *Checker) removeFirstBorrowedUnlockPos(stats *Stats) {
 	if len(stats.borrowedUnlockPos) > 0 {
 		stats.borrowedUnlockPos = stats.borrowedUnlockPos[1:]
 	}
 }
 
-func (ma *Analyzer) removeFirstBorrowedRUnlockPos(stats *Stats) {
+func (ma *Checker) removeFirstBorrowedRUnlockPos(stats *Stats) {
 	if len(stats.borrowedRUnlockPos) > 0 {
 		stats.borrowedRUnlockPos = stats.borrowedRUnlockPos[1:]
 	}

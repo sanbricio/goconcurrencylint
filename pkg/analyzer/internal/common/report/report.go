@@ -4,7 +4,7 @@ import (
 	"go/token"
 	"sort"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 	"golang.org/x/tools/go/analysis"
 )
 
@@ -63,9 +63,20 @@ type preparedError struct {
 // ReportAll emits every collected diagnostic via pass.Report. When ignore is
 // non-nil, diagnostics for which it returns true are dropped.
 func (ec *ErrorCollector) ReportAll(pass *analysis.Pass, ignore IgnoreFunc) {
+	for _, d := range ec.Diagnostics(pass, ignore) {
+		pass.Report(d)
+	}
+}
+
+// Diagnostics returns the filtered, sorted set of diagnostics without
+// emitting them. Sub-analyzers that ship their diagnostics through a
+// Result (so an umbrella analyzer can re-emit them) call this instead of
+// ReportAll. When ignore is non-nil, entries for which it returns true
+// are dropped.
+func (ec *ErrorCollector) Diagnostics(pass *analysis.Pass, ignore IgnoreFunc) []analysis.Diagnostic {
 	prepared := ec.filterAndPrepare(pass, ignore)
 	if len(prepared) == 0 {
-		return
+		return nil
 	}
 
 	sort.Slice(prepared, func(i, j int) bool {
@@ -90,13 +101,15 @@ func (ec *ErrorCollector) ReportAll(pass *analysis.Pass, ignore IgnoreFunc) {
 		return errI.Message < errJ.Message
 	})
 
-	for _, item := range prepared {
-		pass.Report(analysis.Diagnostic{
+	out := make([]analysis.Diagnostic, len(prepared))
+	for i, item := range prepared {
+		out[i] = analysis.Diagnostic{
 			Pos:      item.err.Pos,
 			Category: string(item.err.Category),
 			Message:  item.err.Message,
-		})
+		}
 	}
+	return out
 }
 
 // filterAndPrepare resolves token positions once per diagnostic,

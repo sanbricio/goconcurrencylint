@@ -8,17 +8,17 @@ import (
 	"go/types"
 	"slices"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
 // analyzeBlock analyzes a block statement starting from the provided state and
 // returns the resulting stats after executing that block.
-func (ma *Analyzer) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats) map[string]*Stats {
+func (ma *Checker) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats) map[string]*Stats {
 	return ma.analyzeStatementList(block.List, initial)
 }
 
-func (ma *Analyzer) analyzeStatementList(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
+func (ma *Checker) analyzeStatementList(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
 	blockStats := ma.cloneStatsMap(initial)
 	skip := make(map[token.Pos]bool)
 	terminatingTail := ma.terminatingTailByIndex(stmts)
@@ -39,7 +39,7 @@ func (ma *Analyzer) analyzeStatementList(stmts []ast.Stmt, initial map[string]*S
 	return blockStats
 }
 
-func (ma *Analyzer) analyzeStatementWithTail(stmt ast.Stmt, stats map[string]*Stats, tailTerminates bool) {
+func (ma *Checker) analyzeStatementWithTail(stmt ast.Stmt, stats map[string]*Stats, tailTerminates bool) {
 	if _, ok := stmt.(*ast.IfStmt); !ok || !tailTerminates {
 		ma.analyzeStatement(stmt, stats)
 		return
@@ -50,7 +50,7 @@ func (ma *Analyzer) analyzeStatementWithTail(stmt ast.Stmt, stats map[string]*St
 	ma.analyzeStatement(stmt, stats)
 }
 
-func (ma *Analyzer) terminatingTailByIndex(stmts []ast.Stmt) []bool {
+func (ma *Checker) terminatingTailByIndex(stmts []ast.Stmt) []bool {
 	tail := make([]bool, len(stmts)+1)
 	for i := range slices.Backward(stmts) {
 		tail[i] = tail[i+1] || ma.statementAlwaysTerminates(stmts[i])
@@ -58,7 +58,7 @@ func (ma *Analyzer) terminatingTailByIndex(stmts []ast.Stmt) []bool {
 	return tail
 }
 
-func (ma *Analyzer) skipBalancedGuardedLock(stmt ast.Stmt, rest []ast.Stmt, skip map[token.Pos]bool) bool {
+func (ma *Checker) skipBalancedGuardedLock(stmt ast.Stmt, rest []ast.Stmt, skip map[token.Pos]bool) bool {
 	guard, varName, methodName, ok := ma.guardedMutexCall(stmt)
 	if !ok || !isLockMethod(methodName) {
 		return false
@@ -84,7 +84,7 @@ func (ma *Analyzer) skipBalancedGuardedLock(stmt ast.Stmt, rest []ast.Stmt, skip
 
 // guardedReleaseMatches reports whether `stmt` releases `varName` under
 // `guard` on every reachable path.
-func (ma *Analyzer) guardedReleaseMatches(stmt ast.Stmt, guard, varName, releaseMethod string) bool {
+func (ma *Checker) guardedReleaseMatches(stmt ast.Stmt, guard, varName, releaseMethod string) bool {
 	if laterGuard, laterVar, laterMethod, ok := ma.guardedMutexCall(stmt); ok {
 		return laterGuard == guard && laterVar == varName && laterMethod == releaseMethod
 	}
@@ -96,7 +96,7 @@ func (ma *Analyzer) guardedReleaseMatches(stmt ast.Stmt, guard, varName, release
 	return ma.bodyReleasesOnEveryPath(body, varName, releaseMethod)
 }
 
-func (ma *Analyzer) statementMayExit(stmt ast.Stmt) bool {
+func (ma *Checker) statementMayExit(stmt ast.Stmt) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		if found {
@@ -126,7 +126,7 @@ func (ma *Analyzer) statementMayExit(stmt ast.Stmt) bool {
 	return found
 }
 
-func (ma *Analyzer) callTerminatesExecution(call *ast.CallExpr) bool {
+func (ma *Checker) callTerminatesExecution(call *ast.CallExpr) bool {
 	if call == nil {
 		return false
 	}
@@ -165,7 +165,7 @@ func (ma *Analyzer) callTerminatesExecution(call *ast.CallExpr) bool {
 	}
 }
 
-func (ma *Analyzer) isBuiltinPanic(ident *ast.Ident) bool {
+func (ma *Checker) isBuiltinPanic(ident *ast.Ident) bool {
 	if ident == nil || ident.Name != "panic" {
 		return false
 	}
@@ -185,7 +185,7 @@ func isFatalMethod(methodName string) bool {
 }
 
 // guardedIf returns the condition and body for a plain `if cond { body }`.
-func (ma *Analyzer) guardedIf(stmt ast.Stmt) (string, *ast.BlockStmt, bool) {
+func (ma *Checker) guardedIf(stmt ast.Stmt) (string, *ast.BlockStmt, bool) {
 	ifStmt, ok := stmt.(*ast.IfStmt)
 	if !ok || ifStmt.Init != nil || ifStmt.Else != nil || ifStmt.Body == nil {
 		return "", nil, false
@@ -195,7 +195,7 @@ func (ma *Analyzer) guardedIf(stmt ast.Stmt) (string, *ast.BlockStmt, bool) {
 
 // guardedMutexCall detects `if cond { mu.Lock() }` and
 // `if cond { mu.Unlock() }` forms with one mutex call.
-func (ma *Analyzer) guardedMutexCall(stmt ast.Stmt) (string, string, string, bool) {
+func (ma *Checker) guardedMutexCall(stmt ast.Stmt) (string, string, string, bool) {
 	cond, body, ok := ma.guardedIf(stmt)
 	if !ok {
 		return "", "", "", false
@@ -242,7 +242,7 @@ func (ma *Analyzer) guardedMutexCall(stmt ast.Stmt) (string, string, string, boo
 
 // bodyReleasesOnEveryPath reports whether `body` unlocks exactly once before
 // each reachable exit.
-func (ma *Analyzer) bodyReleasesOnEveryPath(body *ast.BlockStmt, varName, methodName string) bool {
+func (ma *Checker) bodyReleasesOnEveryPath(body *ast.BlockStmt, varName, methodName string) bool {
 	if body == nil {
 		return false
 	}
@@ -259,7 +259,7 @@ func (ma *Analyzer) bodyReleasesOnEveryPath(body *ast.BlockStmt, varName, method
 
 // pathReleaseSimulator checks simple paths for one matching unlock before exit.
 type pathReleaseSimulator struct {
-	analyzer *Analyzer
+	analyzer *Checker
 	varName  string
 	method   string
 }
@@ -427,7 +427,7 @@ func matchingUnlockMethod(methodName string) string {
 }
 
 // analyzeStatement analyzes individual statements
-func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
 		ma.reportPotentialPanicWhileLocked(s, stats)
@@ -472,7 +472,7 @@ func (ma *Analyzer) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 }
 
 // analyzeExpressionStatement handles expression statements (Lock/Unlock calls)
-func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
 	call, ok := stmt.X.(*ast.CallExpr)
 	if !ok {
 		return
@@ -532,7 +532,7 @@ func (ma *Analyzer) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[str
 }
 
 // handleMutexCall processes mutex method calls
-func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
+func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
 	if ma.isBorrowedWrapperCall(varName, methodName) {
 		return
 	}
@@ -572,7 +572,7 @@ func (ma *Analyzer) handleMutexCall(varName, methodName string, pos token.Pos, s
 }
 
 // handleRWMutexCall processes rwmutex method calls
-func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
+func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
 	if ma.isBorrowedWrapperCall(varName, methodName) {
 		return
 	}
@@ -646,7 +646,7 @@ func (ma *Analyzer) handleRWMutexCall(varName, methodName string, pos token.Pos,
 	}
 }
 
-func (ma *Analyzer) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[string]*Stats) {
 	for _, result := range stmt.Results {
 		call, ok := result.(*ast.CallExpr)
 		if ok && !ma.commentFilter.ShouldSkipCall(call) {
@@ -669,7 +669,7 @@ func (ma *Analyzer) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[strin
 }
 
 // analyzeDeferStatement handles defer statements
-func (ma *Analyzer) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*Stats) {
+func (ma *Checker) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*Stats) {
 	if ma.commentFilter.ShouldSkipCall(stmt.Call) {
 		return
 	}
@@ -687,7 +687,7 @@ func (ma *Analyzer) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]
 }
 
 // handleDeferCall processes direct defer calls
-func (ma *Analyzer) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats map[string]*Stats) {
+func (ma *Checker) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats map[string]*Stats) {
 	varName := common.GetVarName(call.X)
 
 	if call.Sel.Name == "Lock" && ma.consumeBorrowedDeferredLock(varName, stats) {
@@ -734,7 +734,7 @@ func (ma *Analyzer) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats
 	}
 }
 
-func (ma *Analyzer) consumeBorrowedDeferredLock(varName string, stats map[string]*Stats) bool {
+func (ma *Checker) consumeBorrowedDeferredLock(varName string, stats map[string]*Stats) bool {
 	st := stats[varName]
 	if st == nil || st.borrowedLock == 0 {
 		return false
@@ -744,7 +744,7 @@ func (ma *Analyzer) consumeBorrowedDeferredLock(varName string, stats map[string
 	return true
 }
 
-func (ma *Analyzer) consumeBorrowedDeferredRLock(varName string, stats map[string]*Stats) bool {
+func (ma *Checker) consumeBorrowedDeferredRLock(varName string, stats map[string]*Stats) bool {
 	st := stats[varName]
 	if st == nil || st.borrowedRLock == 0 {
 		return false
@@ -754,18 +754,18 @@ func (ma *Analyzer) consumeBorrowedDeferredRLock(varName string, stats map[strin
 	return true
 }
 
-func (ma *Analyzer) deferredRelockBalancesEarlierDeferredUnlock(varName string, stats map[string]*Stats) bool {
+func (ma *Checker) deferredRelockBalancesEarlierDeferredUnlock(varName string, stats map[string]*Stats) bool {
 	st := stats[varName]
 	return st != nil && st.lock == 0 && st.deferUnlock > 0
 }
 
-func (ma *Analyzer) deferredRRelockBalancesEarlierDeferredRUnlock(varName string, stats map[string]*Stats) bool {
+func (ma *Checker) deferredRRelockBalancesEarlierDeferredRUnlock(varName string, stats map[string]*Stats) bool {
 	st := stats[varName]
 	return st != nil && st.rlock == 0 && st.deferRUnlock > 0
 }
 
 // handleDeferFunctionLiteral processes defer with function literals
-func (ma *Analyzer) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, stats map[string]*Stats) {
+func (ma *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, stats map[string]*Stats) {
 	// Check for mutex unlocks in function literal
 	for mutexName := range ma.mutexNames {
 		if ma.containsUnlock(fnlit.Body, mutexName) && !ma.containsLock(fnlit.Body, mutexName) {
@@ -795,7 +795,7 @@ func (ma *Analyzer) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos
 
 // unlocksOnlyInRecoverGuard reports whether the block contains at least one
 // target unlock and every target unlock is guarded by a recover() check.
-func (ma *Analyzer) unlocksOnlyInRecoverGuard(block *ast.BlockStmt, mutexName, methodName string) bool {
+func (ma *Checker) unlocksOnlyInRecoverGuard(block *ast.BlockStmt, mutexName, methodName string) bool {
 	foundUnlock := false
 	foundUnguardedUnlock := false
 
@@ -950,28 +950,28 @@ func containsRecoverCall(node ast.Node) bool {
 }
 
 // containsUnlock checks if a block contains an unlock call for a specific mutex
-func (ma *Analyzer) containsUnlock(block *ast.BlockStmt, mutexName string) bool {
+func (ma *Checker) containsUnlock(block *ast.BlockStmt, mutexName string) bool {
 	return ma.containsMutexMethodCall(block, mutexName, "Unlock")
 }
 
 // containsLock checks if a block contains a lock call for a specific mutex
-func (ma *Analyzer) containsLock(block *ast.BlockStmt, mutexName string) bool {
+func (ma *Checker) containsLock(block *ast.BlockStmt, mutexName string) bool {
 	return ma.containsMutexMethodCall(block, mutexName, "Lock")
 }
 
 // containsRUnlock checks if a block contains an runlock call for a specific rwmutex
-func (ma *Analyzer) containsRUnlock(block *ast.BlockStmt, mutexName string) bool {
+func (ma *Checker) containsRUnlock(block *ast.BlockStmt, mutexName string) bool {
 	return ma.containsMutexMethodCall(block, mutexName, "RUnlock")
 }
 
 // containsRLock checks if a block contains an rlock call for a specific rwmutex
-func (ma *Analyzer) containsRLock(block *ast.BlockStmt, mutexName string) bool {
+func (ma *Checker) containsRLock(block *ast.BlockStmt, mutexName string) bool {
 	return ma.containsMutexMethodCall(block, mutexName, "RLock")
 }
 
 // containsMutexMethodCall checks if a block contains a call to a specific
 // method on the given mutex variable.
-func (ma *Analyzer) containsMutexMethodCall(block *ast.BlockStmt, mutexName, method string) bool {
+func (ma *Checker) containsMutexMethodCall(block *ast.BlockStmt, mutexName, method string) bool {
 	var found bool
 	ast.Inspect(block, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
