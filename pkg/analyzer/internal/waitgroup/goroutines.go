@@ -6,11 +6,11 @@ import (
 	"go/types"
 	"slices"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
 // isNodeInGoroutine checks if a node is inside a goroutine
-func (wga *Analyzer) isNodeInGoroutine(targetNode ast.Node) bool {
+func (wga *Checker) isNodeInGoroutine(targetNode ast.Node) bool {
 	inGoroutine := false
 
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
@@ -32,7 +32,7 @@ func (wga *Analyzer) isNodeInGoroutine(targetNode ast.Node) bool {
 }
 
 // isInGoroutine checks if a position is within a goroutine
-func (wga *Analyzer) isInGoroutine(pos token.Pos) bool {
+func (wga *Checker) isInGoroutine(pos token.Pos) bool {
 	isInGoroutine := false
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		if goStmt, ok := n.(*ast.GoStmt); ok {
@@ -54,7 +54,7 @@ func (wga *Analyzer) isInGoroutine(pos token.Pos) bool {
 }
 
 // goroutineRelatedToWaitGroup checks if a goroutine is related to a WaitGroup
-func (wga *Analyzer) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
+func (wga *Checker) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
 		found := false
 		ast.Inspect(fnLit.Body, func(n ast.Node) bool {
@@ -73,7 +73,7 @@ func (wga *Analyzer) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName stri
 	return false
 }
 
-func (wga *Analyzer) goroutineDoneInfo(goStmt *ast.GoStmt, wgName string) (doneCallInfo, bool) {
+func (wga *Checker) goroutineDoneInfo(goStmt *ast.GoStmt, wgName string) (doneCallInfo, bool) {
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
 		if !wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
 			return doneCallInfo{}, false
@@ -90,7 +90,7 @@ type doneCallInfo struct {
 	hasGuaranteedDone bool
 }
 
-func (wga *Analyzer) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
+func (wga *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	// Tracks whether a prior branch could exit early, making subsequent statements conditional
 	mightExitEarly := false
@@ -266,7 +266,7 @@ func (wga *Analyzer) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName st
 	return info
 }
 
-func (wga *Analyzer) analyzeSwitchStatementWithVisited(switchStmt *ast.SwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
+func (wga *Checker) analyzeSwitchStatementWithVisited(switchStmt *ast.SwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
 	allCasesGuaranteed := true
@@ -300,7 +300,7 @@ func (wga *Analyzer) analyzeSwitchStatementWithVisited(switchStmt *ast.SwitchStm
 	return info
 }
 
-func (wga *Analyzer) analyzeTypeSwitchStatementWithVisited(typeSwitchStmt *ast.TypeSwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
+func (wga *Checker) analyzeTypeSwitchStatementWithVisited(typeSwitchStmt *ast.TypeSwitchStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
 	allCasesGuaranteed := true
@@ -333,7 +333,7 @@ func (wga *Analyzer) analyzeTypeSwitchStatementWithVisited(typeSwitchStmt *ast.T
 	return info
 }
 
-func (wga *Analyzer) analyzeSelectStatementWithVisited(selectStmt *ast.SelectStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
+func (wga *Checker) analyzeSelectStatementWithVisited(selectStmt *ast.SelectStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
 	info := doneCallInfo{}
 	hasDefault := false
 	allCasesGuaranteed := true
@@ -366,7 +366,7 @@ func (wga *Analyzer) analyzeSelectStatementWithVisited(selectStmt *ast.SelectStm
 	return info
 }
 
-func (wga *Analyzer) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName string, visited map[token.Pos]bool) bool {
+func (wga *Checker) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName string, visited map[token.Pos]bool) bool {
 	if body == nil {
 		return false
 	}
@@ -397,7 +397,7 @@ func (wga *Analyzer) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName str
 	return found
 }
 
-func (wga *Analyzer) commClauseReceivesDoneSignal(cc *ast.CommClause) bool {
+func (wga *Checker) commClauseReceivesDoneSignal(cc *ast.CommClause) bool {
 	if cc == nil || cc.Comm == nil {
 		return false
 	}
@@ -413,7 +413,7 @@ func (wga *Analyzer) commClauseReceivesDoneSignal(cc *ast.CommClause) bool {
 	return false
 }
 
-func (wga *Analyzer) exprReceivesDoneSignal(expr ast.Expr) bool {
+func (wga *Checker) exprReceivesDoneSignal(expr ast.Expr) bool {
 	unary, ok := expr.(*ast.UnaryExpr)
 	if !ok || unary.Op != token.ARROW {
 		return false
@@ -430,7 +430,7 @@ func (wga *Analyzer) exprReceivesDoneSignal(expr ast.Expr) bool {
 	return false
 }
 
-func (wga *Analyzer) identIsClosedChannel(name string) bool {
+func (wga *Checker) identIsClosedChannel(name string) bool {
 	if name == "" || wga.function == nil || wga.function.Body == nil {
 		return false
 	}
@@ -456,7 +456,7 @@ func (wga *Analyzer) identIsClosedChannel(name string) bool {
 	return found
 }
 
-func (wga *Analyzer) callReturnsContextDoneSignal(receiver ast.Expr, call *ast.CallExpr) bool {
+func (wga *Checker) callReturnsContextDoneSignal(receiver ast.Expr, call *ast.CallExpr) bool {
 	if wga.typesInfo == nil {
 		return false
 	}
@@ -474,7 +474,7 @@ func (wga *Analyzer) callReturnsContextDoneSignal(receiver ast.Expr, call *ast.C
 	return ok && st.NumFields() == 0
 }
 
-func (wga *Analyzer) analyzeRelatedCall(call *ast.CallExpr, wgName string, visited map[token.Pos]bool) (doneCallInfo, bool) {
+func (wga *Checker) analyzeRelatedCall(call *ast.CallExpr, wgName string, visited map[token.Pos]bool) (doneCallInfo, bool) {
 	fn, calleeWGName, related := wga.relatedWaitGroupForCall(call, wgName)
 	if !related || fn == nil || fn.Body == nil || calleeWGName == "" {
 		return doneCallInfo{}, false
@@ -489,7 +489,7 @@ func (wga *Analyzer) analyzeRelatedCall(call *ast.CallExpr, wgName string, visit
 	return wga.analyzeDoneCallsWithVisited(fn.Body, calleeWGName, visited), true
 }
 
-func (wga *Analyzer) callInvokesDone(call *ast.CallExpr, wgName string) bool {
+func (wga *Checker) callInvokesDone(call *ast.CallExpr, wgName string) bool {
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok &&
 		sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
 		return true
@@ -503,14 +503,14 @@ func (wga *Analyzer) callInvokesDone(call *ast.CallExpr, wgName string) bool {
 }
 
 // isSimpleDeferDone checks if a defer statement is a simple defer wg.Done()
-func (wga *Analyzer) isSimpleDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
+func (wga *Checker) isSimpleDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
 		return call.Sel.Name == "Done" && common.GetVarName(call.X) == wgName
 	}
 	return false
 }
 
-func (wga *Analyzer) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
+func (wga *Checker) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	if ident, ok := deferStmt.Call.Fun.(*ast.Ident); ok {
 		return ident.Name == wgName
 	}
@@ -518,7 +518,7 @@ func (wga *Analyzer) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgName string
 }
 
 // isDeferPanicRecoveryPattern detects panic recovery pattern
-func (wga *Analyzer) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgName string) bool {
+func (wga *Checker) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgName string) bool {
 	// Check if the defer has a function literal
 	fnLit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
 	if !ok {
@@ -561,7 +561,7 @@ func (wga *Analyzer) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgNam
 }
 
 // isDeferFuncWithDone checks if a defer has a function literal that calls Done
-func (wga *Analyzer) isDeferFuncWithDone(deferStmt *ast.DeferStmt, wgName string) bool {
+func (wga *Checker) isDeferFuncWithDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	fnLit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
 	if !ok {
 		return false
@@ -569,7 +569,7 @@ func (wga *Analyzer) isDeferFuncWithDone(deferStmt *ast.DeferStmt, wgName string
 	return wga.containsDoneCall(fnLit.Body, wgName)
 }
 
-func (wga *Analyzer) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName string) bool {
+func (wga *Checker) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName string) bool {
 	if len(call.Args) == 0 {
 		return false
 	}
@@ -597,7 +597,7 @@ func (wga *Analyzer) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName s
 }
 
 // isRecoverCheck checks if an if statement is checking recover() result
-func (wga *Analyzer) isRecoverCheck(ifStmt *ast.IfStmt) bool {
+func (wga *Checker) isRecoverCheck(ifStmt *ast.IfStmt) bool {
 	// Check for pattern: if r := recover(); r != nil
 	if ifStmt.Init != nil {
 		if assign, ok := ifStmt.Init.(*ast.AssignStmt); ok {

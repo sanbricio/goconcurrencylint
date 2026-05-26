@@ -6,11 +6,11 @@ import (
 	"go/types"
 	"strconv"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
-func (ma *Analyzer) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[string]*Stats) {
+func (ma *Checker) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[string]*Stats) {
 	if ma.rawBodyEffects || stmt == nil || !ma.hasUnprotectedHeldLock(stats) {
 		return
 	}
@@ -55,7 +55,7 @@ func (ma *Analyzer) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[str
 	}
 }
 
-func (ma *Analyzer) hasUnprotectedHeldLock(stats map[string]*Stats) bool {
+func (ma *Checker) hasUnprotectedHeldLock(stats map[string]*Stats) bool {
 	for name, st := range stats {
 		if st == nil {
 			continue
@@ -72,7 +72,7 @@ func (ma *Analyzer) hasUnprotectedHeldLock(stats map[string]*Stats) bool {
 	return false
 }
 
-func (ma *Analyzer) indexExprCanPanic(index *ast.IndexExpr) bool {
+func (ma *Checker) indexExprCanPanic(index *ast.IndexExpr) bool {
 	if index == nil {
 		return false
 	}
@@ -92,7 +92,7 @@ func (ma *Analyzer) indexExprCanPanic(index *ast.IndexExpr) bool {
 	return ok && indexValue >= length
 }
 
-func (ma *Analyzer) isMapIndex(index *ast.IndexExpr) bool {
+func (ma *Checker) isMapIndex(index *ast.IndexExpr) bool {
 	if index == nil || ma.typesInfo == nil {
 		return false
 	}
@@ -104,7 +104,7 @@ func (ma *Analyzer) isMapIndex(index *ast.IndexExpr) bool {
 	return ok
 }
 
-func (ma *Analyzer) staticLength(expr ast.Expr) (int, bool) {
+func (ma *Checker) staticLength(expr ast.Expr) (int, bool) {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		length, ok := ma.collectionLengths[e.Name]
@@ -131,7 +131,7 @@ func (ma *Analyzer) staticLength(expr ast.Expr) (int, bool) {
 	return 0, false
 }
 
-func (ma *Analyzer) staticMakeLength(call *ast.CallExpr) (int, bool) {
+func (ma *Checker) staticMakeLength(call *ast.CallExpr) (int, bool) {
 	if call == nil || len(call.Args) < 2 {
 		return 0, false
 	}
@@ -142,7 +142,7 @@ func (ma *Analyzer) staticMakeLength(call *ast.CallExpr) (int, bool) {
 	return common.ConstantIntValue(call.Args[1], ma.typesInfo)
 }
 
-func (ma *Analyzer) recordCollectionLengthsFromDecl(stmt *ast.DeclStmt) {
+func (ma *Checker) recordCollectionLengthsFromDecl(stmt *ast.DeclStmt) {
 	if stmt == nil {
 		return
 	}
@@ -165,7 +165,7 @@ func (ma *Analyzer) recordCollectionLengthsFromDecl(stmt *ast.DeclStmt) {
 	}
 }
 
-func (ma *Analyzer) recordCollectionLengthsFromAssign(stmt *ast.AssignStmt) {
+func (ma *Checker) recordCollectionLengthsFromAssign(stmt *ast.AssignStmt) {
 	if stmt == nil || (stmt.Tok != token.ASSIGN && stmt.Tok != token.DEFINE) {
 		return
 	}
@@ -182,7 +182,7 @@ func (ma *Analyzer) recordCollectionLengthsFromAssign(stmt *ast.AssignStmt) {
 	}
 }
 
-func (ma *Analyzer) recordCollectionLength(name string, expr ast.Expr) {
+func (ma *Checker) recordCollectionLength(name string, expr ast.Expr) {
 	if ma.collectionLengths == nil {
 		ma.collectionLengths = make(map[string]int)
 	}

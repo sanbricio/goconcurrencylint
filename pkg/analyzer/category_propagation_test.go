@@ -3,7 +3,7 @@ package analyzer
 import (
 	"testing"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/tools/go/analysis/analysistest"

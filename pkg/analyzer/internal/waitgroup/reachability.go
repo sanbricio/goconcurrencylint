@@ -4,11 +4,11 @@ import (
 	"go/ast"
 	"go/token"
 
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
 // isTerminatingStatement checks if a statement terminates execution flow
-func (wga *Analyzer) isTerminatingStatement(stmt ast.Stmt) bool {
+func (wga *Checker) isTerminatingStatement(stmt ast.Stmt) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
 		return true
@@ -23,7 +23,7 @@ func (wga *Analyzer) isTerminatingStatement(stmt ast.Stmt) bool {
 }
 
 // hasUnreachableDone checks if a function body has unreachable Done calls
-func (wga *Analyzer) hasUnreachableDone(body *ast.BlockStmt, wgName string) bool {
+func (wga *Checker) hasUnreachableDone(body *ast.BlockStmt, wgName string) bool {
 	for i, stmt := range body.List {
 		if wga.isTerminatingStatement(stmt) {
 			for j := i + 1; j < len(body.List); j++ {
@@ -60,7 +60,7 @@ func (wga *Analyzer) hasUnreachableDone(body *ast.BlockStmt, wgName string) bool
 }
 
 // containsDoneCall checks if a statement contains a Done call for the given WaitGroup
-func (wga *Analyzer) containsDoneCall(stmt ast.Stmt, wgName string) bool {
+func (wga *Checker) containsDoneCall(stmt ast.Stmt, wgName string) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
@@ -82,7 +82,7 @@ func (wga *Analyzer) containsDoneCall(stmt ast.Stmt, wgName string) bool {
 //	case <-done:
 //	    wg.Wait()
 //	    return
-func (wga *Analyzer) waitInEarlyExitBranch(waitPos token.Pos) bool {
+func (wga *Checker) waitInEarlyExitBranch(waitPos token.Pos) bool {
 	found := false
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		if found {
@@ -120,7 +120,7 @@ func stmtListOf(n ast.Node) []ast.Stmt {
 }
 
 // blockAlwaysTerminates checks if a block always terminates execution (return, panic, etc.)
-func (wga *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
+func (wga *Checker) blockAlwaysTerminates(block *ast.BlockStmt) bool {
 	for _, stmt := range block.List {
 		if wga.isTerminatingStatement(stmt) {
 			return true
@@ -144,7 +144,7 @@ func (wga *Analyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
 }
 
 // hasChannelSends checks if there are any send operations or close calls for the given channel in the function
-func (wga *Analyzer) hasChannelSends(chanName string) bool {
+func (wga *Checker) hasChannelSends(chanName string) bool {
 	found := false
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		if found {
@@ -170,7 +170,7 @@ func (wga *Analyzer) hasChannelSends(chanName string) bool {
 }
 
 // isLocallyCreatedChannel checks if a channel was created with make() in the current function
-func (wga *Analyzer) isLocallyCreatedChannel(chanName string) bool {
+func (wga *Checker) isLocallyCreatedChannel(chanName string) bool {
 	found := false
 	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
 		if found {
@@ -196,7 +196,7 @@ func (wga *Analyzer) isLocallyCreatedChannel(chanName string) bool {
 }
 
 // findRelatedAddCall finds an Add call that might be related to this goroutine
-func (wga *Analyzer) findRelatedAddCall(goStmt *ast.GoStmt, wgName string) token.Pos {
+func (wga *Checker) findRelatedAddCall(goStmt *ast.GoStmt, wgName string) token.Pos {
 	// First, try to find an Add call that appears just before this goroutine
 	var lastAddBeforeGo token.Pos
 	var allAdds []token.Pos
