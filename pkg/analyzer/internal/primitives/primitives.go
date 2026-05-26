@@ -50,7 +50,7 @@ var Analyzer = &analysis.Analyzer{
 	Name:       "goconcurrencylint_primitives",
 	Doc:        "Collects sync.Mutex/RWMutex/WaitGroup variable names declared at package scope.",
 	Run:        run,
-	ResultType: reflect.TypeOf((*Result)(nil)),
+	ResultType: reflect.TypeFor[*Result](),
 }
 
 func run(pass *analysis.Pass) (any, error) {

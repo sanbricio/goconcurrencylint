@@ -34,7 +34,7 @@ var Analyzer = &analysis.Analyzer{
 	Name:       "goconcurrencylint_filesetup",
 	Doc:        "Identifies generated files and builds per-file CommentFilters reused by the sync sub-analyzers.",
 	Run:        run,
-	ResultType: reflect.TypeOf((*Result)(nil)),
+	ResultType: reflect.TypeFor[*Result](),
 }
 
 func run(pass *analysis.Pass) (any, error) {

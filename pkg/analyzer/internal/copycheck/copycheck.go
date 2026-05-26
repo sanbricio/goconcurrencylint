@@ -29,7 +29,7 @@ var Analyzer = &analysis.Analyzer{
 	Doc:        "Detects copy-by-value of sync.Mutex, sync.RWMutex and sync.WaitGroup.",
 	Run:        run,
 	Requires:   []*analysis.Analyzer{inspect.Analyzer, filesetup.Analyzer},
-	ResultType: reflect.TypeOf([]analysis.Diagnostic{}),
+	ResultType: reflect.TypeFor[[]analysis.Diagnostic](),
 }
 
 func run(pass *analysis.Pass) (any, error) {

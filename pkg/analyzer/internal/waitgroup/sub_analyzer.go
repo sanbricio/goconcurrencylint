@@ -20,7 +20,7 @@ var SubAnalyzer = &analysis.Analyzer{
 	Doc:        "Detects misuse of sync.WaitGroup (Add/Done/Wait imbalance, Add after Wait, etc.).",
 	Run:        run,
 	Requires:   []*analysis.Analyzer{inspect.Analyzer, primitives.Analyzer, filesetup.Analyzer},
-	ResultType: reflect.TypeOf([]analysis.Diagnostic{}),
+	ResultType: reflect.TypeFor[[]analysis.Diagnostic](),
 }
 
 func run(pass *analysis.Pass) (any, error) {

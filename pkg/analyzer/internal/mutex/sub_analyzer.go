@@ -22,7 +22,7 @@ var SubAnalyzer = &analysis.Analyzer{
 	Doc:        "Detects misuse of sync.Mutex and sync.RWMutex.",
 	Run:        run,
 	Requires:   []*analysis.Analyzer{inspect.Analyzer, primitives.Analyzer, filesetup.Analyzer},
-	ResultType: reflect.TypeOf([]analysis.Diagnostic{}),
+	ResultType: reflect.TypeFor[[]analysis.Diagnostic](),
 }
 
 func run(pass *analysis.Pass) (any, error) {
