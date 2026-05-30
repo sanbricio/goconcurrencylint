@@ -26,7 +26,6 @@ const (
 	GoroutineLockDeadlock  Category = "goroutine-lock-deadlock"
 	PanicBeforeUnlock      Category = "panic-before-unlock"
 	DoubleLock             Category = "double-lock"
-	CrossGoroutineUnlock   Category = "cross-goroutine-unlock"
 	LockOrderCycle         Category = "lock-order-cycle"
 
 	// WaitGroup checks.
@@ -45,9 +44,7 @@ const (
 	NestedWaitGroupDeadlock Category = "nested-waitgroup-deadlock"
 	DoneOutsideGoroutine    Category = "done-outside-goroutine"
 	GoPanic                 Category = "go-panic"
-
-	// Cross-primitive.
-	SyncPrimitiveCopy Category = "sync-primitive-copy"
+	SyncPrimitiveCopy       Category = "sync-primitive-copy"
 )
 
 // All returns every known check category. Order is not significant.
@@ -64,7 +61,6 @@ func All() []Category {
 		GoroutineLockDeadlock,
 		PanicBeforeUnlock,
 		DoubleLock,
-		CrossGoroutineUnlock,
 		LockOrderCycle,
 		AddWithoutDone,
 		DoneWithoutAdd,

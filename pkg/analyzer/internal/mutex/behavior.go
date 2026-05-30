@@ -372,7 +372,7 @@ func (ma *Checker) isLockOrderRelease(varName, methodName string) bool {
 	}
 }
 
-func (ma *Checker) reportCrossGoroutineReleases(body *ast.BlockStmt, parentStats map[string]*Stats) crossGoroutineReleases {
+func (ma *Checker) collectCrossGoroutineReleases(body *ast.BlockStmt, parentStats map[string]*Stats) crossGoroutineReleases {
 	releases := crossGoroutineReleases{
 		unlocks:  make(map[string][]token.Pos),
 		runlocks: make(map[string][]token.Pos),
@@ -470,7 +470,6 @@ func (ma *Checker) scanCrossGoroutineReleaseCall(call *ast.CallExpr, parentStats
 			}
 			if ma.parentHoldsExclusiveLock(parentStats, varName) {
 				releases.unlocks[varName] = append(releases.unlocks[varName], call.Pos())
-				ma.errorCollector.AddError(call.Pos(), category.CrossGoroutineUnlock, "mutex '"+varName+"' is unlocked in a different goroutine than it was locked")
 			}
 		}
 	case "RLock", "TryRLock":
@@ -485,7 +484,6 @@ func (ma *Checker) scanCrossGoroutineReleaseCall(call *ast.CallExpr, parentStats
 			}
 			if ma.parentHoldsReadLock(parentStats, varName) {
 				releases.runlocks[varName] = append(releases.runlocks[varName], call.Pos())
-				ma.errorCollector.AddError(call.Pos(), category.CrossGoroutineUnlock, "rwmutex '"+varName+"' is runlocked in a different goroutine than it was rlocked")
 			}
 		}
 	}

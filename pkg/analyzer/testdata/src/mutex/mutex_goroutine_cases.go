@@ -59,7 +59,7 @@ func BadGoroutineWaitGroupWaitsBeforeParentUnlocks() {
 	mu.Unlock()
 }
 
-func BadCrossGoroutineUnlockCompletedBeforeLaterLockOrder() {
+func GoodGoroutineUnlockHandoffCompletedBeforeLaterLockOrder() {
 	var fsMu, blockMu sync.RWMutex
 	var ready sync.WaitGroup
 	var wg sync.WaitGroup
@@ -72,7 +72,7 @@ func BadCrossGoroutineUnlockCompletedBeforeLaterLockOrder() {
 		defer wg.Done()
 		fsMu.Lock()
 		fsMu.Unlock()
-		blockMu.Unlock() // want "mutex 'blockMu' is unlocked in a different goroutine than it was locked"
+		blockMu.Unlock()
 	}()
 
 	ready.Wait()
@@ -102,7 +102,7 @@ func BadFutureWaitGroupReleaseDoesNotBreakCurrentLockOrder() {
 
 	go func() {
 		defer wg.Done()
-		a.Unlock() // want "mutex 'a' is unlocked in a different goroutine than it was locked"
+		a.Unlock()
 	}()
 }
 
@@ -211,19 +211,42 @@ func BadGoroutineLockWithoutUnlockAfterParentReleases() {
 	mu.Unlock()
 }
 
-func BadCrossGoroutineUnlock() {
+func GoodGoroutineUnlockHandoff() {
 	var mu sync.Mutex
 	mu.Lock()
 	go func() {
-		mu.Unlock() // want "mutex 'mu' is unlocked in a different goroutine than it was locked"
+		mu.Unlock()
 	}()
 }
 
-func BadCrossGoroutineUnlockThenParentUnlock() {
+type handoffAccount struct {
+	mu sync.Mutex
+}
+
+func GoodGoroutineUnlockHandoffRange() {
+	var accs []*handoffAccount
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		acc := &handoffAccount{}
+		acc.mu.Lock()
+		accs = append(accs, acc)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, acc := range accs {
+			acc.mu.Unlock()
+		}
+	}()
+	wg.Wait()
+}
+
+func BadGoroutineUnlockHandoffThenParentUnlock() {
 	var mu sync.Mutex
 	mu.Lock()
 	go func() {
-		mu.Unlock() // want "mutex 'mu' is unlocked in a different goroutine than it was locked"
+		mu.Unlock()
 	}()
 	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
 }

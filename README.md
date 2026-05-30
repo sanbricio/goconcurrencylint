@@ -110,7 +110,6 @@ Because the tool is a standard `go/analysis` single-checker, it accepts the usua
 | `go-panic` | `sync.WaitGroup` | A function passed to `wg.Go()` may panic and bring the program down. |
 | `defer-unlock-in-loop` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Unlock()` lives inside a loop body, so the unlock only runs at function return. |
 | `double-lock` | `sync.Mutex`, `sync.RWMutex` | A second `Lock()` is taken while the first is still held (or a write `Lock()` while a read lock is held). |
-| `cross-goroutine-unlock` | `sync.Mutex`, `sync.RWMutex` | `Unlock()` / `RUnlock()` runs in a different goroutine than the matching lock. |
 | `lock-order-cycle` | `sync.Mutex`, `sync.RWMutex` | Two functions acquire the same pair of mutexes in opposite orders — classic deadlock pattern. |
 | `sync-primitive-copy` | all | A `sync.Mutex`, `sync.RWMutex` or `sync.WaitGroup` (or a struct embedding one) is copied by value. |
 

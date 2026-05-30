@@ -1,10 +1,10 @@
 package mutex
 
 import (
-	"slices"
 	"go/ast"
 	"go/token"
 	"maps"
+	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
@@ -279,7 +279,7 @@ func (ma *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats)
 			}
 		}
 
-		crossReleases := ma.reportCrossGoroutineReleases(fnLit.Body, stats)
+		crossReleases := ma.collectCrossGoroutineReleases(fnLit.Body, stats)
 		goInitial := ma.emptyStatsLike(stats)
 		goStats := ma.analyzeBlock(fnLit.Body, goInitial)
 		ma.suppressCrossGoroutineBorrowedReleases(goStats, crossReleases)
