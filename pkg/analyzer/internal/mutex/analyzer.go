@@ -13,33 +13,27 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/primitives"
 )
 
-// Checker handles the analysis of mutex and rwmutex usage
+// Checker handles the analysis of mutex and rwmutex usage.
+//
+// Fields fall into two groups: package-wide configuration set once in
+// NewChecker and never mutated, and per-function state in the embedded
+// *funcAnalysis. AnalyzeFunction replaces the embed for each function so the
+// per-call reset is a single assignment instead of clearing fields by hand.
 type Checker struct {
-	mutexNames             map[string]bool
-	rwMutexNames           map[string]bool
-	errorCollector         report.Reporter
-	stats                  map[string]*Stats
-	deferErrors            *deferErrorCollector
-	commentFilter          *commentfilter.CommentFilter
-	function               *ast.FuncDecl
-	typesInfo              *types.Info
-	rawBodyEffects         bool
-	receiverMethods        map[string]map[string]*ast.FuncDecl
-	functions              []*ast.FuncDecl
-	simulationStack        map[methodSimulationKey]bool
-	localFuncStack         map[*ast.FuncLit]bool
-	goroutineLockConflicts []goroutineLockConflict
-	tryLockResults         map[string]*tryLockResult
-	collectionLengths      map[string]int
-	terminatingTailDepth   int
+	mutexNames      map[string]bool
+	rwMutexNames    map[string]bool
+	errorCollector  report.Reporter
+	commentFilter   *commentfilter.CommentFilter
+	typesInfo       *types.Info
+	receiverMethods map[string]map[string]*ast.FuncDecl
+	functions       []*ast.FuncDecl
 
-	// Memoize hot validation lookups. The cached map in explicitTransferCache
-	// is shared by reference; callers must treat it as read-only.
-	callerManagedCache    map[callerManagedKey]bool
+	// explicitTransferCache is keyed by *ast.BlockStmt so it remains correct
+	// across functions; the cached map is shared by reference, callers must
+	// treat it as read-only.
 	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
 
-	// labelGotoSnapshots stores lock state from `goto label` edges.
-	labelGotoSnapshots map[string]map[string]*Stats
+	*funcAnalysis
 }
 
 // goroutineLockConflict records a goroutine that was launched while the parent
@@ -93,28 +87,12 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		typesInfo:             typesInfo,
 		receiverMethods:       buildReceiverMethodMap(files),
 		functions:             collectFunctionDecls(files),
-		callerManagedCache:    make(map[callerManagedKey]bool),
 		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
-		deferErrors: &deferErrorCollector{
-			badDeferUnlock:  make(map[string]bool),
-			badDeferRUnlock: make(map[string]bool),
-		},
 	}
 }
 
-// AnalyzeFunction analyzes mutex usage in a function
 func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
-	ma.function = fn
-	ma.rawBodyEffects = false
-	ma.goroutineLockConflicts = nil
-	ma.tryLockResults = make(map[string]*tryLockResult)
-	ma.collectionLengths = make(map[string]int)
-	ma.labelGotoSnapshots = nil
-	ma.terminatingTailDepth = 0
-	ma.deferErrors = &deferErrorCollector{
-		badDeferUnlock:  make(map[string]bool),
-		badDeferRUnlock: make(map[string]bool),
-	}
+	ma.funcAnalysis = newFuncAnalysis(fn)
 	ma.initializeStats()
 	ma.checkLockOrderCycles(fn.Body)
 	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
@@ -1031,23 +1009,8 @@ func (ma *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMu
 		mutexNames[varName] = true
 	}
 
-	simulated := &Checker{
-		mutexNames:      mutexNames,
-		rwMutexNames:    rwMutexNames,
-		errorCollector:  &report.ErrorCollector{},
-		commentFilter:   ma.commentFilter,
-		function:        fn,
-		typesInfo:       ma.typesInfo,
-		rawBodyEffects:  true,
-		receiverMethods: ma.receiverMethods,
-		functions:       ma.functions,
-		simulationStack: stack,
-		localFuncStack:  ma.localFuncStack,
-		deferErrors: &deferErrorCollector{
-			badDeferUnlock:  make(map[string]bool),
-			badDeferRUnlock: make(map[string]bool),
-		},
-	}
+	sub := newSimulationFuncAnalysis(fn, stack, ma.localFuncStack)
+	simulated := ma.forkForSimulation(sub, mutexNames, rwMutexNames)
 
 	start := map[string]*Stats{varName: cloneStats(initial)}
 	final := simulated.analyzeBlock(fn.Body, start)
@@ -1078,23 +1041,8 @@ func (ma *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr,
 	stack[fnlit] = true
 	defer delete(stack, fnlit)
 
-	simulated := &Checker{
-		mutexNames:      ma.mutexNames,
-		rwMutexNames:    ma.rwMutexNames,
-		errorCollector:  &report.ErrorCollector{},
-		commentFilter:   ma.commentFilter,
-		function:        ma.function,
-		typesInfo:       ma.typesInfo,
-		rawBodyEffects:  true,
-		receiverMethods: ma.receiverMethods,
-		functions:       ma.functions,
-		simulationStack: ma.simulationStack,
-		localFuncStack:  stack,
-		deferErrors: &deferErrorCollector{
-			badDeferUnlock:  make(map[string]bool),
-			badDeferRUnlock: make(map[string]bool),
-		},
-	}
+	sub := newSimulationFuncAnalysis(ma.function, ma.simulationStack, stack)
+	simulated := ma.forkForSimulation(sub, ma.mutexNames, ma.rwMutexNames)
 
 	baseline := simulated.cloneStatsMap(stats)
 	final := simulated.analyzeBlock(fnlit.Body, baseline)
