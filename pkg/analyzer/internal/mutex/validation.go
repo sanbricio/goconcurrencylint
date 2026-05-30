@@ -160,7 +160,7 @@ func (ma *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[strin
 		return negatedElse, negatedThen
 	}
 
-	if ma.applyTryLockResultToBranch(cond, thenStats) {
+	if ma.tryLock.applyToBranch(cond, thenStats) {
 		return thenStats, elseStats
 	}
 

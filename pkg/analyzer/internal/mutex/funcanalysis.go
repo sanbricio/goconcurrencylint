@@ -13,7 +13,7 @@ type funcAnalysis struct {
 	deferErrors            *deferErrorCollector
 	rawBodyEffects         bool
 	goroutineLockConflicts []goroutineLockConflict
-	tryLockResults         map[string]*tryLockResult
+	tryLock                *tryLockTracker
 	collectionLengths      map[string]int
 	terminatingTailDepth   int
 	labelGotoSnapshots     map[string]map[string]*Stats
@@ -28,11 +28,13 @@ type funcAnalysis struct {
 }
 
 func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
+	// tryLock is wired separately (in AnalyzeFunction / forkForSimulation)
+	// because the tracker needs the Checker's names and reporting boundary,
+	// which newFuncAnalysis does not have.
 	return &funcAnalysis{
 		function:           fn,
 		stats:              make(map[string]*Stats),
 		deferErrors:        newDeferErrorCollector(),
-		tryLockResults:     make(map[string]*tryLockResult),
 		collectionLengths:  make(map[string]int),
 		callerManagedCache: make(map[callerManagedKey]bool),
 	}
@@ -62,7 +64,7 @@ func newSimulationFuncAnalysis(fn *ast.FuncDecl, simStack map[methodSimulationKe
 // and primitive name maps. The fork gets its own ErrorCollector so
 // simulation diagnostics do not leak into the parent run.
 func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames map[string]bool) *Checker {
-	return &Checker{
+	sim := &Checker{
 		mutexNames:            mutexNames,
 		rwMutexNames:          rwMutexNames,
 		errorCollector:        &report.ErrorCollector{},
@@ -73,4 +75,8 @@ func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames 
 		explicitTransferCache: ma.explicitTransferCache,
 		funcAnalysis:          fa,
 	}
+	// Wire the tracker against the fork's own names and (isolated) collector so
+	// simulation diagnostics never leak into the parent run.
+	sim.tryLock = newTryLockTracker(sim.mutexNames, sim.rwMutexNames, sim.commentFilter, sim.errorCollector)
+	return sim
 }

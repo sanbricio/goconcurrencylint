@@ -46,14 +46,6 @@ type goroutineLockConflict struct {
 	requestMethod  string
 }
 
-type tryLockResult struct {
-	varName   string
-	method    string
-	pos       token.Pos
-	checked   bool
-	isRWMutex bool
-}
-
 type methodSimulationKey struct {
 	fn        *ast.FuncDecl
 	varName   string
@@ -93,10 +85,12 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 
 func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.funcAnalysis = newFuncAnalysis(fn)
+	ma.tryLock = newTryLockTracker(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.errorCollector)
 	ma.initializeStats()
-	ma.checkLockOrderCycles(fn.Body)
+	lockOrder := newLockOrderDetector(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.typesInfo, ma.errorCollector)
+	lockOrder.check(fn.Body)
 	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
-	ma.reportUncheckedTryLockResults()
+	ma.tryLock.reportUnchecked()
 	ma.reportUnmatchedLocks(finalStats)
 }
 

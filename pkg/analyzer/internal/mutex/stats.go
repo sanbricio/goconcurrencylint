@@ -439,7 +439,7 @@ func (ma *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	case *ast.DeferStmt:
 		ma.analyzeDeferStatement(s, stats)
 	case *ast.ReturnStmt:
-		ma.markReturnedTryLockResultsChecked(s)
+		ma.tryLock.markReturnedChecked(s)
 		ma.reportPotentialPanicWhileLocked(s, stats)
 		ma.analyzeReturnStatement(s, stats)
 	case *ast.IfStmt:
@@ -469,6 +469,20 @@ func (ma *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 		nestedStats := ma.analyzeBlock(s, stats)
 		ma.copyStatsMap(stats, nestedStats)
 	}
+}
+
+// analyzeAssignStatement handles assignments: collection-length bookkeeping,
+// potential-panic-while-locked reporting, and TryLock result tracking (the
+// latter delegated to the per-function tryLockTracker).
+func (ma *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]*Stats) {
+	ma.recordCollectionLengthsFromAssign(stmt)
+	ma.reportPotentialPanicWhileLocked(stmt, stats)
+	ma.tryLock.recordAssignment(stmt)
+}
+
+func (ma *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {
+	ma.recordCollectionLengthsFromDecl(stmt)
+	ma.reportPotentialPanicWhileLocked(stmt, stats)
 }
 
 // analyzeExpressionStatement handles expression statements (Lock/Unlock calls)
