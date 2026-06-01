@@ -45,7 +45,8 @@ func (ma *Checker) scanLockOrderStatements(stmts []ast.Stmt, held map[string]boo
 
 		switch s := stmt.(type) {
 		case *ast.ExprStmt:
-			if call, ok := s.X.(*ast.CallExpr); ok {
+			expr := common.UnwrapParenExpr(s.X)
+			if call, ok := expr.(*ast.CallExpr); ok {
 				ma.scanLockOrderCall(call, held, edges, reported, waitReleases)
 			}
 		case *ast.DeferStmt:
