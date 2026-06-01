@@ -86,6 +86,7 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.funcAnalysis = newFuncAnalysis(fn)
 	ma.tryLock = newTryLockTracker(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.errorCollector)
+	ma.wrapper = newWrapperResolver(ma.receiverMethods, ma.function, ma.rawBodyEffects)
 	ma.initializeStats()
 	lockOrder := newLockOrderDetector(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.typesInfo, ma.errorCollector)
 	lockOrder.check(fn.Body)
@@ -181,170 +182,6 @@ func baseTypeNameFromType(typ types.Type) string {
 	return ""
 }
 
-func (ma *Checker) isBorrowedWrapperCall(varName, methodName string) bool {
-	if ma.rawBodyEffects {
-		return false
-	}
-
-	if ma.function == nil || ma.function.Name == nil {
-		return false
-	}
-
-	currentReceiver := common.ReceiverName(ma.function)
-	if currentReceiver == "" {
-		return false
-	}
-
-	oppositeMethods := oppositeMutexMethods(methodName)
-	if len(oppositeMethods) == 0 || ma.currentMethodContainsFieldCall(varName, oppositeMethods) {
-		return false
-	}
-
-	if _, fieldSuffix, ok := splitBaseAndSuffix(varName); ok &&
-		methodNameLooksLikeWrapper(ma.function.Name.Name, methodName) &&
-		ma.anySiblingMethodContainsFieldSuffix(fieldSuffix, ma.function.Name.Name, oppositeMethods, oppositeMethods) {
-		return true
-	}
-
-	suffix, ok := strings.CutPrefix(varName, currentReceiver)
-	if !ok || !strings.HasPrefix(suffix, ".") {
-		return false
-	}
-
-	switch ma.function.Name.Name {
-	case "Lock", "TryLock":
-		return (methodName == "Lock" || methodName == "TryLock") &&
-			ma.siblingMethodContainsFieldCall(suffix, []string{"Unlock"}, []string{"Unlock"})
-	case "Unlock":
-		return methodName == "Unlock" &&
-			ma.siblingMethodContainsFieldCall(suffix, []string{"Lock", "TryLock"}, []string{"Lock", "TryLock"})
-	case "RLock", "TryRLock":
-		return (methodName == "RLock" || methodName == "TryRLock") &&
-			ma.siblingMethodContainsFieldCall(suffix, []string{"RUnlock"}, []string{"RUnlock"})
-	case "RUnlock":
-		return methodName == "RUnlock" &&
-			ma.siblingMethodContainsFieldCall(suffix, []string{"RLock", "TryRLock"}, []string{"RLock", "TryRLock"})
-	default:
-		if !methodNameLooksLikeWrapper(ma.function.Name.Name, methodName) {
-			return false
-		}
-		return ma.anySiblingMethodContainsFieldCall(suffix, ma.function.Name.Name, oppositeMethods, oppositeMethods)
-	}
-}
-
-func (ma *Checker) currentMethodContainsFieldCall(varName string, methodNames []string) bool {
-	return functionBodyContainsFieldCall(ma.function.Body, varName, methodNames)
-}
-
-func (ma *Checker) siblingMethodContainsFieldCall(fieldSuffix string, siblingMethods, fieldMethods []string) bool {
-	receiverType := receiverTypeName(ma.function)
-	if receiverType == "" {
-		return false
-	}
-
-	methods := ma.receiverMethods[receiverType]
-	if len(methods) == 0 {
-		return false
-	}
-
-	for _, siblingMethod := range siblingMethods {
-		fn := methods[siblingMethod]
-		if fn == nil || fn.Body == nil {
-			continue
-		}
-
-		siblingReceiver := common.ReceiverName(fn)
-		if siblingReceiver == "" {
-			continue
-		}
-
-		targetVar := siblingReceiver + fieldSuffix
-		if functionBodyContainsFieldCall(fn.Body, targetVar, fieldMethods) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (ma *Checker) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
-	receiverType := receiverTypeName(ma.function)
-	if receiverType == "" {
-		return false
-	}
-
-	methods := ma.receiverMethods[receiverType]
-	if len(methods) == 0 {
-		return false
-	}
-
-	for methodName, fn := range methods {
-		if methodName == excludeMethod || fn == nil || fn.Body == nil {
-			continue
-		}
-		if !methodNameMatchesAnyHint(methodName, nameHints) {
-			continue
-		}
-
-		siblingReceiver := common.ReceiverName(fn)
-		if siblingReceiver == "" {
-			continue
-		}
-
-		targetVar := siblingReceiver + fieldSuffix
-		if functionBodyContainsFieldCall(fn.Body, targetVar, fieldMethods) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (ma *Checker) anySiblingMethodContainsFieldSuffix(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
-	receiverType := receiverTypeName(ma.function)
-	if receiverType == "" {
-		return false
-	}
-
-	methods := ma.receiverMethods[receiverType]
-	if len(methods) == 0 {
-		return false
-	}
-
-	for methodName, fn := range methods {
-		if methodName == excludeMethod || fn == nil || fn.Body == nil {
-			continue
-		}
-		if !methodNameMatchesAnyHint(methodName, nameHints) {
-			continue
-		}
-		if functionBodyContainsFieldSuffixCall(fn.Body, fieldSuffix, fieldMethods) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func oppositeMutexMethods(methodName string) []string {
-	switch methodName {
-	case "Lock", "TryLock":
-		return []string{"Unlock"}
-	case "Unlock":
-		return []string{"Lock", "TryLock"}
-	case "RLock", "TryRLock":
-		return []string{"RUnlock"}
-	case "RUnlock":
-		return []string{"RLock", "TryRLock"}
-	default:
-		return nil
-	}
-}
-
-func methodNameLooksLikeWrapper(fnName, syncMethod string) bool {
-	return methodNameMatchesAnyHint(fnName, []string{syncMethod})
-}
-
 func methodNameMatchesAnyHint(fnName string, hints []string) bool {
 	lowerName := strings.ToLower(fnName)
 	for _, hint := range hints {
@@ -383,35 +220,6 @@ func functionBodyContainsFieldCall(body *ast.BlockStmt, varName string, methodNa
 		}
 
 		if containsMethod(methodNames, sel.Sel.Name) && common.GetVarName(sel.X) == varName {
-			found = true
-			return false
-		}
-
-		return true
-	})
-
-	return found
-}
-
-func functionBodyContainsFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string, methodNames []string) bool {
-	if body == nil || fieldSuffix == "" {
-		return false
-	}
-
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !containsMethod(methodNames, sel.Sel.Name) {
-			return true
-		}
-
-		_, suffix, ok := splitBaseAndSuffix(common.GetVarName(sel.X))
-		if ok && suffix == fieldSuffix {
 			found = true
 			return false
 		}
@@ -1096,13 +904,13 @@ func (ma *Checker) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
 		for st.deferUnlock > baselineDeferUnlocks && st.lock > 0 {
 			st.deferUnlock--
 			st.lock--
-			ma.removeFirstLockPos(st)
+			st.removeFirstLockPos()
 		}
 		st.deferUnlock = baselineDeferUnlocks
 		for st.deferRUnlock > baselineDeferRUnlocks && st.rlock > 0 {
 			st.deferRUnlock--
 			st.rlock--
-			ma.removeFirstRLockPos(st)
+			st.removeFirstRLockPos()
 		}
 		st.deferRUnlock = baselineDeferRUnlocks
 	}
@@ -1236,27 +1044,27 @@ func copyStats(dst, src *Stats) {
 }
 
 // removeFirstLockPos removes the first lock position from the list
-func (ma *Checker) removeFirstLockPos(stats *Stats) {
-	if len(stats.lockPos) > 0 {
-		stats.lockPos = stats.lockPos[1:]
+func (s *Stats) removeFirstLockPos() {
+	if len(s.lockPos) > 0 {
+		s.lockPos = s.lockPos[1:]
 	}
 }
 
 // removeFirstRLockPos removes the first rlock position from the list
-func (ma *Checker) removeFirstRLockPos(stats *Stats) {
-	if len(stats.rlockPos) > 0 {
-		stats.rlockPos = stats.rlockPos[1:]
+func (s *Stats) removeFirstRLockPos() {
+	if len(s.rlockPos) > 0 {
+		s.rlockPos = s.rlockPos[1:]
 	}
 }
 
-func (ma *Checker) removeFirstBorrowedUnlockPos(stats *Stats) {
-	if len(stats.borrowedUnlockPos) > 0 {
-		stats.borrowedUnlockPos = stats.borrowedUnlockPos[1:]
+func (s *Stats) removeFirstBorrowedUnlockPos() {
+	if len(s.borrowedUnlockPos) > 0 {
+		s.borrowedUnlockPos = s.borrowedUnlockPos[1:]
 	}
 }
 
-func (ma *Checker) removeFirstBorrowedRUnlockPos(stats *Stats) {
-	if len(stats.borrowedRUnlockPos) > 0 {
-		stats.borrowedRUnlockPos = stats.borrowedRUnlockPos[1:]
+func (s *Stats) removeFirstBorrowedRUnlockPos() {
+	if len(s.borrowedRUnlockPos) > 0 {
+		s.borrowedRUnlockPos = s.borrowedRUnlockPos[1:]
 	}
 }

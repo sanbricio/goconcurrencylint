@@ -241,15 +241,16 @@ func (ma *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats)
 	}
 
 	if fnLit, ok := stmt.Call.Fun.(*ast.FuncLit); ok {
+		cg := newCrossGoroutineDetector(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.typesInfo)
 		// Record goroutines launched while a mutex is held that also try to
 		// acquire the same mutex. The conflict is reported at function exit if
 		// the parent still holds the lock.
 		for varName := range ma.mutexNames {
 			if stats[varName] != nil && stats[varName].lock > 0 {
-				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
-					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"Unlock"}) {
+				if method, ok := cg.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
+					if cg.parentBlocksBeforeUnlock(ma.function, stmt.Pos(), varName, []string{"Unlock"}) {
 						ma.errorCollector.AddError(stmt.Pos(), category.GoroutineLockDeadlock,
-							ma.goroutineLockDeadlockMessage(varName, false, false, method, true))
+							cg.deadlockMessage(varName, false, false, method, true))
 						continue
 					}
 					ma.goroutineLockConflicts = append(ma.goroutineLockConflicts, goroutineLockConflict{varName: varName, pos: stmt.Pos(), requestMethod: method})
@@ -258,20 +259,20 @@ func (ma *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats)
 		}
 		for varName := range ma.rwMutexNames {
 			if stats[varName] != nil && stats[varName].lock > 0 {
-				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock", "RLock"}); ok {
-					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"Unlock"}) {
+				if method, ok := cg.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock", "RLock"}); ok {
+					if cg.parentBlocksBeforeUnlock(ma.function, stmt.Pos(), varName, []string{"Unlock"}) {
 						ma.errorCollector.AddError(stmt.Pos(), category.GoroutineLockDeadlock,
-							ma.goroutineLockDeadlockMessage(varName, true, false, method, true))
+							cg.deadlockMessage(varName, true, false, method, true))
 						continue
 					}
 					ma.goroutineLockConflicts = append(ma.goroutineLockConflicts, goroutineLockConflict{varName: varName, pos: stmt.Pos(), isRWMutex: true, requestMethod: method})
 				}
 			}
 			if stats[varName] != nil && stats[varName].rlock > 0 {
-				if method, ok := ma.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
-					if ma.parentBlocksBeforeUnlock(stmt.Pos(), varName, []string{"RUnlock"}) {
+				if method, ok := cg.goroutineBodyLockCallMethod(fnLit.Body, varName, []string{"Lock"}); ok {
+					if cg.parentBlocksBeforeUnlock(ma.function, stmt.Pos(), varName, []string{"RUnlock"}) {
 						ma.errorCollector.AddError(stmt.Pos(), category.GoroutineLockDeadlock,
-							ma.goroutineLockDeadlockMessage(varName, true, true, method, true))
+							cg.deadlockMessage(varName, true, true, method, true))
 						continue
 					}
 					ma.goroutineLockConflicts = append(ma.goroutineLockConflicts, goroutineLockConflict{varName: varName, pos: stmt.Pos(), isRWMutex: true, parentReadLock: true, requestMethod: method})
@@ -279,12 +280,12 @@ func (ma *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats)
 			}
 		}
 
-		crossReleases := ma.collectCrossGoroutineReleases(fnLit.Body, stats)
+		crossReleases := cg.collectReleases(fnLit.Body, stats)
 		goInitial := ma.emptyStatsLike(stats)
 		goStats := ma.analyzeBlock(fnLit.Body, goInitial)
-		ma.suppressCrossGoroutineBorrowedReleases(goStats, crossReleases)
+		cg.suppressBorrowedReleases(goStats, crossReleases)
 		ma.reportUnmatchedLocksInBranch(goInitial, goStats, "goroutine")
-		ma.applyCrossGoroutineReleases(stats, crossReleases)
+		cg.applyReleases(stats, crossReleases)
 		return
 	}
 
@@ -728,7 +729,7 @@ func (ma *Checker) reportBranchDelta(mutexName string, initial, final *Stats, is
 	}
 
 	lockMessage := mutexType + " '" + mutexName + "' is locked but not unlocked in " + branchType
-	if delta := ma.remainingLockCount(final.lock, final.deferUnlock) - ma.remainingLockCount(initial.lock, initial.deferUnlock); delta > 0 {
+	if delta := remainingLockCount(final.lock, final.deferUnlock) - remainingLockCount(initial.lock, initial.deferUnlock); delta > 0 {
 		for _, pos := range ma.trailingPositions(final.lockPos, delta) {
 			ma.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
 		}
@@ -745,7 +746,7 @@ func (ma *Checker) reportBranchDelta(mutexName string, initial, final *Stats, is
 
 	if isRWMutex {
 		rlockMessage := "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
-		if delta := ma.remainingLockCount(final.rlock, final.deferRUnlock) - ma.remainingLockCount(initial.rlock, initial.deferRUnlock); delta > 0 {
+		if delta := remainingLockCount(final.rlock, final.deferRUnlock) - remainingLockCount(initial.rlock, initial.deferRUnlock); delta > 0 {
 			for _, pos := range ma.trailingPositions(final.rlockPos, delta) {
 				ma.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
 			}
@@ -776,7 +777,7 @@ func (ma *Checker) terminatingTailUnlockSuppressed(mutexName string) bool {
 	return ma.terminatingTailDepth > 0 && ma.varRootIsFunctionParameter(mutexName)
 }
 
-func (ma *Checker) remainingLockCount(lockCount, deferredUnlocks int) int {
+func remainingLockCount(lockCount, deferredUnlocks int) int {
 	if lockCount <= deferredUnlocks {
 		return 0
 	}
@@ -817,7 +818,7 @@ func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats 
 	}
 
 	suppressFunctionLevelLock := branchType == "" && ma.functionReturnsLifecycleHandleFor(mutexName, []string{"Unlock"})
-	for _, pos := range ma.trailingPositions(stats.lockPos, ma.remainingLockCount(stats.lock, stats.deferUnlock)) {
+	for _, pos := range ma.trailingPositions(stats.lockPos, remainingLockCount(stats.lock, stats.deferUnlock)) {
 		if suppressFunctionLevelLock {
 			continue
 		}
@@ -834,7 +835,7 @@ func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats 
 
 	if isRWMutex {
 		suppressFunctionLevelRLock := branchType == "" && ma.functionReturnsLifecycleHandleFor(mutexName, []string{"RUnlock"})
-		for _, pos := range ma.trailingPositions(stats.rlockPos, ma.remainingLockCount(stats.rlock, stats.deferRUnlock)) {
+		for _, pos := range ma.trailingPositions(stats.rlockPos, remainingLockCount(stats.rlock, stats.deferRUnlock)) {
 			if suppressFunctionLevelRLock {
 				continue
 			}
@@ -878,22 +879,23 @@ func (ma *Checker) reportUnmatchedLocks(stats map[string]*Stats) {
 
 	// Report goroutine-parent deadlocks only when the parent exits while still
 	// holding the lock, so the goroutine can never acquire it.
+	cg := newCrossGoroutineDetector(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.typesInfo)
 	for _, conflict := range ma.goroutineLockConflicts {
 		st := stats[conflict.varName]
 		if st == nil {
 			continue
 		}
 		if conflict.parentReadLock {
-			if ma.remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
+			if remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
 				ma.errorCollector.AddError(conflict.pos, category.GoroutineLockDeadlock,
-					ma.goroutineLockDeadlockMessage(conflict.varName, true, true, conflict.requestMethod, false))
+					cg.deadlockMessage(conflict.varName, true, true, conflict.requestMethod, false))
 			}
 			continue
 		}
 
-		if ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
+		if remainingLockCount(st.lock, st.deferUnlock) > 0 {
 			ma.errorCollector.AddError(conflict.pos, category.GoroutineLockDeadlock,
-				ma.goroutineLockDeadlockMessage(conflict.varName, conflict.isRWMutex, false, conflict.requestMethod, false))
+				cg.deadlockMessage(conflict.varName, conflict.isRWMutex, false, conflict.requestMethod, false))
 		}
 	}
 }

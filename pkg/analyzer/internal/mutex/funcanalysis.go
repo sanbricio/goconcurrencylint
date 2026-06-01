@@ -14,6 +14,7 @@ type funcAnalysis struct {
 	rawBodyEffects         bool
 	goroutineLockConflicts []goroutineLockConflict
 	tryLock                *tryLockTracker
+	wrapper                *wrapperResolver
 	collectionLengths      map[string]int
 	terminatingTailDepth   int
 	labelGotoSnapshots     map[string]map[string]*Stats
@@ -75,8 +76,10 @@ func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames 
 		explicitTransferCache: ma.explicitTransferCache,
 		funcAnalysis:          fa,
 	}
-	// Wire the tracker against the fork's own names and (isolated) collector so
-	// simulation diagnostics never leak into the parent run.
+	// Wire the per-function collaborators against the fork's own names and
+	// (isolated) collector so simulation diagnostics never leak into the parent
+	// run. fa.rawBodyEffects is true here, so the wrapper resolver stays inert.
 	sim.tryLock = newTryLockTracker(sim.mutexNames, sim.rwMutexNames, sim.commentFilter, sim.errorCollector)
+	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects)
 	return sim
 }

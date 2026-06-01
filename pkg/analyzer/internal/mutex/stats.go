@@ -547,7 +547,7 @@ func (ma *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[stri
 
 // handleMutexCall processes mutex method calls
 func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
-	if ma.isBorrowedWrapperCall(varName, methodName) {
+	if ma.wrapper.resolve(varName, methodName) {
 		return
 	}
 
@@ -558,7 +558,7 @@ func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, st
 		}
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
-			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			stats[varName].removeFirstBorrowedUnlockPos()
 			return
 		}
 		stats[varName].lock++
@@ -566,7 +566,7 @@ func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, st
 	case "TryLock":
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
-			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			stats[varName].removeFirstBorrowedUnlockPos()
 			return
 		}
 		stats[varName].lock++
@@ -580,14 +580,14 @@ func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, st
 			stats[varName].borrowedUnlockPos = append(stats[varName].borrowedUnlockPos, pos)
 		} else {
 			stats[varName].lock--
-			ma.removeFirstLockPos(stats[varName])
+			stats[varName].removeFirstLockPos()
 		}
 	}
 }
 
 // handleRWMutexCall processes rwmutex method calls
 func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
-	if ma.isBorrowedWrapperCall(varName, methodName) {
+	if ma.wrapper.resolve(varName, methodName) {
 		return
 	}
 
@@ -598,7 +598,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 		}
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
-			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			stats[varName].removeFirstBorrowedUnlockPos()
 			return
 		}
 		stats[varName].lock++
@@ -606,7 +606,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 	case "TryLock":
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
-			ma.removeFirstBorrowedUnlockPos(stats[varName])
+			stats[varName].removeFirstBorrowedUnlockPos()
 			return
 		}
 		stats[varName].lock++
@@ -617,7 +617,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 		if stats[varName].rlock > 0 && stats[varName].lock == 0 {
 			ma.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' Unlock called but only read lock is held, did you mean RUnlock?")
 			stats[varName].rlock--
-			ma.removeFirstRLockPos(stats[varName])
+			stats[varName].removeFirstRLockPos()
 			return
 		}
 		if stats[varName].lock == 0 {
@@ -628,12 +628,12 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 			stats[varName].borrowedUnlockPos = append(stats[varName].borrowedUnlockPos, pos)
 		} else {
 			stats[varName].lock--
-			ma.removeFirstLockPos(stats[varName])
+			stats[varName].removeFirstLockPos()
 		}
 	case "RLock", "TryRLock":
 		if stats[varName].borrowedRLock > 0 {
 			stats[varName].borrowedRLock--
-			ma.removeFirstBorrowedRUnlockPos(stats[varName])
+			stats[varName].removeFirstBorrowedRUnlockPos()
 			return
 		}
 		stats[varName].rlock++
@@ -644,7 +644,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 		if stats[varName].lock > 0 && stats[varName].rlock == 0 {
 			ma.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' RUnlock called but only write lock is held, did you mean Unlock?")
 			stats[varName].lock--
-			ma.removeFirstLockPos(stats[varName])
+			stats[varName].removeFirstLockPos()
 			return
 		}
 		if stats[varName].rlock == 0 {
@@ -655,7 +655,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 			stats[varName].borrowedRUnlockPos = append(stats[varName].borrowedRUnlockPos, pos)
 		} else {
 			stats[varName].rlock--
-			ma.removeFirstRLockPos(stats[varName])
+			stats[varName].removeFirstRLockPos()
 		}
 	}
 }
@@ -754,7 +754,7 @@ func (ma *Checker) consumeBorrowedDeferredLock(varName string, stats map[string]
 		return false
 	}
 	st.borrowedLock--
-	ma.removeFirstBorrowedUnlockPos(st)
+	st.removeFirstBorrowedUnlockPos()
 	return true
 }
 
@@ -764,7 +764,7 @@ func (ma *Checker) consumeBorrowedDeferredRLock(varName string, stats map[string
 		return false
 	}
 	st.borrowedRLock--
-	ma.removeFirstBorrowedRUnlockPos(st)
+	st.removeFirstBorrowedRUnlockPos()
 	return true
 }
 

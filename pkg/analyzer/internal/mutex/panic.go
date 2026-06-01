@@ -41,14 +41,14 @@ func (ma *Checker) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[stri
 		if st == nil {
 			continue
 		}
-		if ma.mutexNames[name] && ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
+		if ma.mutexNames[name] && remainingLockCount(st.lock, st.deferUnlock) > 0 {
 			ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "mutex '"+name+"' may remain locked if index expression panics before unlock")
 		}
 		if ma.rwMutexNames[name] {
-			if ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
+			if remainingLockCount(st.lock, st.deferUnlock) > 0 {
 				ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain locked if index expression panics before unlock")
 			}
-			if ma.remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
+			if remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
 				ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain rlocked if index expression panics before runlock")
 			}
 		}
@@ -60,12 +60,12 @@ func (ma *Checker) hasUnprotectedHeldLock(stats map[string]*Stats) bool {
 		if st == nil {
 			continue
 		}
-		if ma.mutexNames[name] && ma.remainingLockCount(st.lock, st.deferUnlock) > 0 {
+		if ma.mutexNames[name] && remainingLockCount(st.lock, st.deferUnlock) > 0 {
 			return true
 		}
 		if ma.rwMutexNames[name] &&
-			(ma.remainingLockCount(st.lock, st.deferUnlock) > 0 ||
-				ma.remainingLockCount(st.rlock, st.deferRUnlock) > 0) {
+			(remainingLockCount(st.lock, st.deferUnlock) > 0 ||
+				remainingLockCount(st.rlock, st.deferRUnlock) > 0) {
 			return true
 		}
 	}
