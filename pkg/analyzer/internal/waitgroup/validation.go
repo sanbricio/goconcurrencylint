@@ -141,7 +141,7 @@ func (wga *Checker) checkWaitGroupBalance(stats map[string]*Stats) {
 		if wga.isLikelyExternalLifecycleWaitGroup(wgName, st) {
 			continue
 		}
-		if wga.isWaitGroupPassedToOtherFunctions(wgName) {
+		if wga.escape != nil && wga.escape.isWaitGroupPassedToOtherFunctions(wgName) {
 			if len(st.addCalls) > 0 {
 				continue
 			}
