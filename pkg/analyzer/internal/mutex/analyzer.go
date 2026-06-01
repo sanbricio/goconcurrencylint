@@ -27,6 +27,8 @@ type Checker struct {
 	typesInfo       *types.Info
 	receiverMethods map[string]map[string]*ast.FuncDecl
 	functions       []*ast.FuncDecl
+	termination     *terminationAnalyzer
+	loopCarry       *loopCarryAnalyzer
 
 	// explicitTransferCache is keyed by *ast.BlockStmt so it remains correct
 	// across functions; the cached map is shared by reference, callers must
@@ -71,7 +73,8 @@ type deferErrorCollector struct {
 // NewChecker creates a new mutex checker. fr supplies the mutex and
 // rwmutex names visible inside the function being analyzed.
 func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Checker {
-	return &Checker{
+	term := newTerminationAnalyzer(typesInfo)
+	ma := &Checker{
 		mutexNames:            fr.Mutexes,
 		rwMutexNames:          fr.RWMutexes,
 		errorCollector:        errorCollector,
@@ -79,8 +82,11 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		typesInfo:             typesInfo,
 		receiverMethods:       buildReceiverMethodMap(files),
 		functions:             collectFunctionDecls(files),
+		termination:           term,
 		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
 	}
+	ma.loopCarry = newLoopCarryAnalyzer(ma.mutexNames, ma.rwMutexNames, cf, errorCollector, term)
+	return ma
 }
 
 func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {

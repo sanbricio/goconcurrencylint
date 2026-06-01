@@ -67,6 +67,8 @@ func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames 
 		typesInfo:             ma.typesInfo,
 		receiverMethods:       ma.receiverMethods,
 		functions:             ma.functions,
+		termination:           ma.termination,
+		loopCarry:             ma.loopCarry,
 		explicitTransferCache: ma.explicitTransferCache,
 		funcAnalysis:          fa,
 	}
