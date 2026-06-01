@@ -17,7 +17,8 @@ import (
 
 // validateUsage performs validation checks on collected statistics
 func (wga *Checker) validateUsage(stats map[string]*Stats) {
-	wga.checkAddInsideGoroutine()
+	goroutines := newGoroutineInspector(wga.waitGroupNames, wga.commentFilter, wga.errorCollector, wga.deferInvokesDone, wga.typesInfo, wga.isInMainFunctionFlow, wga.isBuiltinPanic)
+	goroutines.checkAddInsideGoroutine(wga.function)
 	wga.checkDoneNotDeferredInWorker()
 	wga.checkLiteralAddLoopGoroutineMismatch(stats)
 	wga.checkWaitWithoutAdd(stats)
@@ -25,9 +26,9 @@ func (wga *Checker) validateUsage(stats map[string]*Stats) {
 	wga.checkNestedWaitGroupDeadlock()
 	wga.checkAddAfterWait(stats)
 	wga.checkWaitBeforeDoneSameGoroutine(stats)
-	wga.checkWaitAndDoneInSameGoroutine()
+	goroutines.checkWaitAndDoneInSameGoroutine(wga.function)
 	wga.checkDoneOutsideWorkerGoroutine()
-	wga.checkWaitGroupGoPanic()
+	goroutines.checkWaitGroupGoPanic(wga.function)
 	wga.checkLoopAddDoneBalance()
 	wga.checkUnreachableDone()
 	wga.checkWaitGroupBalance(stats)
