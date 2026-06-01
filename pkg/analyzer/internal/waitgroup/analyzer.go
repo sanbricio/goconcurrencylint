@@ -26,6 +26,7 @@ type Checker struct {
 	typesInfo                  *types.Info
 	functionDecls              map[token.Pos]*ast.FuncDecl
 	escape                     *escapeAnalyzer
+	iteration                  *iterationEstimator
 }
 
 // addCall represents an Add() call with its position and value
@@ -67,6 +68,7 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 // AnalyzeFunction analyzes WaitGroup usage in a function
 func (wga *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	wga.function = fn
+	wga.iteration = newIterationEstimator(fn, wga.typesInfo, wga.commentFilter)
 	wga.escape = newEscapeAnalyzer(
 		fn,
 		wga.relatedWaitGroupForCall,
@@ -174,7 +176,10 @@ func (wga *Checker) addValueAt(expr ast.Expr, pos token.Pos) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	return wga.collectionLengthBefore(argIdent.Name, pos)
+	if wga.iteration == nil {
+		return 0, false
+	}
+	return wga.iteration.collectionLengthBefore(argIdent.Name, pos)
 }
 
 // handleDoneCall processes Done() calls
