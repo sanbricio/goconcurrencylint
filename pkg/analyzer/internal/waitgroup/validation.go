@@ -17,17 +17,30 @@ import (
 
 // validateUsage performs validation checks on collected statistics
 func (wga *Checker) validateUsage(stats map[string]*Stats) {
-	goroutines := newGoroutineInspector(wga.waitGroupNames, wga.commentFilter, wga.errorCollector, wga.deferInvokesDone, wga.typesInfo, wga.isInMainFunctionFlow, wga.isBuiltinPanic)
+	goroutines := newGoroutineInspector(
+		wga.waitGroupNames,
+		wga.commentFilter,
+		wga.errorCollector,
+		wga.deferInvokesDone,
+		wga.callInvokesDone,
+		wga.goroutineDoneInfo,
+		wga.goroutineOnlyWaitsOnWaitGroup,
+		wga.analyzeDoneCallsWithVisited,
+		wga.isInGoroutine,
+		wga.typesInfo,
+		wga.isInMainFunctionFlow,
+		wga.isBuiltinPanic,
+	)
 	goroutines.checkAddInsideGoroutine(wga.function)
 	wga.checkDoneNotDeferredInWorker()
 	wga.checkLiteralAddLoopGoroutineMismatch(stats)
 	wga.checkWaitWithoutAdd(stats)
-	wga.checkMultipleDoneSameWorkerBranch()
-	wga.checkNestedWaitGroupDeadlock()
+	goroutines.checkMultipleDoneSameWorkerBranch(wga.function)
+	goroutines.checkNestedWaitGroupDeadlock(wga.function)
 	wga.checkAddAfterWait(stats)
 	wga.checkWaitBeforeDoneSameGoroutine(stats)
 	goroutines.checkWaitAndDoneInSameGoroutine(wga.function)
-	wga.checkDoneOutsideWorkerGoroutine()
+	goroutines.checkDoneOutsideWorkerGoroutine(wga.function)
 	goroutines.checkWaitGroupGoPanic(wga.function)
 	wga.checkLoopAddDoneBalance()
 	wga.checkUnreachableDone()

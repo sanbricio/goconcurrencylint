@@ -48,8 +48,65 @@ func testDeferInvokesDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	return ok && sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName
 }
 
+func testCallInvokesDone(call *ast.CallExpr, wgName string) bool {
+	if call == nil {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName
+}
+
+func testGoroutineDoneInfo(goStmt *ast.GoStmt, wgName string) (doneCallInfo, bool) {
+	if goStmt == nil || goStmt.Call == nil {
+		return doneCallInfo{}, false
+	}
+	fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+	if !ok || fnLit.Body == nil {
+		return doneCallInfo{}, false
+	}
+	return testAnalyzeDoneCalls(fnLit.Body, wgName, nil), true
+}
+
+func testGoroutineOnlyWaits(*ast.GoStmt, string) bool {
+	return false
+}
+
+func testAnalyzeDoneCalls(block *ast.BlockStmt, wgName string, _ map[token.Pos]bool) doneCallInfo {
+	info := doneCallInfo{}
+	ast.Inspect(block, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if testCallInvokesDone(call, wgName) {
+			info.hasAnyDone = true
+			info.hasGuaranteedDone = true
+			return false
+		}
+		return true
+	})
+	return info
+}
+
 func newTestGoroutineInspector(rep *fakeWaitGroupReporter) *goroutineInspector {
-	return newGoroutineInspector(map[string]bool{"wg": true}, nil, rep, testDeferInvokesDone, nil, nil, testIsBuiltinPanic)
+	return newTestGoroutineInspectorFor(rep, map[string]bool{"wg": true})
+}
+
+func newTestGoroutineInspectorFor(rep *fakeWaitGroupReporter, names map[string]bool) *goroutineInspector {
+	return newGoroutineInspector(
+		names,
+		nil,
+		rep,
+		testDeferInvokesDone,
+		testCallInvokesDone,
+		testGoroutineDoneInfo,
+		testGoroutineOnlyWaits,
+		testAnalyzeDoneCalls,
+		nil,
+		nil,
+		nil,
+		testIsBuiltinPanic,
+	)
 }
 
 func testIsBuiltinPanic(ident *ast.Ident) bool {
@@ -119,6 +176,47 @@ func f() {
 	}
 }
 
+func TestGoroutineInspector_DoneOutsideWorkerReports(t *testing.T) {
+	fn := parseWaitGroupFunc(t, `package p
+func f() {
+	wg.Add(1)
+	go func() {
+		_ = 1
+	}()
+	wg.Done()
+}`)
+	rep := &fakeWaitGroupReporter{}
+	newTestGoroutineInspector(rep).checkDoneOutsideWorkerGoroutine(fn)
+
+	if len(rep.calls) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d", len(rep.calls))
+	}
+	got := rep.calls[0]
+	if got.cat != category.DoneOutsideGoroutine {
+		t.Fatalf("category = %q, want %q", got.cat, category.DoneOutsideGoroutine)
+	}
+	if want := "waitgroup 'wg' Done called outside worker goroutine"; got.msg != want {
+		t.Fatalf("message = %q, want %q", got.msg, want)
+	}
+}
+
+func TestGoroutineInspector_WorkerDoneIsClean(t *testing.T) {
+	fn := parseWaitGroupFunc(t, `package p
+func f() {
+	wg.Add(1)
+	go func() {
+		wg.Done()
+	}()
+	wg.Done()
+}`)
+	rep := &fakeWaitGroupReporter{}
+	newTestGoroutineInspector(rep).checkDoneOutsideWorkerGoroutine(fn)
+
+	if len(rep.calls) != 0 {
+		t.Fatalf("expected worker-owned Done to be clean, got %d diagnostics", len(rep.calls))
+	}
+}
+
 func TestGoroutineInspector_WaitGroupGoPanicReports(t *testing.T) {
 	fn := parseWaitGroupFunc(t, `package p
 func f() {
@@ -156,6 +254,95 @@ func f() {
 
 	if len(rep.calls) != 0 {
 		t.Fatalf("expected recovered panic to be clean, got %d diagnostics", len(rep.calls))
+	}
+}
+
+func TestGoroutineInspector_MultipleDoneSameWorkerBranchReports(t *testing.T) {
+	fn := parseWaitGroupFunc(t, `package p
+func f() {
+	go func() {
+		wg.Done()
+		wg.Done()
+	}()
+}`)
+	rep := &fakeWaitGroupReporter{}
+	newTestGoroutineInspector(rep).checkMultipleDoneSameWorkerBranch(fn)
+
+	if len(rep.calls) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d", len(rep.calls))
+	}
+	got := rep.calls[0]
+	if got.cat != category.MultipleDoneWorker {
+		t.Fatalf("category = %q, want %q", got.cat, category.MultipleDoneWorker)
+	}
+	if want := "waitgroup 'wg' Done called multiple times in the same worker branch"; got.msg != want {
+		t.Fatalf("message = %q, want %q", got.msg, want)
+	}
+}
+
+func TestGoroutineInspector_MultipleDoneSeparateBranchesIsClean(t *testing.T) {
+	fn := parseWaitGroupFunc(t, `package p
+func f(cond bool) {
+	go func() {
+		if cond {
+			wg.Done()
+		} else {
+			wg.Done()
+		}
+	}()
+}`)
+	rep := &fakeWaitGroupReporter{}
+	newTestGoroutineInspector(rep).checkMultipleDoneSameWorkerBranch(fn)
+
+	if len(rep.calls) != 0 {
+		t.Fatalf("expected separate branches to be clean, got %d diagnostics", len(rep.calls))
+	}
+}
+
+func TestGoroutineInspector_NestedWaitGroupDeadlockReports(t *testing.T) {
+	fn := parseWaitGroupFunc(t, `package p
+func f() {
+	inner.Add(1)
+	go func() {
+		inner.Wait()
+		outer.Done()
+	}()
+	outer.Wait()
+	inner.Done()
+}`)
+	rep := &fakeWaitGroupReporter{}
+	inspector := newTestGoroutineInspectorFor(rep, map[string]bool{"outer": true, "inner": true})
+	inspector.checkNestedWaitGroupDeadlock(fn)
+
+	if len(rep.calls) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d", len(rep.calls))
+	}
+	got := rep.calls[0]
+	if got.cat != category.NestedWaitGroupDeadlock {
+		t.Fatalf("category = %q, want %q", got.cat, category.NestedWaitGroupDeadlock)
+	}
+	if want := "waitgroup 'inner' Wait inside worker for waitgroup 'outer' can deadlock"; got.msg != want {
+		t.Fatalf("message = %q, want %q", got.msg, want)
+	}
+}
+
+func TestGoroutineInspector_NestedWaitAfterOuterReleaseIsClean(t *testing.T) {
+	fn := parseWaitGroupFunc(t, `package p
+func f() {
+	inner.Add(1)
+	go func() {
+		outer.Done()
+		inner.Wait()
+	}()
+	outer.Wait()
+	inner.Done()
+}`)
+	rep := &fakeWaitGroupReporter{}
+	inspector := newTestGoroutineInspectorFor(rep, map[string]bool{"outer": true, "inner": true})
+	inspector.checkNestedWaitGroupDeadlock(fn)
+
+	if len(rep.calls) != 0 {
+		t.Fatalf("expected nested Wait after outer release to be clean, got %d diagnostics", len(rep.calls))
 	}
 }
 

@@ -12,6 +12,11 @@ import (
 )
 
 type deferDoneDetector func(*ast.DeferStmt, string) bool
+type doneCallChecker func(*ast.CallExpr, string) bool
+type goroutineDoneAnalyzer func(*ast.GoStmt, string) (doneCallInfo, bool)
+type waitOnlyChecker func(*ast.GoStmt, string) bool
+type doneBlockAnalyzer func(*ast.BlockStmt, string, map[token.Pos]bool) doneCallInfo
+type inGoroutineChecker func(token.Pos) bool
 type mainFlowChecker func(token.Pos) bool
 type builtinPanicChecker func(*ast.Ident) bool
 
@@ -24,13 +29,18 @@ type waitDonePositions struct {
 // goroutineInspector groups diagnostics that reason about WaitGroup behavior
 // inside worker goroutines.
 type goroutineInspector struct {
-	waitGroupNames   map[string]bool
-	commentFilter    *commentfilter.CommentFilter
-	reporter         report.Reporter
-	deferInvokesDone deferDoneDetector
-	typesInfo        *types.Info
-	isInMainFlow     mainFlowChecker
-	isBuiltinPanic   builtinPanicChecker
+	waitGroupNames     map[string]bool
+	commentFilter      *commentfilter.CommentFilter
+	reporter           report.Reporter
+	deferInvokesDone   deferDoneDetector
+	callInvokesDone    doneCallChecker
+	goroutineDoneInfo  goroutineDoneAnalyzer
+	goroutineOnlyWaits waitOnlyChecker
+	analyzeDoneCalls   doneBlockAnalyzer
+	isInGoroutine      inGoroutineChecker
+	typesInfo          *types.Info
+	isInMainFlow       mainFlowChecker
+	isBuiltinPanic     builtinPanicChecker
 }
 
 func newGoroutineInspector(
@@ -38,19 +48,162 @@ func newGoroutineInspector(
 	cf *commentfilter.CommentFilter,
 	reporter report.Reporter,
 	deferInvokesDone deferDoneDetector,
+	callInvokesDone doneCallChecker,
+	goroutineDoneInfo goroutineDoneAnalyzer,
+	goroutineOnlyWaits waitOnlyChecker,
+	analyzeDoneCalls doneBlockAnalyzer,
+	isInGoroutine inGoroutineChecker,
 	typesInfo *types.Info,
 	isInMainFlow mainFlowChecker,
 	isBuiltinPanic builtinPanicChecker,
 ) *goroutineInspector {
 	return &goroutineInspector{
-		waitGroupNames:   waitGroupNames,
-		commentFilter:    cf,
-		reporter:         reporter,
-		deferInvokesDone: deferInvokesDone,
-		typesInfo:        typesInfo,
-		isInMainFlow:     isInMainFlow,
-		isBuiltinPanic:   isBuiltinPanic,
+		waitGroupNames:     waitGroupNames,
+		commentFilter:      cf,
+		reporter:           reporter,
+		deferInvokesDone:   deferInvokesDone,
+		callInvokesDone:    callInvokesDone,
+		goroutineDoneInfo:  goroutineDoneInfo,
+		goroutineOnlyWaits: goroutineOnlyWaits,
+		analyzeDoneCalls:   analyzeDoneCalls,
+		isInGoroutine:      isInGoroutine,
+		typesInfo:          typesInfo,
+		isInMainFlow:       isInMainFlow,
+		isBuiltinPanic:     isBuiltinPanic,
 	}
+}
+
+func (g *goroutineInspector) checkDoneOutsideWorkerGoroutine(fn *ast.FuncDecl) {
+	if g == nil || fn == nil || fn.Body == nil {
+		return
+	}
+
+	for wgName := range g.waitGroupNames {
+		g.checkDoneOutsideWorkerForWaitGroup(fn, wgName)
+	}
+}
+
+func (g *goroutineInspector) checkDoneOutsideWorkerForWaitGroup(fn *ast.FuncDecl, wgName string) {
+	pendingAdds := 0
+	// Keep this intentionally narrow: only an Add immediately followed by a
+	// worker goroutine is treated as an ownership handoff.
+	recentPositiveAdd := false
+	workerGoroutinesWithoutDone := 0
+
+	var (
+		visitStmt  func(ast.Stmt)
+		visitStmts func([]ast.Stmt)
+	)
+
+	visitStmts = func(stmts []ast.Stmt) {
+		for _, stmt := range stmts {
+			visitStmt(stmt)
+		}
+	}
+
+	visitStmt = func(stmt ast.Stmt) {
+		if stmt == nil || g.shouldSkipStatement(stmt) {
+			return
+		}
+
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			call, ok := s.X.(*ast.CallExpr)
+			if !ok || g.shouldSkipCall(call) {
+				return
+			}
+			if delta, ok := g.addDelta(call, wgName); ok {
+				if delta > 0 {
+					pendingAdds += delta
+					recentPositiveAdd = true
+				}
+				return
+			}
+			if g.callInvokesDone != nil && g.callInvokesDone(call, wgName) {
+				recentPositiveAdd = false
+				if workerGoroutinesWithoutDone > 0 {
+					g.reporter.AddError(call.Pos(), category.DoneOutsideGoroutine, "waitgroup '"+wgName+"' Done called outside worker goroutine")
+					workerGoroutinesWithoutDone--
+				}
+				if pendingAdds > 0 {
+					pendingAdds--
+				}
+			}
+		case *ast.DeferStmt:
+			recentPositiveAdd = false
+			if g.deferInvokesDone != nil && g.deferInvokesDone(s, wgName) {
+				if workerGoroutinesWithoutDone > 0 {
+					g.reporter.AddError(s.Call.Pos(), category.DoneOutsideGoroutine, "waitgroup '"+wgName+"' Done called outside worker goroutine")
+					workerGoroutinesWithoutDone--
+				}
+				if pendingAdds > 0 {
+					pendingAdds--
+				}
+			}
+		case *ast.GoStmt:
+			if pendingAdds <= 0 || !recentPositiveAdd {
+				recentPositiveAdd = false
+				return
+			}
+			recentPositiveAdd = false
+			if g.goroutineDoneInfo != nil {
+				doneInfo, related := g.goroutineDoneInfo(s, wgName)
+				if related && doneInfo.hasAnyDone {
+					return
+				}
+			}
+			if g.goroutineOnlyWaits != nil && g.goroutineOnlyWaits(s, wgName) {
+				return
+			}
+			workerGoroutinesWithoutDone++
+		case *ast.AssignStmt, *ast.DeclStmt, *ast.ReturnStmt:
+			recentPositiveAdd = false
+		case *ast.IfStmt:
+			visitStmt(s.Init)
+			visitStmts(s.Body.List)
+			visitMainFlowElse(s.Else, visitStmt, visitStmts)
+			recentPositiveAdd = false
+		case *ast.ForStmt:
+			visitStmt(s.Init)
+			visitStmts(s.Body.List)
+			visitStmt(s.Post)
+			recentPositiveAdd = false
+		case *ast.RangeStmt:
+			visitStmts(s.Body.List)
+			recentPositiveAdd = false
+		case *ast.BlockStmt:
+			visitStmts(s.List)
+		case *ast.LabeledStmt:
+			visitStmt(s.Stmt)
+		case *ast.SwitchStmt:
+			visitStmt(s.Init)
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					visitStmts(cc.Body)
+				}
+			}
+			recentPositiveAdd = false
+		case *ast.TypeSwitchStmt:
+			visitStmt(s.Init)
+			visitStmt(s.Assign)
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					visitStmts(cc.Body)
+				}
+			}
+			recentPositiveAdd = false
+		case *ast.SelectStmt:
+			for _, stmt := range s.Body.List {
+				if cc, ok := stmt.(*ast.CommClause); ok {
+					visitStmt(cc.Comm)
+					visitStmts(cc.Body)
+				}
+			}
+			recentPositiveAdd = false
+		}
+	}
+
+	visitStmts(fn.Body.List)
 }
 
 func (g *goroutineInspector) checkAddInsideGoroutine(fn *ast.FuncDecl) {
@@ -162,6 +315,51 @@ func (g *goroutineInspector) checkWaitGroupGoPanic(fn *ast.FuncDecl) {
 	})
 }
 
+func (g *goroutineInspector) checkMultipleDoneSameWorkerBranch(fn *ast.FuncDecl) {
+	if g == nil || fn == nil || fn.Body == nil {
+		return
+	}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok || g.shouldSkipStatement(goStmt) {
+			return true
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			return true
+		}
+		for wgName := range g.waitGroupNames {
+			g.checkMultipleDoneInBranch(fnLit.Body.List, wgName, 0)
+		}
+		return true
+	})
+}
+
+func (g *goroutineInspector) checkNestedWaitGroupDeadlock(fn *ast.FuncDecl) {
+	if g == nil || fn == nil || fn.Body == nil {
+		return
+	}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok || g.shouldSkipStatement(goStmt) {
+			return true
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			return true
+		}
+
+		outerGroups := g.workerDoneWaitGroups(fnLit.Body)
+		if len(outerGroups) == 0 {
+			return true
+		}
+		g.reportNestedWaitsForWorker(fn, goStmt, fnLit.Body, outerGroups)
+		return true
+	})
+}
+
 func (g *goroutineInspector) hasMainFlowWait(fn *ast.FuncDecl, wgName string) bool {
 	if fn == nil || fn.Body == nil {
 		return false
@@ -196,6 +394,50 @@ func (g *goroutineInspector) waitGroupIdentDefinedInside(body *ast.BlockStmt, ex
 		obj = g.typesInfo.Defs[ident]
 	}
 	return obj != nil && body.Pos() <= obj.Pos() && obj.Pos() <= body.End()
+}
+
+func (g *goroutineInspector) workerDoneWaitGroups(body *ast.BlockStmt) map[string]bool {
+	outerGroups := make(map[string]bool)
+	if g.analyzeDoneCalls == nil {
+		return outerGroups
+	}
+	for wgName := range g.waitGroupNames {
+		if g.analyzeDoneCalls(body, wgName, make(map[token.Pos]bool)).hasAnyDone {
+			outerGroups[wgName] = true
+		}
+	}
+	return outerGroups
+}
+
+func (g *goroutineInspector) reportNestedWaitsForWorker(fn *ast.FuncDecl, goStmt *ast.GoStmt, body *ast.BlockStmt, outerGroups map[string]bool) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || g.shouldSkipCall(call) {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Wait" {
+			return true
+		}
+		innerWG := common.GetVarName(sel.X)
+		if !g.waitGroupNames[innerWG] {
+			return true
+		}
+		for outerWG := range outerGroups {
+			if outerWG == innerWG {
+				continue
+			}
+			if g.workerReleasesWaitGroupBefore(body, outerWG, call.Pos()) {
+				continue
+			}
+			if g.outerWaitBeforeInnerRelease(fn, goStmt.Pos(), outerWG, innerWG) {
+				g.reporter.AddError(call.Pos(), category.NestedWaitGroupDeadlock,
+					"waitgroup '"+innerWG+"' Wait inside worker for waitgroup '"+outerWG+"' can deadlock")
+				return false
+			}
+		}
+		return true
+	})
 }
 
 func (g *goroutineInspector) functionLiteralMayPanic(fnLit *ast.FuncLit) bool {
@@ -285,6 +527,152 @@ func (g *goroutineInspector) deferCallRecovers(call *ast.CallExpr) bool {
 		return true
 	})
 	return found
+}
+
+func (g *goroutineInspector) checkMultipleDoneInBranch(stmts []ast.Stmt, wgName string, count int) int {
+	current := count
+	for _, stmt := range stmts {
+		if stmt == nil || g.shouldSkipStatement(stmt) {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.DeferStmt:
+			if g.deferInvokesDone != nil && g.deferInvokesDone(s, wgName) {
+				current++
+				if current > 1 {
+					g.reporter.AddError(s.Call.Pos(), category.MultipleDoneWorker, "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
+				}
+			}
+		case *ast.ExprStmt:
+			if call, ok := s.X.(*ast.CallExpr); ok && g.callInvokesDone != nil && g.callInvokesDone(call, wgName) {
+				current++
+				if current > 1 {
+					g.reporter.AddError(call.Pos(), category.MultipleDoneWorker, "waitgroup '"+wgName+"' Done called multiple times in the same worker branch")
+				}
+			}
+		case *ast.IfStmt:
+			g.checkMultipleDoneInBranch(s.Body.List, wgName, current)
+			if s.Else != nil {
+				g.checkMultipleDoneInElse(s.Else, wgName, current)
+			}
+		case *ast.BlockStmt:
+			current = g.checkMultipleDoneInBranch(s.List, wgName, current)
+		case *ast.LabeledStmt:
+			current = g.checkMultipleDoneInBranch([]ast.Stmt{s.Stmt}, wgName, current)
+		}
+	}
+	return current
+}
+
+func (g *goroutineInspector) checkMultipleDoneInElse(stmt ast.Stmt, wgName string, count int) {
+	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		g.checkMultipleDoneInBranch(s.List, wgName, count)
+	case *ast.IfStmt:
+		g.checkMultipleDoneInBranch([]ast.Stmt{s}, wgName, count)
+	}
+}
+
+func (g *goroutineInspector) workerReleasesWaitGroupBefore(body *ast.BlockStmt, wgName string, before token.Pos) bool {
+	if body == nil {
+		return false
+	}
+	for _, stmt := range body.List {
+		if stmt == nil || stmt.Pos() >= before {
+			break
+		}
+		if g.shouldSkipStatement(stmt) {
+			continue
+		}
+		if g.topLevelStatementReleasesWaitGroup(stmt, wgName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *goroutineInspector) topLevelStatementReleasesWaitGroup(stmt ast.Stmt, wgName string) bool {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		call, ok := s.X.(*ast.CallExpr)
+		return ok && g.callReleasesWaitGroup(call, wgName)
+	case *ast.LabeledStmt:
+		return g.topLevelStatementReleasesWaitGroup(s.Stmt, wgName)
+	default:
+		return false
+	}
+}
+
+func (g *goroutineInspector) callReleasesWaitGroup(call *ast.CallExpr, wgName string) bool {
+	if call == nil || g.shouldSkipCall(call) {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || common.GetVarName(sel.X) != wgName {
+		return false
+	}
+	if sel.Sel.Name == "Done" {
+		return true
+	}
+	if sel.Sel.Name != "Add" {
+		return false
+	}
+	delta, ok := g.addDelta(call, wgName)
+	return ok && delta < 0
+}
+
+func (g *goroutineInspector) outerWaitBeforeInnerRelease(fn *ast.FuncDecl, goPos token.Pos, outerWG, innerWG string) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+
+	var outerWait token.Pos
+	var innerRelease token.Pos
+	hasInnerAdd := false
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || g.isInsideGoroutine(call.Pos()) {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		wgName := common.GetVarName(sel.X)
+		switch {
+		case wgName == innerWG && sel.Sel.Name == "Add" && call.Pos() < goPos:
+			if delta, ok := g.addDelta(call, innerWG); ok && delta > 0 {
+				hasInnerAdd = true
+			}
+		case wgName == outerWG && sel.Sel.Name == "Wait" && call.Pos() > goPos && outerWait == token.NoPos:
+			outerWait = call.Pos()
+		case wgName == innerWG && sel.Sel.Name == "Done" && outerWait != token.NoPos && call.Pos() > outerWait && innerRelease == token.NoPos:
+			innerRelease = call.Pos()
+		case wgName == innerWG && sel.Sel.Name == "Add" && outerWait != token.NoPos && call.Pos() > outerWait && innerRelease == token.NoPos:
+			if delta, ok := g.addDelta(call, innerWG); ok && delta < 0 {
+				innerRelease = call.Pos()
+			}
+		}
+		return true
+	})
+
+	return hasInnerAdd && outerWait != token.NoPos && innerRelease != token.NoPos
+}
+
+func (g *goroutineInspector) addDelta(call *ast.CallExpr, wgName string) (int, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Add" || common.GetVarName(sel.X) != wgName {
+		return 0, false
+	}
+
+	addValue := common.GetAddValue(call)
+	if len(call.Args) > 0 {
+		if constantValue, ok := common.ConstantIntValue(call.Args[0], g.typesInfo); ok {
+			addValue = constantValue
+		}
+	}
+	return addValue, true
 }
 
 func waitDependsOnDoneInSameGoroutine(waitPos token.Pos, positions waitDonePositions) bool {
@@ -423,6 +811,15 @@ func visitWaitDoneElse(stmt ast.Stmt, visitStmt func(ast.Stmt), visitStmts func(
 	}
 }
 
+func visitMainFlowElse(stmt ast.Stmt, visitStmt func(ast.Stmt), visitStmts func([]ast.Stmt)) {
+	switch s := stmt.(type) {
+	case *ast.BlockStmt:
+		visitStmts(s.List)
+	case *ast.IfStmt:
+		visitStmt(s)
+	}
+}
+
 func recordWaitDoneCall(call *ast.CallExpr, wgName string, positions *waitDonePositions) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || common.GetVarName(sel.X) != wgName {
@@ -447,6 +844,10 @@ func (g *goroutineInspector) shouldSkipStatement(stmt ast.Stmt) bool {
 
 func (g *goroutineInspector) isMainFlow(pos token.Pos) bool {
 	return g.isInMainFlow == nil || g.isInMainFlow(pos)
+}
+
+func (g *goroutineInspector) isInsideGoroutine(pos token.Pos) bool {
+	return g.isInGoroutine != nil && g.isInGoroutine(pos)
 }
 
 func (g *goroutineInspector) callIsBuiltinPanic(ident *ast.Ident) bool {
