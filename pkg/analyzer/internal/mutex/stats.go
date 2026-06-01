@@ -487,7 +487,9 @@ func (ma *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*St
 
 // analyzeExpressionStatement handles expression statements (Lock/Unlock calls)
 func (ma *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
-	call, ok := stmt.X.(*ast.CallExpr)
+	expr := common.UnwrapParenExpr(stmt.X)
+
+	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return
 	}

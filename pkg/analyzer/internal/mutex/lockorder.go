@@ -76,7 +76,8 @@ func (d *lockOrderDetector) scanStatements(stmts []ast.Stmt, held map[string]boo
 
 		switch s := stmt.(type) {
 		case *ast.ExprStmt:
-			if call, ok := s.X.(*ast.CallExpr); ok {
+			expr := common.UnwrapParenExpr(s.X)
+			if call, ok := expr.(*ast.CallExpr); ok {
 				d.scanCall(call, held, edges, reported, waitReleases)
 			}
 		case *ast.DeferStmt:
