@@ -15,17 +15,12 @@ type funcAnalysis struct {
 	goroutineLockConflicts []goroutineLockConflict
 	tryLock                *tryLockTracker
 	wrapper                *wrapperResolver
+	lifecycle              *lifecycleResolver
 	collectionLengths      map[string]int
 	terminatingTailDepth   int
 	labelGotoSnapshots     map[string]map[string]*Stats
 	simulationStack        map[methodSimulationKey]bool
 	localFuncStack         map[*ast.FuncLit]bool
-
-	// callerManagedCache memoizes functionIsCallerManagedReleaseFor results
-	// for the current function. It belongs here (not on Checker) because the
-	// underlying computation reads ma.function; sharing the cache across
-	// functions would surface stale results for unrelated callers.
-	callerManagedCache map[callerManagedKey]bool
 }
 
 func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
@@ -33,11 +28,10 @@ func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
 	// because the tracker needs the Checker's names and reporting boundary,
 	// which newFuncAnalysis does not have.
 	return &funcAnalysis{
-		function:           fn,
-		stats:              make(map[string]*Stats),
-		deferErrors:        newDeferErrorCollector(),
-		collectionLengths:  make(map[string]int),
-		callerManagedCache: make(map[callerManagedKey]bool),
+		function:          fn,
+		stats:             make(map[string]*Stats),
+		deferErrors:       newDeferErrorCollector(),
+		collectionLengths: make(map[string]int),
 	}
 }
 
@@ -81,5 +75,6 @@ func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames 
 	// run. fa.rawBodyEffects is true here, so the wrapper resolver stays inert.
 	sim.tryLock = newTryLockTracker(sim.mutexNames, sim.rwMutexNames, sim.commentFilter, sim.errorCollector)
 	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects)
+	sim.lifecycle = newLifecycleResolver(sim.receiverMethods, sim.functions, sim.typesInfo, sim.explicitTransferCache, fa.function)
 	return sim
 }

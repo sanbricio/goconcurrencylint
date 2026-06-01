@@ -766,8 +766,8 @@ func (ma *Checker) reportBranchDelta(mutexName string, initial, final *Stats, is
 // unlockDiagnosticSuppressed reports whether ownership is managed outside the
 // current lock/unlock pair.
 func (ma *Checker) unlockDiagnosticSuppressed(mutexName string, acquireMethods []string) bool {
-	return ma.functionIsLifecycleReleaseFor(mutexName, acquireMethods) ||
-		ma.functionIsCallerManagedReleaseFor(mutexName, acquireMethods) ||
+	return ma.lifecycle.isReleaseFor(mutexName, acquireMethods) ||
+		ma.lifecycle.isCallerManagedReleaseFor(mutexName, acquireMethods) ||
 		ma.functionIsParameterUnlockHelper(mutexName, acquireMethods)
 }
 
@@ -817,7 +817,7 @@ func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats 
 		rlockMessage = "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
 	}
 
-	suppressFunctionLevelLock := branchType == "" && ma.functionReturnsLifecycleHandleFor(mutexName, []string{"Unlock"})
+	suppressFunctionLevelLock := branchType == "" && ma.lifecycle.returnsHandleFor(mutexName, []string{"Unlock"})
 	for _, pos := range ma.trailingPositions(stats.lockPos, remainingLockCount(stats.lock, stats.deferUnlock)) {
 		if suppressFunctionLevelLock {
 			continue
@@ -834,7 +834,7 @@ func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats 
 	}
 
 	if isRWMutex {
-		suppressFunctionLevelRLock := branchType == "" && ma.functionReturnsLifecycleHandleFor(mutexName, []string{"RUnlock"})
+		suppressFunctionLevelRLock := branchType == "" && ma.lifecycle.returnsHandleFor(mutexName, []string{"RUnlock"})
 		for _, pos := range ma.trailingPositions(stats.rlockPos, remainingLockCount(stats.rlock, stats.deferRUnlock)) {
 			if suppressFunctionLevelRLock {
 				continue
