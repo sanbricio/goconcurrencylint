@@ -1,15 +1,15 @@
 package mutex
 
 import (
-	"go/ast"
 	"reflect"
 
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/commentfilter"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/report"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/driver"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/filesetup"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/primitives"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/go/ast/inspector"
 )
 
 // SubAnalyzer drives the mutex / rwmutex misuse checks as an independent
@@ -26,30 +26,10 @@ var SubAnalyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
-	pkg := pass.ResultOf[primitives.Analyzer].(*primitives.Result)
-	files := pass.ResultOf[filesetup.Analyzer].(*filesetup.Result)
-	ec := &report.ErrorCollector{}
-
-	insp.Preorder([]ast.Node{(*ast.FuncDecl)(nil)}, func(n ast.Node) {
-		fn := n.(*ast.FuncDecl)
-		if fn.Body == nil {
-			return
-		}
-		tokFile := pass.Fset.File(fn.Pos())
-		if files.IsGenerated(tokFile) {
-			return
-		}
-
-		fr := primitives.ForFunction(fn, pass, pkg)
-		if !primitives.HasMutexes(fr) {
-			return
-		}
-
-		cf := files.FilterFor(tokFile)
-		c := NewChecker(fr, ec, cf, pass.TypesInfo, pass.Files)
-		c.AnalyzeFunction(fn)
+	return driver.Run(pass, driver.Config[*Checker]{
+		Guard: primitives.HasMutexes,
+		NewChecker: func(fr *primitives.FunctionResult, ec report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Checker {
+			return NewChecker(fr, ec, cf, pass.TypesInfo, pass.Files)
+		},
 	})
-
-	return ec.Diagnostics(pass, files.IgnoreFunc()), nil
 }

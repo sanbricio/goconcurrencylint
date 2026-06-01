@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/printer"
 	"go/token"
-	"go/types"
 	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
@@ -53,7 +52,7 @@ func (ma *Checker) analyzeStatementWithTail(stmt ast.Stmt, stats map[string]*Sta
 func (ma *Checker) terminatingTailByIndex(stmts []ast.Stmt) []bool {
 	tail := make([]bool, len(stmts)+1)
 	for i := range slices.Backward(stmts) {
-		tail[i] = tail[i+1] || ma.statementAlwaysTerminates(stmts[i])
+		tail[i] = tail[i+1] || ma.termination.statementAlwaysTerminates(stmts[i])
 	}
 	return tail
 }
@@ -116,7 +115,7 @@ func (ma *Checker) statementMayExit(stmt ast.Stmt) bool {
 				return false
 			}
 		case *ast.CallExpr:
-			if ma.callTerminatesExecution(node) {
+			if ma.termination.callTerminatesExecution(node) {
 				found = true
 				return false
 			}
@@ -124,64 +123,6 @@ func (ma *Checker) statementMayExit(stmt ast.Stmt) bool {
 		return true
 	})
 	return found
-}
-
-func (ma *Checker) callTerminatesExecution(call *ast.CallExpr) bool {
-	if call == nil {
-		return false
-	}
-	if ident, ok := call.Fun.(*ast.Ident); ok {
-		return ma.isBuiltinPanic(ident)
-	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-
-	methodName := sel.Sel.Name
-	if ma.typesInfo != nil {
-		if obj := ma.typesInfo.ObjectOf(sel.Sel); obj != nil && obj.Pkg() != nil {
-			switch obj.Pkg().Path() {
-			case "os":
-				return methodName == "Exit"
-			case "runtime":
-				return methodName == "Goexit"
-			case "log", "testing":
-				return isFatalMethod(methodName)
-			}
-		}
-	}
-
-	receiverName := common.GetVarName(sel.X)
-	switch receiverName {
-	case "os":
-		return methodName == "Exit"
-	case "runtime":
-		return methodName == "Goexit"
-	case "log":
-		return isFatalMethod(methodName)
-	default:
-		return false
-	}
-}
-
-func (ma *Checker) isBuiltinPanic(ident *ast.Ident) bool {
-	if ident == nil || ident.Name != "panic" {
-		return false
-	}
-	if ma.typesInfo == nil {
-		return true
-	}
-	obj := ma.typesInfo.ObjectOf(ident)
-	if obj == nil {
-		return true
-	}
-	_, ok := obj.(*types.Builtin)
-	return ok
-}
-
-func isFatalMethod(methodName string) bool {
-	return methodName == "Fatal" || methodName == "Fatalf" || methodName == "Fatalln"
 }
 
 // guardedIf returns the condition and body for a plain `if cond { body }`.
@@ -380,7 +321,7 @@ func (s *pathReleaseSimulator) runElse(elseNode ast.Stmt, incoming int) (int, bo
 
 func (s *pathReleaseSimulator) exprTerminates(expr ast.Expr) bool {
 	call, ok := expr.(*ast.CallExpr)
-	return ok && s.analyzer.callTerminatesExecution(call)
+	return ok && s.analyzer.termination.callTerminatesExecution(call)
 }
 
 // isMatchingRelease reports whether `expr` calls the tracked unlock method.
@@ -575,7 +516,7 @@ func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, st
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
-			if ma.isCarriedLoopUnlock(varName, pos, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
+			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -623,7 +564,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 			return
 		}
 		if stats[varName].lock == 0 {
-			if ma.isCarriedLoopUnlock(varName, pos, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
+			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -650,7 +591,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 			return
 		}
 		if stats[varName].rlock == 0 {
-			if ma.isCarriedLoopUnlock(varName, pos, []string{"RLock", "TryRLock"}, []string{"RUnlock"}) {
+			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, []string{"RLock", "TryRLock"}, []string{"RUnlock"}) {
 				return
 			}
 			stats[varName].borrowedRLock++

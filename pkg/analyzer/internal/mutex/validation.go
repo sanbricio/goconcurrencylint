@@ -3,8 +3,6 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
-	"maps"
-	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
@@ -37,7 +35,7 @@ func (ma *Checker) handleDeferRUnlock(varName string, pos token.Pos, stats map[s
 // analyzeRangeStatement handles range statements
 func (ma *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
 	ma.checkMutexDeclaredInLoop(stmt.Body)
-	ma.reportDeferredUnlocksInLoop(stmt.Body)
+	ma.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.copyStatsMap(stats, rangeStats)
 }
@@ -103,11 +101,11 @@ func (ma *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats)
 
 	thenBase, elseBase := ma.branchInitialStatsForCondition(stmt.Cond, stats)
 	thenStats := ma.analyzeBlock(stmt.Body, thenBase)
-	thenTerminates := ma.blockAlwaysTerminates(stmt.Body)
+	thenTerminates := ma.termination.blockAlwaysTerminates(stmt.Body)
 
 	if stmt.Else != nil {
 		elseStats := ma.analyzeElseBranch(stmt.Else, elseBase)
-		elseTerminates := ma.elseAlwaysTerminates(stmt.Else)
+		elseTerminates := ma.termination.elseAlwaysTerminates(stmt.Else)
 
 		if ma.canMergeBranchStates(thenStats, elseStats) {
 			ma.copyStatsMap(stats, thenStats)
@@ -136,19 +134,6 @@ func (ma *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats)
 		return
 	}
 	ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
-}
-
-// elseAlwaysTerminates reports whether every path through `elseNode`
-// terminates.
-func (ma *Checker) elseAlwaysTerminates(elseNode ast.Stmt) bool {
-	switch e := elseNode.(type) {
-	case *ast.BlockStmt:
-		return ma.blockAlwaysTerminates(e)
-	case *ast.IfStmt:
-		return ma.blockAlwaysTerminates(&ast.BlockStmt{List: []ast.Stmt{e}})
-	default:
-		return false
-	}
 }
 
 func (ma *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
@@ -300,402 +285,14 @@ func (ma *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stat
 	}
 
 	ma.checkMutexDeclaredInLoop(stmt.Body)
-	ma.reportDeferredUnlocksInLoop(stmt.Body)
+	ma.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
 	forStats := ma.analyzeBlock(stmt.Body, stats)
-	ma.applyLoopExitLocks(stmt, stats, forStats)
-	if stmt.Cond == nil && ma.blockContainsReturn(stmt.Body) && !ma.blockContainsBreak(stmt.Body) {
+	ma.loopCarry.applyLoopExitLocks(stmt, stats, forStats)
+	if stmt.Cond == nil && ma.termination.blockContainsReturn(stmt.Body) && !ma.termination.blockContainsBreak(stmt.Body) {
 		ma.clearStats(stats)
 		return
 	}
 	ma.copyStatsMap(stats, forStats)
-}
-
-func (ma *Checker) blockContainsReturn(block *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		if _, ok := n.(*ast.ReturnStmt); ok {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
-}
-
-func (ma *Checker) blockContainsBreak(block *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		branch, ok := n.(*ast.BranchStmt)
-		if ok && branch.Tok == token.BREAK {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
-}
-
-func (ma *Checker) blockAlwaysTerminates(block *ast.BlockStmt) bool {
-	if block == nil {
-		return false
-	}
-
-	return slices.ContainsFunc(block.List, ma.statementAlwaysTerminates)
-}
-
-func (ma *Checker) statementAlwaysTerminates(stmt ast.Stmt) bool {
-	switch s := stmt.(type) {
-	case *ast.ReturnStmt:
-		return true
-	case *ast.BranchStmt:
-		return branchTerminatesBlock(s.Tok)
-	case *ast.ExprStmt:
-		call, ok := s.X.(*ast.CallExpr)
-		return ok && ma.callTerminatesExecution(call)
-	case *ast.IfStmt:
-		if s.Else == nil || !ma.blockAlwaysTerminates(s.Body) {
-			return false
-		}
-		return ma.elseAlwaysTerminates(s.Else)
-	default:
-		return false
-	}
-}
-
-func branchTerminatesBlock(tok token.Token) bool {
-	return tok == token.BREAK ||
-		tok == token.CONTINUE ||
-		tok == token.GOTO ||
-		tok == token.FALLTHROUGH
-}
-
-func (ma *Checker) reportDeferredUnlocksInLoop(body *ast.BlockStmt) {
-	if body == nil {
-		return
-	}
-
-	locked := make(map[string]bool)
-	rlocked := make(map[string]bool)
-	ma.reportDeferredUnlocksInLoopStatements(body.List, locked, rlocked)
-}
-
-func (ma *Checker) reportDeferredUnlocksInLoopStatements(stmts []ast.Stmt, locked, rlocked map[string]bool) {
-	for i, stmt := range stmts {
-		if ma.commentFilter.ShouldSkipStatement(stmt) {
-			continue
-		}
-
-		switch s := stmt.(type) {
-		case *ast.ExprStmt:
-			call, ok := s.X.(*ast.CallExpr)
-			if !ok || ma.commentFilter.ShouldSkipCall(call) {
-				continue
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				continue
-			}
-			varName := common.GetVarName(sel.X)
-			switch sel.Sel.Name {
-			case "Lock":
-				if ma.mutexNames[varName] || ma.rwMutexNames[varName] {
-					locked[varName] = true
-				}
-			case "RLock":
-				if ma.rwMutexNames[varName] {
-					rlocked[varName] = true
-				}
-			case "Unlock":
-				delete(locked, varName)
-			case "RUnlock":
-				delete(rlocked, varName)
-			}
-
-		case *ast.DeferStmt:
-			if ma.commentFilter.ShouldSkipCall(s.Call) {
-				continue
-			}
-			if ma.blockAlwaysTerminates(&ast.BlockStmt{List: stmts[i+1:]}) {
-				continue
-			}
-			sel, ok := s.Call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				continue
-			}
-			varName := common.GetVarName(sel.X)
-			switch sel.Sel.Name {
-			case "Unlock":
-				if locked[varName] {
-					mutexType := "mutex"
-					if ma.rwMutexNames[varName] {
-						mutexType = "rwmutex"
-					}
-					ma.errorCollector.AddError(s.Pos(), category.DeferUnlockInLoop, mutexType+" '"+varName+"' defers unlock inside loop")
-				}
-			case "RUnlock":
-				if rlocked[varName] {
-					ma.errorCollector.AddError(s.Pos(), category.DeferUnlockInLoop, "rwmutex '"+varName+"' defers runlock inside loop")
-				}
-			}
-
-		case *ast.BlockStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.List, maps.Clone(locked), maps.Clone(rlocked))
-		case *ast.LabeledStmt:
-			ma.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s.Stmt}, maps.Clone(locked), maps.Clone(rlocked))
-		case *ast.IfStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
-			if s.Else != nil {
-				ma.reportDeferredUnlocksInLoopElse(s.Else, maps.Clone(locked), maps.Clone(rlocked))
-			}
-		case *ast.ForStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
-		case *ast.RangeStmt:
-			ma.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
-		case *ast.SwitchStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.reportDeferredUnlocksInLoopStatements(cc.Body, maps.Clone(locked), maps.Clone(rlocked))
-				}
-			}
-		case *ast.TypeSwitchStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok {
-					ma.reportDeferredUnlocksInLoopStatements(cc.Body, maps.Clone(locked), maps.Clone(rlocked))
-				}
-			}
-		case *ast.SelectStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CommClause); ok {
-					ma.reportDeferredUnlocksInLoopStatements(cc.Body, maps.Clone(locked), maps.Clone(rlocked))
-				}
-			}
-		}
-	}
-}
-
-func (ma *Checker) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, locked, rlocked map[string]bool) {
-	switch s := stmt.(type) {
-	case *ast.BlockStmt:
-		ma.reportDeferredUnlocksInLoopStatements(s.List, locked, rlocked)
-	case *ast.IfStmt:
-		ma.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s}, locked, rlocked)
-	}
-}
-
-func (ma *Checker) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[string]*Stats) {
-	for mutexName := range ma.mutexNames {
-		if pos, ok := ma.loopMayBreakHoldingMutex(stmt.Body.List, mutexName, []string{"Lock", "TryLock"}, []string{"Unlock"}, 0, token.NoPos); ok {
-			if final[mutexName].lock <= initial[mutexName].lock {
-				final[mutexName].lock++
-				final[mutexName].lockPos = append(final[mutexName].lockPos, pos)
-			}
-		}
-	}
-
-	for rwMutexName := range ma.rwMutexNames {
-		if pos, ok := ma.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, []string{"Lock", "TryLock"}, []string{"Unlock"}, 0, token.NoPos); ok {
-			if final[rwMutexName].lock <= initial[rwMutexName].lock {
-				final[rwMutexName].lock++
-				final[rwMutexName].lockPos = append(final[rwMutexName].lockPos, pos)
-			}
-		}
-		if pos, ok := ma.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, []string{"RLock", "TryRLock"}, []string{"RUnlock"}, 0, token.NoPos); ok {
-			if final[rwMutexName].rlock <= initial[rwMutexName].rlock {
-				final[rwMutexName].rlock++
-				final[rwMutexName].rlockPos = append(final[rwMutexName].rlockPos, pos)
-			}
-		}
-	}
-}
-
-func (ma *Checker) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int, lastLockPos token.Pos) (token.Pos, bool) {
-	currentDepth := depth
-	currentLockPos := lastLockPos
-
-	for _, stmt := range stmts {
-		if ma.commentFilter.ShouldSkipStatement(stmt) {
-			continue
-		}
-
-		switch s := stmt.(type) {
-		case *ast.ExprStmt:
-			call, ok := s.X.(*ast.CallExpr)
-			if !ok || ma.commentFilter.ShouldSkipCall(call) {
-				continue
-			}
-
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || common.GetVarName(sel.X) != varName {
-				continue
-			}
-
-			if containsMethod(lockMethods, sel.Sel.Name) {
-				currentDepth++
-				currentLockPos = call.Pos()
-				continue
-			}
-
-			if containsMethod(unlockMethods, sel.Sel.Name) && currentDepth > 0 {
-				currentDepth--
-			}
-		case *ast.IfStmt:
-			if pos, ok := ma.loopMayBreakHoldingMutex(s.Body.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
-				return pos, true
-			}
-			if s.Else != nil {
-				switch elseNode := s.Else.(type) {
-				case *ast.BlockStmt:
-					if pos, ok := ma.loopMayBreakHoldingMutex(elseNode.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
-						return pos, true
-					}
-				case *ast.IfStmt:
-					if pos, ok := ma.loopMayBreakHoldingMutex([]ast.Stmt{elseNode}, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
-						return pos, true
-					}
-				}
-			}
-		case *ast.BlockStmt:
-			if pos, ok := ma.loopMayBreakHoldingMutex(s.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
-				return pos, true
-			}
-		case *ast.LabeledStmt:
-			if pos, ok := ma.loopMayBreakHoldingMutex([]ast.Stmt{s.Stmt}, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
-				return pos, true
-			}
-		case *ast.BranchStmt:
-			if s.Tok == token.BREAK && currentDepth > 0 {
-				return currentLockPos, true
-			}
-		}
-	}
-
-	return token.NoPos, false
-}
-
-func (ma *Checker) isCarriedLoopUnlock(varName string, unlockPos token.Pos, lockMethods, unlockMethods []string) bool {
-	if ma.function == nil || ma.function.Body == nil || unlockPos == token.NoPos {
-		return false
-	}
-
-	found := false
-	ast.Inspect(ma.function.Body, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-
-		switch loop := n.(type) {
-		case *ast.ForStmt:
-			if loop.End() >= unlockPos {
-				return true
-			}
-			if ma.loopMayCarryMutexPastIteration(loop.Body.List, varName, lockMethods, unlockMethods, 0) {
-				found = true
-				return false
-			}
-		case *ast.RangeStmt:
-			if loop.End() >= unlockPos {
-				return true
-			}
-			if ma.loopMayCarryMutexPastIteration(loop.Body.List, varName, lockMethods, unlockMethods, 0) {
-				found = true
-				return false
-			}
-		}
-
-		return true
-	})
-
-	return found
-}
-
-func (ma *Checker) loopMayCarryMutexPastIteration(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int) bool {
-	currentDepth := depth
-
-	for _, stmt := range stmts {
-		if ma.commentFilter.ShouldSkipStatement(stmt) {
-			continue
-		}
-
-		switch s := stmt.(type) {
-		case *ast.ExprStmt:
-			call, ok := s.X.(*ast.CallExpr)
-			if !ok || ma.commentFilter.ShouldSkipCall(call) {
-				continue
-			}
-
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || common.GetVarName(sel.X) != varName {
-				continue
-			}
-
-			if containsMethod(lockMethods, sel.Sel.Name) {
-				currentDepth++
-				continue
-			}
-			if containsMethod(unlockMethods, sel.Sel.Name) && currentDepth > 0 {
-				currentDepth--
-			}
-		case *ast.IfStmt:
-			if ma.loopMayCarryMutexPastIteration(s.Body.List, varName, lockMethods, unlockMethods, currentDepth) {
-				return true
-			}
-			if s.Else != nil {
-				switch elseNode := s.Else.(type) {
-				case *ast.BlockStmt:
-					if ma.loopMayCarryMutexPastIteration(elseNode.List, varName, lockMethods, unlockMethods, currentDepth) {
-						return true
-					}
-				case *ast.IfStmt:
-					if ma.loopMayCarryMutexPastIteration([]ast.Stmt{elseNode}, varName, lockMethods, unlockMethods, currentDepth) {
-						return true
-					}
-				}
-			}
-		case *ast.BlockStmt:
-			if ma.loopMayCarryMutexPastIteration(s.List, varName, lockMethods, unlockMethods, currentDepth) {
-				return true
-			}
-		case *ast.LabeledStmt:
-			if ma.loopMayCarryMutexPastIteration([]ast.Stmt{s.Stmt}, varName, lockMethods, unlockMethods, currentDepth) {
-				return true
-			}
-		case *ast.ForStmt:
-			if ma.loopMayCarryMutexPastIteration(s.Body.List, varName, lockMethods, unlockMethods, currentDepth) {
-				return true
-			}
-		case *ast.RangeStmt:
-			if ma.loopMayCarryMutexPastIteration(s.Body.List, varName, lockMethods, unlockMethods, currentDepth) {
-				return true
-			}
-		case *ast.SwitchStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok &&
-					ma.loopMayCarryMutexPastIteration(cc.Body, varName, lockMethods, unlockMethods, currentDepth) {
-					return true
-				}
-			}
-		case *ast.TypeSwitchStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok &&
-					ma.loopMayCarryMutexPastIteration(cc.Body, varName, lockMethods, unlockMethods, currentDepth) {
-					return true
-				}
-			}
-		case *ast.SelectStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CommClause); ok &&
-					ma.loopMayCarryMutexPastIteration(cc.Body, varName, lockMethods, unlockMethods, currentDepth) {
-					return true
-				}
-			}
-		case *ast.BranchStmt:
-			if s.Tok == token.CONTINUE && currentDepth > 0 {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // reportUnmatchedLocksInBranch reports unmatched locks in conditional branches
