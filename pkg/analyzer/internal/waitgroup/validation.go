@@ -17,12 +17,12 @@ func (wga *Checker) validateUsage(stats map[string]*Stats) {
 		escape:                       wga.escape,
 		isInGoroutine:                wga.isInGoroutine,
 		isNodeInGoroutine:            wga.isNodeInGoroutine,
-		callInvokesDone:              wga.callInvokesDone,
+		callInvokesDone:              wga.worker.callInvokesDone,
 		goroutineDoneInfo:            wga.goroutineDoneInfo,
-		isSimpleDeferDone:            wga.isSimpleDeferDone,
-		findRelatedAddCall:           wga.findRelatedAddCall,
-		hasUnreachableDone:           wga.hasUnreachableDone,
-		waitInEarlyExitBranch:        wga.waitInEarlyExitBranch,
+		isSimpleDeferDone:            wga.worker.isSimpleDeferDone,
+		findRelatedAddCall:           wga.worker.findRelatedAddCall,
+		hasUnreachableDone:           wga.worker.hasUnreachableDone,
+		waitInEarlyExitBranch:        wga.worker.waitInEarlyExitBranch,
 		estimateForIterations:        iteration.estimateForIterations,
 		estimateForIterationsKnown:   iteration.estimateForIterationsKnown,
 		estimateRangeIterations:      iteration.estimateRangeIterations,
@@ -32,18 +32,18 @@ func (wga *Checker) validateUsage(stats map[string]*Stats) {
 		wga.waitGroupNames,
 		wga.commentFilter,
 		wga.errorCollector,
-		wga.deferInvokesDone,
-		wga.callInvokesDone,
+		wga.worker.deferInvokesDone,
+		wga.worker.callInvokesDone,
 		wga.goroutineDoneInfo,
 		balance.goroutineOnlyWaitsOnWaitGroup,
 		wga.analyzeDoneCallsWithVisited,
 		wga.isInGoroutine,
 		wga.typesInfo,
 		balance.isInMainFunctionFlow,
-		wga.isBuiltinPanic,
+		wga.worker.isBuiltinPanic,
 	)
 	goroutines.checkAddInsideGoroutine(wga.function)
-	wga.checkDoneNotDeferredInWorker()
+	wga.worker.checkDoneNotDeferredInWorker()
 	balance.checkLiteralAddLoopGoroutineMismatch(stats)
 	balance.checkWaitWithoutAdd(stats)
 	goroutines.checkMultipleDoneSameWorkerBranch(wga.function)

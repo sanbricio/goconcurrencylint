@@ -27,6 +27,7 @@ type Checker struct {
 	functionDecls              map[token.Pos]*ast.FuncDecl
 	escape                     *escapeAnalyzer
 	iteration                  *iterationEstimator
+	worker                     *workerDoneAnalyzer
 }
 
 // addCall represents an Add() call with its position and value
@@ -68,13 +69,14 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 // AnalyzeFunction analyzes WaitGroup usage in a function
 func (wga *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	wga.function = fn
+	wga.worker = newWorkerDoneAnalyzer(fn, wga.waitGroupNames, wga.commentFilter, wga.typesInfo, wga.errorCollector)
 	wga.iteration = newIterationEstimator(fn, wga.typesInfo, wga.commentFilter)
 	wga.escape = newEscapeAnalyzer(
 		fn,
 		wga.relatedWaitGroupForCall,
 		wga.functionCouldManageWaitGroup,
 		wga.analyzeDoneCallsWithVisited,
-		wga.isLocallyCreatedChannel,
+		wga.worker.isLocallyCreatedChannel,
 		wga.resolveFunctionExpr,
 	)
 	stats := wga.collectStats()

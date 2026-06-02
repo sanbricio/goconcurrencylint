@@ -46,7 +46,7 @@ func f() {
 		t.Fatalf("found %d panic calls, want 2", len(calls))
 	}
 
-	analyzer := &Checker{typesInfo: info}
+	analyzer := &workerDoneAnalyzer{typesInfo: info}
 	if !analyzer.isBuiltinPanic(calls[0]) {
 		t.Fatal("predeclared panic was not recognized as builtin")
 	}
@@ -57,21 +57,21 @@ func f() {
 
 func TestIsBuiltinPanicFallbacks(t *testing.T) {
 	t.Run("without types info", func(t *testing.T) {
-		analyzer := &Checker{}
+		analyzer := &workerDoneAnalyzer{}
 		if !analyzer.isBuiltinPanic(ast.NewIdent("panic")) {
 			t.Fatal("panic should be treated as builtin when type info is unavailable")
 		}
 	})
 
 	t.Run("missing object", func(t *testing.T) {
-		analyzer := &Checker{typesInfo: &types.Info{Uses: map[*ast.Ident]types.Object{}}}
+		analyzer := &workerDoneAnalyzer{typesInfo: &types.Info{Uses: map[*ast.Ident]types.Object{}}}
 		if !analyzer.isBuiltinPanic(ast.NewIdent("panic")) {
 			t.Fatal("panic should be treated as builtin when no object is recorded")
 		}
 	})
 
 	t.Run("different name", func(t *testing.T) {
-		analyzer := &Checker{}
+		analyzer := &workerDoneAnalyzer{}
 		if analyzer.isBuiltinPanic(ast.NewIdent("recover")) {
 			t.Fatal("recover should not be treated as panic")
 		}
@@ -81,7 +81,7 @@ func TestIsBuiltinPanicFallbacks(t *testing.T) {
 func TestCallAbortsWorkerRuntimeGoexitFallback(t *testing.T) {
 	t.Run("unaliased runtime without types info", func(t *testing.T) {
 		call := parseCallExpr(t, "runtime.Goexit()")
-		analyzer := &Checker{}
+		analyzer := &workerDoneAnalyzer{}
 		if !analyzer.callAbortsWorker(call) {
 			t.Fatal("runtime.Goexit should abort the worker when type info is unavailable")
 		}
@@ -89,7 +89,7 @@ func TestCallAbortsWorkerRuntimeGoexitFallback(t *testing.T) {
 
 	t.Run("alias without types info", func(t *testing.T) {
 		call := parseCallExpr(t, "rt.Goexit()")
-		analyzer := &Checker{}
+		analyzer := &workerDoneAnalyzer{}
 		if analyzer.callAbortsWorker(call) {
 			t.Fatal("rt.Goexit should require type info to be recognized")
 		}

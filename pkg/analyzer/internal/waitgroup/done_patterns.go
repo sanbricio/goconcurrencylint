@@ -6,7 +6,7 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
-func (wga *Checker) callInvokesDone(call *ast.CallExpr, wgName string) bool {
+func (w *workerDoneAnalyzer) callInvokesDone(call *ast.CallExpr, wgName string) bool {
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok &&
 		sel.Sel.Name == "Done" && common.GetVarName(sel.X) == wgName {
 		return true
@@ -16,18 +16,18 @@ func (wga *Checker) callInvokesDone(call *ast.CallExpr, wgName string) bool {
 		return true
 	}
 
-	return wga.isSyncOnceDoWithCallback(call, wgName)
+	return w.isSyncOnceDoWithCallback(call, wgName)
 }
 
 // isSimpleDeferDone checks if a defer statement is a simple defer wg.Done()
-func (wga *Checker) isSimpleDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
+func (w *workerDoneAnalyzer) isSimpleDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
 		return call.Sel.Name == "Done" && common.GetVarName(call.X) == wgName
 	}
 	return false
 }
 
-func (wga *Checker) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
+func (w *workerDoneAnalyzer) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	if ident, ok := deferStmt.Call.Fun.(*ast.Ident); ok {
 		return ident.Name == wgName
 	}
@@ -35,7 +35,7 @@ func (wga *Checker) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgName string)
 }
 
 // isDeferPanicRecoveryPattern detects panic recovery pattern
-func (wga *Checker) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgName string) bool {
+func (w *workerDoneAnalyzer) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgName string) bool {
 	// Check if the defer has a function literal
 	fnLit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
 	if !ok {
@@ -56,7 +56,7 @@ func (wga *Checker) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgName
 		// Look for if statement that checks recover result
 		if ifStmt, ok := n.(*ast.IfStmt); ok {
 			// Check if it's a pattern like: if r := recover(); r != nil
-			if hasPanicRecovery || wga.isRecoverCheck(ifStmt) {
+			if hasPanicRecovery || w.isRecoverCheck(ifStmt) {
 				// Check if Done is called in the if body
 				ast.Inspect(ifStmt.Body, func(inner ast.Node) bool {
 					if call, ok := inner.(*ast.CallExpr); ok {
@@ -78,15 +78,15 @@ func (wga *Checker) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgName
 }
 
 // isDeferFuncWithDone checks if a defer has a function literal that calls Done
-func (wga *Checker) isDeferFuncWithDone(deferStmt *ast.DeferStmt, wgName string) bool {
+func (w *workerDoneAnalyzer) isDeferFuncWithDone(deferStmt *ast.DeferStmt, wgName string) bool {
 	fnLit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
 	if !ok {
 		return false
 	}
-	return wga.containsDoneCall(fnLit.Body, wgName)
+	return w.containsDoneCall(fnLit.Body, wgName)
 }
 
-func (wga *Checker) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName string) bool {
+func (w *workerDoneAnalyzer) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName string) bool {
 	if len(call.Args) == 0 {
 		return false
 	}
@@ -107,14 +107,14 @@ func (wga *Checker) isSyncOnceDoWithCallback(call *ast.CallExpr, callbackName st
 		return false
 	}
 
-	typ := wga.typesInfo.TypeOf(sel.X)
+	typ := w.typesInfo.TypeOf(sel.X)
 	typ = common.DerefOnce(typ)
 
 	return common.MatchesPkgAndName(typ, "sync", "Once")
 }
 
 // isRecoverCheck checks if an if statement is checking recover() result
-func (wga *Checker) isRecoverCheck(ifStmt *ast.IfStmt) bool {
+func (w *workerDoneAnalyzer) isRecoverCheck(ifStmt *ast.IfStmt) bool {
 	// Check for pattern: if r := recover(); r != nil
 	if ifStmt.Init != nil {
 		if assign, ok := ifStmt.Init.(*ast.AssignStmt); ok {

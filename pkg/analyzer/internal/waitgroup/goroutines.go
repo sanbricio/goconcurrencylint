@@ -107,7 +107,7 @@ func (wga *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName str
 
 		switch s := stmt.(type) {
 		case *ast.DeferStmt:
-			if wga.isSimpleDeferDone(s, wgName) || wga.isCallbackDeferDone(s, wgName) || wga.isDeferPanicRecoveryPattern(s, wgName) || wga.isDeferFuncWithDone(s, wgName) {
+			if wga.worker.isSimpleDeferDone(s, wgName) || wga.worker.isCallbackDeferDone(s, wgName) || wga.worker.isDeferPanicRecoveryPattern(s, wgName) || wga.worker.isDeferFuncWithDone(s, wgName) {
 				info.hasAnyDone = true
 				if !mightExitEarly {
 					info.hasGuaranteedDone = true
@@ -120,14 +120,14 @@ func (wga *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName str
 			if unary, ok := s.X.(*ast.UnaryExpr); ok && unary.Op == token.ARROW {
 				chanName := common.GetVarName(unary.X)
 				if chanName != "" && chanName != "?" &&
-					wga.isLocallyCreatedChannel(chanName) && !wga.hasChannelSends(chanName) {
+					wga.worker.isLocallyCreatedChannel(chanName) && !wga.worker.hasChannelSends(chanName) {
 					mightExitEarly = true
 				}
 			}
 
 			// Direct Done() call
 			if call, ok := s.X.(*ast.CallExpr); ok {
-				if wga.callInvokesDone(call, wgName) {
+				if wga.worker.callInvokesDone(call, wgName) {
 					info.hasAnyDone = true
 					if !mightExitEarly {
 						info.hasGuaranteedDone = true
@@ -150,18 +150,18 @@ func (wga *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName str
 			thenInfo := wga.analyzeDoneCallsWithVisited(s.Body, wgName, visited)
 			info.hasAnyDone = info.hasAnyDone || thenInfo.hasAnyDone
 
-			thenTerminates := wga.blockAlwaysTerminates(s.Body)
+			thenTerminates := wga.worker.blockAlwaysTerminates(s.Body)
 
 			if s.Else != nil {
 				var elseInfo doneCallInfo
 				var elseTerminates bool
 				if elseBlock, ok := s.Else.(*ast.BlockStmt); ok {
 					elseInfo = wga.analyzeDoneCallsWithVisited(elseBlock, wgName, visited)
-					elseTerminates = wga.blockAlwaysTerminates(elseBlock)
+					elseTerminates = wga.worker.blockAlwaysTerminates(elseBlock)
 				} else if elseIf, ok := s.Else.(*ast.IfStmt); ok {
 					elseBlock := &ast.BlockStmt{List: []ast.Stmt{elseIf}}
 					elseInfo = wga.analyzeDoneCallsWithVisited(elseBlock, wgName, visited)
-					elseTerminates = wga.blockAlwaysTerminates(elseBlock)
+					elseTerminates = wga.worker.blockAlwaysTerminates(elseBlock)
 				}
 
 				info.hasAnyDone = info.hasAnyDone || elseInfo.hasAnyDone
@@ -387,7 +387,7 @@ func (wga *Checker) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName stri
 			}
 			caseBlock := &ast.BlockStmt{List: cc.Body}
 			caseInfo := wga.analyzeDoneCallsWithVisited(caseBlock, wgName, visited)
-			if caseInfo.hasGuaranteedDone && wga.blockAlwaysTerminates(caseBlock) {
+			if caseInfo.hasGuaranteedDone && wga.worker.blockAlwaysTerminates(caseBlock) {
 				found = true
 				return false
 			}
