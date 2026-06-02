@@ -4,11 +4,25 @@ import (
 	"go/ast"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/commentfilter"
 )
+
+// recoverGuardInspector performs static, comment-aware inspection of a block to
+// decide what a deferred function literal does with a mutex: whether it contains
+// lock/unlock calls and whether every unlock is guarded by a recover() check.
+// It depends only on the comment filter, so it can be built and exercised
+// without a full Checker.
+type recoverGuardInspector struct {
+	commentFilter *commentfilter.CommentFilter
+}
+
+func newRecoverGuardInspector(commentFilter *commentfilter.CommentFilter) *recoverGuardInspector {
+	return &recoverGuardInspector{commentFilter: commentFilter}
+}
 
 // unlocksOnlyInRecoverGuard reports whether the block contains at least one
 // target unlock and every target unlock is guarded by a recover() check.
-func (ma *Checker) unlocksOnlyInRecoverGuard(block *ast.BlockStmt, mutexName, methodName string) bool {
+func (g *recoverGuardInspector) unlocksOnlyInRecoverGuard(block *ast.BlockStmt, mutexName, methodName string) bool {
 	foundUnlock := false
 	foundUnguardedUnlock := false
 
@@ -30,7 +44,7 @@ func (ma *Checker) unlocksOnlyInRecoverGuard(block *ast.BlockStmt, mutexName, me
 				return false
 			}
 			call, ok := n.(*ast.CallExpr)
-			if !ok || ma.commentFilter.ShouldSkipCall(call) {
+			if !ok || g.commentFilter.ShouldSkipCall(call) {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -163,32 +177,32 @@ func containsRecoverCall(node ast.Node) bool {
 }
 
 // containsUnlock checks if a block contains an unlock call for a specific mutex
-func (ma *Checker) containsUnlock(block *ast.BlockStmt, mutexName string) bool {
-	return ma.containsMutexMethodCall(block, mutexName, "Unlock")
+func (g *recoverGuardInspector) containsUnlock(block *ast.BlockStmt, mutexName string) bool {
+	return g.containsMutexMethodCall(block, mutexName, "Unlock")
 }
 
 // containsLock checks if a block contains a lock call for a specific mutex
-func (ma *Checker) containsLock(block *ast.BlockStmt, mutexName string) bool {
-	return ma.containsMutexMethodCall(block, mutexName, "Lock")
+func (g *recoverGuardInspector) containsLock(block *ast.BlockStmt, mutexName string) bool {
+	return g.containsMutexMethodCall(block, mutexName, "Lock")
 }
 
 // containsRUnlock checks if a block contains an runlock call for a specific rwmutex
-func (ma *Checker) containsRUnlock(block *ast.BlockStmt, mutexName string) bool {
-	return ma.containsMutexMethodCall(block, mutexName, "RUnlock")
+func (g *recoverGuardInspector) containsRUnlock(block *ast.BlockStmt, mutexName string) bool {
+	return g.containsMutexMethodCall(block, mutexName, "RUnlock")
 }
 
 // containsRLock checks if a block contains an rlock call for a specific rwmutex
-func (ma *Checker) containsRLock(block *ast.BlockStmt, mutexName string) bool {
-	return ma.containsMutexMethodCall(block, mutexName, "RLock")
+func (g *recoverGuardInspector) containsRLock(block *ast.BlockStmt, mutexName string) bool {
+	return g.containsMutexMethodCall(block, mutexName, "RLock")
 }
 
 // containsMutexMethodCall checks if a block contains a call to a specific
 // method on the given mutex variable.
-func (ma *Checker) containsMutexMethodCall(block *ast.BlockStmt, mutexName, method string) bool {
+func (g *recoverGuardInspector) containsMutexMethodCall(block *ast.BlockStmt, mutexName, method string) bool {
 	var found bool
 	ast.Inspect(block, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || ma.commentFilter.ShouldSkipCall(call) {
+		if !ok || g.commentFilter.ShouldSkipCall(call) {
 			return true
 		}
 

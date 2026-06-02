@@ -552,10 +552,12 @@ func (ma *Checker) deferredRRelockBalancesEarlierDeferredRUnlock(varName string,
 
 // handleDeferFunctionLiteral processes defer with function literals
 func (ma *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, stats map[string]*Stats) {
+	guard := newRecoverGuardInspector(ma.commentFilter)
+
 	// Check for mutex unlocks in function literal
 	for mutexName := range ma.mutexNames {
-		if ma.containsUnlock(fnlit.Body, mutexName) && !ma.containsLock(fnlit.Body, mutexName) {
-			if stats[mutexName].lock == 0 && ma.unlocksOnlyInRecoverGuard(fnlit.Body, mutexName, "Unlock") {
+		if guard.containsUnlock(fnlit.Body, mutexName) && !guard.containsLock(fnlit.Body, mutexName) {
+			if stats[mutexName].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, mutexName, "Unlock") {
 				continue
 			}
 			ma.handleDeferUnlock(mutexName, pos, stats, false)
@@ -564,14 +566,14 @@ func (ma *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos,
 
 	// Check for rwmutex unlocks in function literal
 	for rwMutexName := range ma.rwMutexNames {
-		if ma.containsUnlock(fnlit.Body, rwMutexName) && !ma.containsLock(fnlit.Body, rwMutexName) {
-			if stats[rwMutexName].lock == 0 && ma.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "Unlock") {
+		if guard.containsUnlock(fnlit.Body, rwMutexName) && !guard.containsLock(fnlit.Body, rwMutexName) {
+			if stats[rwMutexName].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "Unlock") {
 				continue
 			}
 			ma.handleDeferUnlock(rwMutexName, pos, stats, true)
 		}
-		if ma.containsRUnlock(fnlit.Body, rwMutexName) && !ma.containsRLock(fnlit.Body, rwMutexName) {
-			if stats[rwMutexName].rlock == 0 && ma.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "RUnlock") {
+		if guard.containsRUnlock(fnlit.Body, rwMutexName) && !guard.containsRLock(fnlit.Body, rwMutexName) {
+			if stats[rwMutexName].rlock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "RUnlock") {
 				continue
 			}
 			ma.handleDeferRUnlock(rwMutexName, pos, stats)
