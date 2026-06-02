@@ -54,7 +54,7 @@ func (wga *Checker) isInGoroutine(pos token.Pos) bool {
 }
 
 // goroutineRelatedToWaitGroup checks if a goroutine is related to a WaitGroup
-func (wga *Checker) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
+func goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
 		found := false
 		ast.Inspect(fnLit.Body, func(n ast.Node) bool {
@@ -75,7 +75,7 @@ func (wga *Checker) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName strin
 
 func (wga *Checker) goroutineDoneInfo(goStmt *ast.GoStmt, wgName string) (doneCallInfo, bool) {
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
-		if !wga.goroutineRelatedToWaitGroup(goStmt, wgName) {
+		if !goroutineRelatedToWaitGroup(goStmt, wgName) {
 			return doneCallInfo{}, false
 		}
 		return wga.analyzeDoneCallsWithVisited(fnLit.Body, wgName, make(map[token.Pos]bool)), true

@@ -77,7 +77,7 @@ func (wga *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 		wga.functionCouldManageWaitGroup,
 		wga.analyzeDoneCallsWithVisited,
 		wga.worker.isLocallyCreatedChannel,
-		wga.resolveFunctionExpr,
+		func(fun ast.Expr) *ast.FuncDecl { return resolveFunctionExpr(fun, wga.typesInfo, wga.functionDecls) },
 	)
 	stats := wga.collectStats()
 	wga.validateUsage(stats)
@@ -249,24 +249,24 @@ func (wga *Checker) functionCouldManageWaitGroup(fn *ast.FuncDecl, wgName string
 	return wga.analyzeDoneCallsWithVisited(fn.Body, wgName, visited).hasAnyDone
 }
 
-func (wga *Checker) resolveCalledFunction(call *ast.CallExpr) *ast.FuncDecl {
-	return wga.resolveFunctionExpr(call.Fun)
+func resolveCalledFunction(call *ast.CallExpr, typesInfo *types.Info, functionDecls map[token.Pos]*ast.FuncDecl) *ast.FuncDecl {
+	return resolveFunctionExpr(call.Fun, typesInfo, functionDecls)
 }
 
-func (wga *Checker) resolveFunctionExpr(fun ast.Expr) *ast.FuncDecl {
+func resolveFunctionExpr(fun ast.Expr, typesInfo *types.Info, functionDecls map[token.Pos]*ast.FuncDecl) *ast.FuncDecl {
 	switch fun := fun.(type) {
 	case *ast.Ident:
-		if obj, ok := wga.typesInfo.Uses[fun].(*types.Func); ok {
-			return wga.functionDecls[obj.Pos()]
+		if obj, ok := typesInfo.Uses[fun].(*types.Func); ok {
+			return functionDecls[obj.Pos()]
 		}
 	case *ast.SelectorExpr:
-		if sel := wga.typesInfo.Selections[fun]; sel != nil {
+		if sel := typesInfo.Selections[fun]; sel != nil {
 			if obj, ok := sel.Obj().(*types.Func); ok {
-				return wga.functionDecls[obj.Pos()]
+				return functionDecls[obj.Pos()]
 			}
 		}
-		if obj, ok := wga.typesInfo.Uses[fun.Sel].(*types.Func); ok {
-			return wga.functionDecls[obj.Pos()]
+		if obj, ok := typesInfo.Uses[fun.Sel].(*types.Func); ok {
+			return functionDecls[obj.Pos()]
 		}
 	}
 	return nil
@@ -297,7 +297,7 @@ func (wga *Checker) currentFunctionShadowsPackageLevelWaitGroup(wgName string) b
 }
 
 func (wga *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*ast.FuncDecl, string, bool) {
-	fn := wga.resolveCalledFunction(call)
+	fn := resolveCalledFunction(call, wga.typesInfo, wga.functionDecls)
 	if fn == nil || fn.Body == nil {
 		return nil, "", false
 	}
@@ -333,7 +333,7 @@ func (wga *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (
 
 		for i := 0; i < fieldArity && argIndex < len(call.Args); i++ {
 			if !isWaitGroupArgument(call.Args[argIndex], wgName) {
-				if calleeWGName, ok := wga.calleeWaitGroupNameForArg(call.Args[argIndex], wgName, field, i); ok {
+				if calleeWGName, ok := calleeWaitGroupNameForArg(call.Args[argIndex], wgName, field, i); ok {
 					return fn, calleeWGName, true
 				}
 				argIndex++
@@ -355,7 +355,7 @@ func (wga *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (
 	return nil, "", false
 }
 
-func (wga *Checker) calleeWaitGroupNameForArg(arg ast.Expr, wgName string, field *ast.Field, fieldIndex int) (string, bool) {
+func calleeWaitGroupNameForArg(arg ast.Expr, wgName string, field *ast.Field, fieldIndex int) (string, bool) {
 	argName := common.GetVarName(arg)
 	if argName == "" || argName == "?" {
 		return "", false
