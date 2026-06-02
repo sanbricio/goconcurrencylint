@@ -94,6 +94,7 @@ func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.tryLock = newTryLockTracker(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.errorCollector)
 	ma.wrapper = newWrapperResolver(ma.receiverMethods, ma.function, ma.rawBodyEffects)
 	ma.lifecycle = newLifecycleResolver(ma.receiverMethods, ma.functions, ma.typesInfo, ma.explicitTransferCache, ma.function)
+	ma.panicDetector = newLockedPanicDetector(ma.mutexNames, ma.rwMutexNames, ma.typesInfo, ma.errorCollector, ma.rawBodyEffects)
 	ma.initializeStats()
 	lockOrder := newLockOrderDetector(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.typesInfo, ma.errorCollector)
 	lockOrder.check(fn.Body)

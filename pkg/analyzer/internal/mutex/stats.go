@@ -200,7 +200,7 @@ func (ma *Checker) bodyReleasesOnEveryPath(body *ast.BlockStmt, varName, methodN
 func (ma *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
-		ma.reportPotentialPanicWhileLocked(s, stats)
+		ma.panicDetector.reportPotentialPanicWhileLocked(s, stats)
 		ma.analyzeExpressionStatement(s, stats)
 	case *ast.AssignStmt:
 		ma.analyzeAssignStatement(s, stats)
@@ -210,7 +210,7 @@ func (ma *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 		ma.analyzeDeferStatement(s, stats)
 	case *ast.ReturnStmt:
 		ma.tryLock.markReturnedChecked(s)
-		ma.reportPotentialPanicWhileLocked(s, stats)
+		ma.panicDetector.reportPotentialPanicWhileLocked(s, stats)
 		ma.analyzeReturnStatement(s, stats)
 	case *ast.IfStmt:
 		ma.analyzeIfStatement(s, stats)
@@ -245,14 +245,14 @@ func (ma *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 // potential-panic-while-locked reporting, and TryLock result tracking (the
 // latter delegated to the per-function tryLockTracker).
 func (ma *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]*Stats) {
-	ma.recordCollectionLengthsFromAssign(stmt)
-	ma.reportPotentialPanicWhileLocked(stmt, stats)
+	ma.panicDetector.recordCollectionLengthsFromAssign(stmt)
+	ma.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
 	ma.tryLock.recordAssignment(stmt)
 }
 
 func (ma *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {
-	ma.recordCollectionLengthsFromDecl(stmt)
-	ma.reportPotentialPanicWhileLocked(stmt, stats)
+	ma.panicDetector.recordCollectionLengthsFromDecl(stmt)
+	ma.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
 }
 
 // analyzeExpressionStatement handles expression statements (Lock/Unlock calls)

@@ -8,10 +8,36 @@ import (
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/report"
 )
 
-func (ma *Checker) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[string]*Stats) {
-	if ma.rawBodyEffects || stmt == nil || !ma.hasUnprotectedHeldLock(stats) {
+// lockedPanicDetector reports statements that may panic (out-of-range index
+// access) while a mutex is still held, tracking statically-known collection
+// lengths to decide whether an index expression can actually panic. It owns
+// the per-function collectionLengths state.
+type lockedPanicDetector struct {
+	mutexNames     map[string]bool
+	rwMutexNames   map[string]bool
+	typesInfo      *types.Info
+	reporter       report.Reporter
+	rawBodyEffects bool
+
+	collectionLengths map[string]int
+}
+
+func newLockedPanicDetector(mutexNames, rwMutexNames map[string]bool, typesInfo *types.Info, reporter report.Reporter, rawBodyEffects bool) *lockedPanicDetector {
+	return &lockedPanicDetector{
+		mutexNames:        mutexNames,
+		rwMutexNames:      rwMutexNames,
+		typesInfo:         typesInfo,
+		reporter:          reporter,
+		rawBodyEffects:    rawBodyEffects,
+		collectionLengths: make(map[string]int),
+	}
+}
+
+func (d *lockedPanicDetector) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[string]*Stats) {
+	if d.rawBodyEffects || stmt == nil || !d.hasUnprotectedHeldLock(stats) {
 		return
 	}
 
@@ -27,7 +53,7 @@ func (ma *Checker) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[stri
 		if !ok {
 			return true
 		}
-		if ma.indexExprCanPanic(index) {
+		if d.indexExprCanPanic(index) {
 			panicPos = index.Pos()
 			return false
 		}
@@ -41,29 +67,29 @@ func (ma *Checker) reportPotentialPanicWhileLocked(stmt ast.Stmt, stats map[stri
 		if st == nil {
 			continue
 		}
-		if ma.mutexNames[name] && remainingLockCount(st.lock, st.deferUnlock) > 0 {
-			ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "mutex '"+name+"' may remain locked if index expression panics before unlock")
+		if d.mutexNames[name] && remainingLockCount(st.lock, st.deferUnlock) > 0 {
+			d.reporter.AddError(panicPos, category.PanicBeforeUnlock, "mutex '"+name+"' may remain locked if index expression panics before unlock")
 		}
-		if ma.rwMutexNames[name] {
+		if d.rwMutexNames[name] {
 			if remainingLockCount(st.lock, st.deferUnlock) > 0 {
-				ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain locked if index expression panics before unlock")
+				d.reporter.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain locked if index expression panics before unlock")
 			}
 			if remainingLockCount(st.rlock, st.deferRUnlock) > 0 {
-				ma.errorCollector.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain rlocked if index expression panics before runlock")
+				d.reporter.AddError(panicPos, category.PanicBeforeUnlock, "rwmutex '"+name+"' may remain rlocked if index expression panics before runlock")
 			}
 		}
 	}
 }
 
-func (ma *Checker) hasUnprotectedHeldLock(stats map[string]*Stats) bool {
+func (d *lockedPanicDetector) hasUnprotectedHeldLock(stats map[string]*Stats) bool {
 	for name, st := range stats {
 		if st == nil {
 			continue
 		}
-		if ma.mutexNames[name] && remainingLockCount(st.lock, st.deferUnlock) > 0 {
+		if d.mutexNames[name] && remainingLockCount(st.lock, st.deferUnlock) > 0 {
 			return true
 		}
-		if ma.rwMutexNames[name] &&
+		if d.rwMutexNames[name] &&
 			(remainingLockCount(st.lock, st.deferUnlock) > 0 ||
 				remainingLockCount(st.rlock, st.deferRUnlock) > 0) {
 			return true
@@ -72,31 +98,31 @@ func (ma *Checker) hasUnprotectedHeldLock(stats map[string]*Stats) bool {
 	return false
 }
 
-func (ma *Checker) indexExprCanPanic(index *ast.IndexExpr) bool {
+func (d *lockedPanicDetector) indexExprCanPanic(index *ast.IndexExpr) bool {
 	if index == nil {
 		return false
 	}
 	// Map indexing never panics: missing keys return the zero value, and
 	// negative or out-of-range keys are valid for any comparable key type.
-	if ma.isMapIndex(index) {
+	if d.isMapIndex(index) {
 		return false
 	}
-	indexValue, ok := common.ConstantIntValue(index.Index, ma.typesInfo)
+	indexValue, ok := common.ConstantIntValue(index.Index, d.typesInfo)
 	if !ok {
 		return false
 	}
 	if indexValue < 0 {
 		return true
 	}
-	length, ok := ma.staticLength(index.X)
+	length, ok := d.staticLength(index.X)
 	return ok && indexValue >= length
 }
 
-func (ma *Checker) isMapIndex(index *ast.IndexExpr) bool {
-	if index == nil || ma.typesInfo == nil {
+func (d *lockedPanicDetector) isMapIndex(index *ast.IndexExpr) bool {
+	if index == nil || d.typesInfo == nil {
 		return false
 	}
-	typ := ma.typesInfo.TypeOf(index.X)
+	typ := d.typesInfo.TypeOf(index.X)
 	if typ == nil {
 		return false
 	}
@@ -104,10 +130,10 @@ func (ma *Checker) isMapIndex(index *ast.IndexExpr) bool {
 	return ok
 }
 
-func (ma *Checker) staticLength(expr ast.Expr) (int, bool) {
+func (d *lockedPanicDetector) staticLength(expr ast.Expr) (int, bool) {
 	switch e := expr.(type) {
 	case *ast.Ident:
-		length, ok := ma.collectionLengths[e.Name]
+		length, ok := d.collectionLengths[e.Name]
 		return length, ok
 	case *ast.BasicLit:
 		if e.Kind != token.STRING {
@@ -121,17 +147,17 @@ func (ma *Checker) staticLength(expr ast.Expr) (int, bool) {
 	case *ast.CompositeLit:
 		return len(e.Elts), true
 	case *ast.CallExpr:
-		return ma.staticMakeLength(e)
+		return d.staticMakeLength(e)
 	}
 
-	typ := ma.typesInfo.TypeOf(expr)
+	typ := d.typesInfo.TypeOf(expr)
 	if array, ok := types.Unalias(typ).(*types.Array); ok {
 		return int(array.Len()), true
 	}
 	return 0, false
 }
 
-func (ma *Checker) staticMakeLength(call *ast.CallExpr) (int, bool) {
+func (d *lockedPanicDetector) staticMakeLength(call *ast.CallExpr) (int, bool) {
 	if call == nil || len(call.Args) < 2 {
 		return 0, false
 	}
@@ -139,10 +165,10 @@ func (ma *Checker) staticMakeLength(call *ast.CallExpr) (int, bool) {
 	if !ok || ident.Name != "make" {
 		return 0, false
 	}
-	return common.ConstantIntValue(call.Args[1], ma.typesInfo)
+	return common.ConstantIntValue(call.Args[1], d.typesInfo)
 }
 
-func (ma *Checker) recordCollectionLengthsFromDecl(stmt *ast.DeclStmt) {
+func (d *lockedPanicDetector) recordCollectionLengthsFromDecl(stmt *ast.DeclStmt) {
 	if stmt == nil {
 		return
 	}
@@ -157,15 +183,15 @@ func (ma *Checker) recordCollectionLengthsFromDecl(stmt *ast.DeclStmt) {
 		}
 		for i, name := range vs.Names {
 			if i >= len(vs.Values) {
-				delete(ma.collectionLengths, name.Name)
+				delete(d.collectionLengths, name.Name)
 				continue
 			}
-			ma.recordCollectionLength(name.Name, vs.Values[i])
+			d.recordCollectionLength(name.Name, vs.Values[i])
 		}
 	}
 }
 
-func (ma *Checker) recordCollectionLengthsFromAssign(stmt *ast.AssignStmt) {
+func (d *lockedPanicDetector) recordCollectionLengthsFromAssign(stmt *ast.AssignStmt) {
 	if stmt == nil || (stmt.Tok != token.ASSIGN && stmt.Tok != token.DEFINE) {
 		return
 	}
@@ -175,20 +201,20 @@ func (ma *Checker) recordCollectionLengthsFromAssign(stmt *ast.AssignStmt) {
 			continue
 		}
 		if i >= len(stmt.Rhs) {
-			delete(ma.collectionLengths, ident.Name)
+			delete(d.collectionLengths, ident.Name)
 			continue
 		}
-		ma.recordCollectionLength(ident.Name, stmt.Rhs[i])
+		d.recordCollectionLength(ident.Name, stmt.Rhs[i])
 	}
 }
 
-func (ma *Checker) recordCollectionLength(name string, expr ast.Expr) {
-	if ma.collectionLengths == nil {
-		ma.collectionLengths = make(map[string]int)
+func (d *lockedPanicDetector) recordCollectionLength(name string, expr ast.Expr) {
+	if d.collectionLengths == nil {
+		d.collectionLengths = make(map[string]int)
 	}
-	if length, ok := ma.staticLength(expr); ok {
-		ma.collectionLengths[name] = length
+	if length, ok := d.staticLength(expr); ok {
+		d.collectionLengths[name] = length
 		return
 	}
-	delete(ma.collectionLengths, name)
+	delete(d.collectionLengths, name)
 }

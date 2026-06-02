@@ -16,7 +16,7 @@ type funcAnalysis struct {
 	tryLock                *tryLockTracker
 	wrapper                *wrapperResolver
 	lifecycle              *lifecycleResolver
-	collectionLengths      map[string]int
+	panicDetector          *lockedPanicDetector
 	terminatingTailDepth   int
 	labelGotoSnapshots     map[string]map[string]*Stats
 	simulationStack        map[methodSimulationKey]bool
@@ -28,10 +28,9 @@ func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
 	// because the tracker needs the Checker's names and reporting boundary,
 	// which newFuncAnalysis does not have.
 	return &funcAnalysis{
-		function:          fn,
-		stats:             make(map[string]*Stats),
-		deferErrors:       newDeferErrorCollector(),
-		collectionLengths: make(map[string]int),
+		function:    fn,
+		stats:       make(map[string]*Stats),
+		deferErrors: newDeferErrorCollector(),
 	}
 }
 
@@ -78,5 +77,6 @@ func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames 
 	sim.tryLock = newTryLockTracker(sim.mutexNames, sim.rwMutexNames, sim.commentFilter, sim.errorCollector)
 	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects)
 	sim.lifecycle = newLifecycleResolver(sim.receiverMethods, sim.functions, sim.typesInfo, sim.explicitTransferCache, fa.function)
+	sim.panicDetector = newLockedPanicDetector(sim.mutexNames, sim.rwMutexNames, sim.typesInfo, sim.errorCollector, fa.rawBodyEffects)
 	return sim
 }
