@@ -34,7 +34,7 @@ func (ma *Checker) handleDeferRUnlock(varName string, pos token.Pos, stats map[s
 
 // analyzeRangeStatement handles range statements
 func (ma *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
-	ma.checkMutexDeclaredInLoop(stmt.Body)
+	newLoopMutexDetector(ma.errorCollector, ma.typesInfo).check(stmt.Body)
 	ma.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.copyStatsMap(stats, rangeStats)
@@ -284,7 +284,7 @@ func (ma *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stat
 		return
 	}
 
-	ma.checkMutexDeclaredInLoop(stmt.Body)
+	newLoopMutexDetector(ma.errorCollector, ma.typesInfo).check(stmt.Body)
 	ma.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
 	forStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.loopCarry.applyLoopExitLocks(stmt, stats, forStats)
@@ -493,79 +493,6 @@ func (ma *Checker) reportUnmatchedLocks(stats map[string]*Stats) {
 		if remainingLockCount(st.lock, st.deferUnlock) > 0 {
 			ma.errorCollector.AddError(conflict.pos, category.GoroutineLockDeadlock,
 				cg.deadlockMessage(conflict.varName, conflict.isRWMutex, false, conflict.requestMethod, false))
-		}
-	}
-}
-
-// checkMutexDeclaredInLoop reports sync.Mutex / sync.RWMutex variables that are
-// declared directly inside a loop body.  Each iteration creates a fresh mutex
-// that is invisible to other iterations and therefore cannot protect shared state.
-// Only the top-level statements of the loop body are examined; nested loops are
-// handled when they themselves are analysed as for/range statements.
-// Function literals inside the loop are skipped to avoid false positives for
-// patterns like `for { go func() { var mu sync.Mutex; … }() }`.
-func (ma *Checker) checkMutexDeclaredInLoop(loopBody *ast.BlockStmt) {
-	if loopBody == nil || ma.typesInfo == nil {
-		return
-	}
-	for _, stmt := range loopBody.List {
-		switch s := stmt.(type) {
-		case *ast.DeclStmt:
-			gen, ok := s.Decl.(*ast.GenDecl)
-			if !ok {
-				continue
-			}
-			for _, spec := range gen.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				ma.reportMutexInLoopValueSpec(vs)
-			}
-		case *ast.AssignStmt:
-			if s.Tok == token.DEFINE {
-				ma.reportMutexInLoopAssign(s)
-			}
-		}
-	}
-}
-
-func (ma *Checker) reportMutexInLoopValueSpec(vs *ast.ValueSpec) {
-	for _, name := range vs.Names {
-		obj := ma.typesInfo.Defs[name]
-		if obj == nil {
-			continue
-		}
-		typ := obj.Type()
-		switch {
-		case common.IsMutex(typ):
-			ma.errorCollector.AddError(name.Pos(),
-				category.MutexInLoop, "mutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
-		case common.IsRWMutex(typ):
-			ma.errorCollector.AddError(name.Pos(),
-				category.MutexInLoop, "rwmutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
-		}
-	}
-}
-
-func (ma *Checker) reportMutexInLoopAssign(s *ast.AssignStmt) {
-	for i, lhs := range s.Lhs {
-		ident, ok := lhs.(*ast.Ident)
-		if !ok || i >= len(s.Rhs) {
-			continue
-		}
-		typ := ma.typesInfo.TypeOf(s.Rhs[i])
-		if typ == nil {
-			continue
-		}
-		typ = common.DerefOnceAndUnalias(typ)
-		switch {
-		case common.IsMutex(typ):
-			ma.errorCollector.AddError(ident.Pos(),
-				category.MutexInLoop, "mutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
-		case common.IsRWMutex(typ):
-			ma.errorCollector.AddError(ident.Pos(),
-				category.MutexInLoop, "rwmutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
 		}
 	}
 }
