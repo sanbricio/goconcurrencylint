@@ -16,7 +16,7 @@ func (ma *Checker) captureGotoSnapshot(labelName string, stats map[string]*Stats
 
 	existing := ma.labelGotoSnapshots[labelName]
 	if existing == nil {
-		ma.labelGotoSnapshots[labelName] = ma.cloneStatsMap(stats)
+		ma.labelGotoSnapshots[labelName] = cloneStatsMap(stats)
 		return
 	}
 	mergeStatsByMax(existing, stats)

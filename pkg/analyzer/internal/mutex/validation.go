@@ -37,7 +37,7 @@ func (ma *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*
 	newLoopMutexDetector(ma.errorCollector, ma.typesInfo).check(stmt.Body)
 	ma.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := ma.analyzeBlock(stmt.Body, stats)
-	ma.copyStatsMap(stats, rangeStats)
+	copyStatsMap(stats, rangeStats)
 }
 
 // analyzeSwitchStatement handles switch statements
@@ -88,13 +88,13 @@ func (ma *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats)
 	if condValue, ok := common.ConstantBoolValue(stmt.Cond, ma.typesInfo); ok {
 		if condValue {
 			thenStats := ma.analyzeBlock(stmt.Body, stats)
-			ma.copyStatsMap(stats, thenStats)
+			copyStatsMap(stats, thenStats)
 			return
 		}
 
 		if stmt.Else != nil {
 			elseStats := ma.analyzeElseBranch(stmt.Else, stats)
-			ma.copyStatsMap(stats, elseStats)
+			copyStatsMap(stats, elseStats)
 		}
 		return
 	}
@@ -108,7 +108,7 @@ func (ma *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats)
 		elseTerminates := ma.termination.elseAlwaysTerminates(stmt.Else)
 
 		if ma.canMergeBranchStates(thenStats, elseStats) {
-			ma.copyStatsMap(stats, thenStats)
+			copyStatsMap(stats, thenStats)
 			return
 		}
 
@@ -117,10 +117,10 @@ func (ma *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats)
 		case thenTerminates && elseTerminates:
 			return
 		case thenTerminates:
-			ma.copyStatsMap(stats, elseStats)
+			copyStatsMap(stats, elseStats)
 			return
 		case elseTerminates:
-			ma.copyStatsMap(stats, thenStats)
+			copyStatsMap(stats, thenStats)
 			return
 		}
 
@@ -130,15 +130,15 @@ func (ma *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats)
 	}
 
 	if thenTerminates {
-		ma.copyStatsMap(stats, elseBase)
+		copyStatsMap(stats, elseBase)
 		return
 	}
 	ma.reportUnmatchedLocksInBranch(stats, thenStats, "if")
 }
 
 func (ma *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
-	thenStats := ma.cloneStatsMap(stats)
-	elseStats := ma.cloneStatsMap(stats)
+	thenStats := cloneStatsMap(stats)
+	elseStats := cloneStatsMap(stats)
 
 	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
 		negatedThen, negatedElse := ma.branchInitialStatsForCondition(unary.X, stats)
@@ -266,7 +266,7 @@ func (ma *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats)
 		}
 
 		crossReleases := cg.collectReleases(fnLit.Body, stats)
-		goInitial := ma.emptyStatsLike(stats)
+		goInitial := emptyStatsLike(stats)
 		goStats := ma.analyzeBlock(fnLit.Body, goInitial)
 		cg.suppressBorrowedReleases(goStats, crossReleases)
 		ma.reportUnmatchedLocksInBranch(goInitial, goStats, "goroutine")
@@ -289,10 +289,10 @@ func (ma *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stat
 	forStats := ma.analyzeBlock(stmt.Body, stats)
 	ma.loopCarry.applyLoopExitLocks(stmt, stats, forStats)
 	if stmt.Cond == nil && ma.termination.blockContainsReturn(stmt.Body) && !ma.termination.blockContainsBreak(stmt.Body) {
-		ma.clearStats(stats)
+		clearStats(stats)
 		return
 	}
-	ma.copyStatsMap(stats, forStats)
+	copyStatsMap(stats, forStats)
 }
 
 // reportUnmatchedLocksInBranch reports unmatched locks in conditional branches

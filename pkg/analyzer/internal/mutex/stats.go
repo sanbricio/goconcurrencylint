@@ -16,7 +16,7 @@ func (ma *Checker) analyzeBlock(block *ast.BlockStmt, initial map[string]*Stats)
 }
 
 func (ma *Checker) analyzeStatementList(stmts []ast.Stmt, initial map[string]*Stats) map[string]*Stats {
-	blockStats := ma.cloneStatsMap(initial)
+	blockStats := cloneStatsMap(initial)
 	skip := make(map[token.Pos]bool)
 	terminatingTail := ma.terminatingTailByIndex(stmts)
 
@@ -237,7 +237,7 @@ func (ma *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 		}
 	case *ast.BlockStmt:
 		nestedStats := ma.analyzeBlock(s, stats)
-		ma.copyStatsMap(stats, nestedStats)
+		copyStatsMap(stats, nestedStats)
 	}
 }
 

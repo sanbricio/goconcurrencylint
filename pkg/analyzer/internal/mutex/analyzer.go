@@ -4,7 +4,6 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
-	"slices"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
@@ -95,7 +94,7 @@ func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	ma.wrapper = newWrapperResolver(ma.receiverMethods, ma.function, ma.rawBodyEffects)
 	ma.lifecycle = newLifecycleResolver(ma.receiverMethods, ma.functions, ma.typesInfo, ma.explicitTransferCache, ma.function)
 	ma.panicDetector = newLockedPanicDetector(ma.mutexNames, ma.rwMutexNames, ma.typesInfo, ma.errorCollector, ma.rawBodyEffects)
-	ma.initializeStats()
+	ma.stats = initialStats(ma.mutexNames, ma.rwMutexNames)
 	lockOrder := newLockOrderDetector(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.typesInfo, ma.errorCollector)
 	lockOrder.check(fn.Body)
 	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
@@ -195,20 +194,6 @@ func (ma *Checker) varRootIsFunctionParameter(varName string) bool {
 	return false
 }
 
-func (ma *Checker) clearStats(stats map[string]*Stats) {
-	for name := range stats {
-		stats[name] = &Stats{}
-	}
-}
-
-func (ma *Checker) emptyStatsLike(stats map[string]*Stats) map[string]*Stats {
-	empty := make(map[string]*Stats, len(stats))
-	for name := range stats {
-		empty[name] = &Stats{}
-	}
-	return empty
-}
-
 func (ma *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
 	if fn == nil || fn.Body == nil {
 		return nil
@@ -271,10 +256,10 @@ func (ma *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr,
 	sub := newSimulationFuncAnalysis(ma.function, ma.simulationStack, stack)
 	simulated := ma.forkForSimulation(sub, ma.mutexNames, ma.rwMutexNames)
 
-	baseline := simulated.cloneStatsMap(stats)
+	baseline := cloneStatsMap(stats)
 	final := simulated.analyzeBlock(fnlit.Body, baseline)
 	simulated.applyFunctionExitDefers(final, baseline)
-	ma.copyStatsMap(stats, final)
+	copyStatsMap(stats, final)
 	return true
 }
 
@@ -400,72 +385,6 @@ func (ma *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats ma
 	}
 
 	return changed
-}
-
-// initializeStats initializes the stats map for all known mutexes
-func (ma *Checker) initializeStats() {
-	ma.stats = make(map[string]*Stats)
-
-	for mutexName := range ma.mutexNames {
-		ma.stats[mutexName] = &Stats{}
-	}
-
-	for rwMutexName := range ma.rwMutexNames {
-		ma.stats[rwMutexName] = &Stats{}
-	}
-}
-
-// cloneStatsMap returns a new map containing deep copies of every Stats in original.
-func (ma *Checker) cloneStatsMap(original map[string]*Stats) map[string]*Stats {
-	copy := make(map[string]*Stats)
-	ma.copyStatsMap(copy, original)
-	return copy
-}
-
-// copyStatsMap copies every entry from src into dst, performing a deep copy
-// of each Stats value via copyStats. Keys present in dst but not in src are
-// left untouched (merge semantics, not full replacement).
-func (ma *Checker) copyStatsMap(dst, src map[string]*Stats) {
-	for name, srcStats := range src {
-		if _, exists := dst[name]; !exists {
-			dst[name] = &Stats{}
-		}
-
-		copyStats(dst[name], srcStats)
-	}
-}
-
-// cloneStats creates a deep copy of a single Stats object.
-// If the input is nil, it returns a new initialized empty Stats instance.
-func cloneStats(stats *Stats) *Stats {
-	if stats == nil {
-		return &Stats{}
-	}
-
-	clone := &Stats{}
-	copyStats(clone, stats)
-
-	return clone
-}
-
-// copyStats copies all fields from src into dst, cloning slice fields so
-// the two instances do not share backing arrays. It is a no-op if either
-// src or dst is nil.
-func copyStats(dst, src *Stats) {
-	if src == nil || dst == nil {
-		return
-	}
-
-	dst.lock = src.lock
-	dst.rlock = src.rlock
-	dst.borrowedLock = src.borrowedLock
-	dst.borrowedRLock = src.borrowedRLock
-	dst.deferUnlock = src.deferUnlock
-	dst.deferRUnlock = src.deferRUnlock
-	dst.lockPos = slices.Clone(src.lockPos)
-	dst.rlockPos = slices.Clone(src.rlockPos)
-	dst.borrowedUnlockPos = slices.Clone(src.borrowedUnlockPos)
-	dst.borrowedRUnlockPos = slices.Clone(src.borrowedRUnlockPos)
 }
 
 // removeFirstLockPos removes the first lock position from the list
