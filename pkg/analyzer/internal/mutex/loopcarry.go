@@ -156,7 +156,7 @@ func (lc *loopCarryAnalyzer) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, lock
 
 func (lc *loopCarryAnalyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, final map[string]*Stats) {
 	for mutexName := range lc.mutexNames {
-		if pos, ok := lc.loopMayBreakHoldingMutex(stmt.Body.List, mutexName, []string{"Lock", "TryLock"}, []string{"Unlock"}, 0, token.NoPos); ok {
+		if pos, ok := lc.loopMayBreakHoldingMutex(stmt.Body.List, mutexName, WriteLockPattern, 0, token.NoPos); ok {
 			if final[mutexName].lock <= initial[mutexName].lock {
 				final[mutexName].lock++
 				final[mutexName].lockPos = append(final[mutexName].lockPos, pos)
@@ -165,13 +165,13 @@ func (lc *loopCarryAnalyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, fina
 	}
 
 	for rwMutexName := range lc.rwMutexNames {
-		if pos, ok := lc.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, []string{"Lock", "TryLock"}, []string{"Unlock"}, 0, token.NoPos); ok {
+		if pos, ok := lc.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, WriteLockPattern, 0, token.NoPos); ok {
 			if final[rwMutexName].lock <= initial[rwMutexName].lock {
 				final[rwMutexName].lock++
 				final[rwMutexName].lockPos = append(final[rwMutexName].lockPos, pos)
 			}
 		}
-		if pos, ok := lc.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, []string{"RLock", "TryRLock"}, []string{"RUnlock"}, 0, token.NoPos); ok {
+		if pos, ok := lc.loopMayBreakHoldingMutex(stmt.Body.List, rwMutexName, ReadLockPattern, 0, token.NoPos); ok {
 			if final[rwMutexName].rlock <= initial[rwMutexName].rlock {
 				final[rwMutexName].rlock++
 				final[rwMutexName].rlockPos = append(final[rwMutexName].rlockPos, pos)
@@ -180,7 +180,7 @@ func (lc *loopCarryAnalyzer) applyLoopExitLocks(stmt *ast.ForStmt, initial, fina
 	}
 }
 
-func (lc *loopCarryAnalyzer) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int, lastLockPos token.Pos) (token.Pos, bool) {
+func (lc *loopCarryAnalyzer) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName string, pattern LockPattern, depth int, lastLockPos token.Pos) (token.Pos, bool) {
 	currentDepth := depth
 	currentLockPos := lastLockPos
 
@@ -201,37 +201,37 @@ func (lc *loopCarryAnalyzer) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName 
 				continue
 			}
 
-			if containsMethod(lockMethods, sel.Sel.Name) {
+			if containsMethod(pattern.LockMethods, sel.Sel.Name) {
 				currentDepth++
 				currentLockPos = call.Pos()
 				continue
 			}
 
-			if containsMethod(unlockMethods, sel.Sel.Name) && currentDepth > 0 {
+			if containsMethod(pattern.UnlockMethods, sel.Sel.Name) && currentDepth > 0 {
 				currentDepth--
 			}
 		case *ast.IfStmt:
-			if pos, ok := lc.loopMayBreakHoldingMutex(s.Body.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+			if pos, ok := lc.loopMayBreakHoldingMutex(s.Body.List, varName, pattern, currentDepth, currentLockPos); ok {
 				return pos, true
 			}
 			if s.Else != nil {
 				switch elseNode := s.Else.(type) {
 				case *ast.BlockStmt:
-					if pos, ok := lc.loopMayBreakHoldingMutex(elseNode.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+					if pos, ok := lc.loopMayBreakHoldingMutex(elseNode.List, varName, pattern, currentDepth, currentLockPos); ok {
 						return pos, true
 					}
 				case *ast.IfStmt:
-					if pos, ok := lc.loopMayBreakHoldingMutex([]ast.Stmt{elseNode}, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+					if pos, ok := lc.loopMayBreakHoldingMutex([]ast.Stmt{elseNode}, varName, pattern, currentDepth, currentLockPos); ok {
 						return pos, true
 					}
 				}
 			}
 		case *ast.BlockStmt:
-			if pos, ok := lc.loopMayBreakHoldingMutex(s.List, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+			if pos, ok := lc.loopMayBreakHoldingMutex(s.List, varName, pattern, currentDepth, currentLockPos); ok {
 				return pos, true
 			}
 		case *ast.LabeledStmt:
-			if pos, ok := lc.loopMayBreakHoldingMutex([]ast.Stmt{s.Stmt}, varName, lockMethods, unlockMethods, currentDepth, currentLockPos); ok {
+			if pos, ok := lc.loopMayBreakHoldingMutex([]ast.Stmt{s.Stmt}, varName, pattern, currentDepth, currentLockPos); ok {
 				return pos, true
 			}
 		case *ast.BranchStmt:
@@ -248,7 +248,7 @@ func (lc *loopCarryAnalyzer) loopMayBreakHoldingMutex(stmts []ast.Stmt, varName 
 // loop that also locks varName and may carry the lock past the iteration
 // boundary (i.e. continue without unlocking). function must be the enclosing
 // *ast.FuncDecl; if nil or its Body is nil the method returns false.
-func (lc *loopCarryAnalyzer) isCarriedLoopUnlock(varName string, unlockPos token.Pos, function *ast.FuncDecl, lockMethods, unlockMethods []string) bool {
+func (lc *loopCarryAnalyzer) isCarriedLoopUnlock(varName string, unlockPos token.Pos, function *ast.FuncDecl, pattern LockPattern) bool {
 	if function == nil || function.Body == nil || unlockPos == token.NoPos {
 		return false
 	}
@@ -264,7 +264,7 @@ func (lc *loopCarryAnalyzer) isCarriedLoopUnlock(varName string, unlockPos token
 			if loop.End() >= unlockPos {
 				return true
 			}
-			if lc.loopMayCarryMutexPastIteration(loop.Body.List, varName, lockMethods, unlockMethods, 0) {
+			if lc.loopMayCarryMutexPastIteration(loop.Body.List, varName, pattern, 0) {
 				found = true
 				return false
 			}
@@ -272,7 +272,7 @@ func (lc *loopCarryAnalyzer) isCarriedLoopUnlock(varName string, unlockPos token
 			if loop.End() >= unlockPos {
 				return true
 			}
-			if lc.loopMayCarryMutexPastIteration(loop.Body.List, varName, lockMethods, unlockMethods, 0) {
+			if lc.loopMayCarryMutexPastIteration(loop.Body.List, varName, pattern, 0) {
 				found = true
 				return false
 			}
@@ -284,7 +284,7 @@ func (lc *loopCarryAnalyzer) isCarriedLoopUnlock(varName string, unlockPos token
 	return found
 }
 
-func (lc *loopCarryAnalyzer) loopMayCarryMutexPastIteration(stmts []ast.Stmt, varName string, lockMethods, unlockMethods []string, depth int) bool {
+func (lc *loopCarryAnalyzer) loopMayCarryMutexPastIteration(stmts []ast.Stmt, varName string, pattern LockPattern, depth int) bool {
 	currentDepth := depth
 
 	for _, stmt := range stmts {
@@ -304,63 +304,63 @@ func (lc *loopCarryAnalyzer) loopMayCarryMutexPastIteration(stmts []ast.Stmt, va
 				continue
 			}
 
-			if containsMethod(lockMethods, sel.Sel.Name) {
+			if containsMethod(pattern.LockMethods, sel.Sel.Name) {
 				currentDepth++
 				continue
 			}
-			if containsMethod(unlockMethods, sel.Sel.Name) && currentDepth > 0 {
+			if containsMethod(pattern.UnlockMethods, sel.Sel.Name) && currentDepth > 0 {
 				currentDepth--
 			}
 		case *ast.IfStmt:
-			if lc.loopMayCarryMutexPastIteration(s.Body.List, varName, lockMethods, unlockMethods, currentDepth) {
+			if lc.loopMayCarryMutexPastIteration(s.Body.List, varName, pattern, currentDepth) {
 				return true
 			}
 			if s.Else != nil {
 				switch elseNode := s.Else.(type) {
 				case *ast.BlockStmt:
-					if lc.loopMayCarryMutexPastIteration(elseNode.List, varName, lockMethods, unlockMethods, currentDepth) {
+					if lc.loopMayCarryMutexPastIteration(elseNode.List, varName, pattern, currentDepth) {
 						return true
 					}
 				case *ast.IfStmt:
-					if lc.loopMayCarryMutexPastIteration([]ast.Stmt{elseNode}, varName, lockMethods, unlockMethods, currentDepth) {
+					if lc.loopMayCarryMutexPastIteration([]ast.Stmt{elseNode}, varName, pattern, currentDepth) {
 						return true
 					}
 				}
 			}
 		case *ast.BlockStmt:
-			if lc.loopMayCarryMutexPastIteration(s.List, varName, lockMethods, unlockMethods, currentDepth) {
+			if lc.loopMayCarryMutexPastIteration(s.List, varName, pattern, currentDepth) {
 				return true
 			}
 		case *ast.LabeledStmt:
-			if lc.loopMayCarryMutexPastIteration([]ast.Stmt{s.Stmt}, varName, lockMethods, unlockMethods, currentDepth) {
+			if lc.loopMayCarryMutexPastIteration([]ast.Stmt{s.Stmt}, varName, pattern, currentDepth) {
 				return true
 			}
 		case *ast.ForStmt:
-			if lc.loopMayCarryMutexPastIteration(s.Body.List, varName, lockMethods, unlockMethods, currentDepth) {
+			if lc.loopMayCarryMutexPastIteration(s.Body.List, varName, pattern, currentDepth) {
 				return true
 			}
 		case *ast.RangeStmt:
-			if lc.loopMayCarryMutexPastIteration(s.Body.List, varName, lockMethods, unlockMethods, currentDepth) {
+			if lc.loopMayCarryMutexPastIteration(s.Body.List, varName, pattern, currentDepth) {
 				return true
 			}
 		case *ast.SwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok &&
-					lc.loopMayCarryMutexPastIteration(cc.Body, varName, lockMethods, unlockMethods, currentDepth) {
+					lc.loopMayCarryMutexPastIteration(cc.Body, varName, pattern, currentDepth) {
 					return true
 				}
 			}
 		case *ast.TypeSwitchStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CaseClause); ok &&
-					lc.loopMayCarryMutexPastIteration(cc.Body, varName, lockMethods, unlockMethods, currentDepth) {
+					lc.loopMayCarryMutexPastIteration(cc.Body, varName, pattern, currentDepth) {
 					return true
 				}
 			}
 		case *ast.SelectStmt:
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CommClause); ok &&
-					lc.loopMayCarryMutexPastIteration(cc.Body, varName, lockMethods, unlockMethods, currentDepth) {
+					lc.loopMayCarryMutexPastIteration(cc.Body, varName, pattern, currentDepth) {
 					return true
 				}
 			}

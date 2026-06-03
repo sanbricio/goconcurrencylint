@@ -345,7 +345,7 @@ func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, st
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
-			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
+			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, WriteLockPattern) {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -393,7 +393,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 			return
 		}
 		if stats[varName].lock == 0 {
-			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, []string{"Lock", "TryLock"}, []string{"Unlock"}) {
+			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, WriteLockPattern) {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -420,7 +420,7 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 			return
 		}
 		if stats[varName].rlock == 0 {
-			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, []string{"RLock", "TryRLock"}, []string{"RUnlock"}) {
+			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, ReadLockPattern) {
 				return
 			}
 			stats[varName].borrowedRLock++
