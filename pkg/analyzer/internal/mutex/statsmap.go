@@ -61,6 +61,15 @@ func cloneStats(stats *Stats) *Stats {
 	return clone
 }
 
+// remainingLockCount returns the net lock count after accounting for deferred
+// unlocks. If the deferred unlocks cover all locks, it returns 0.
+func remainingLockCount(lockCount, deferredUnlocks int) int {
+	if lockCount <= deferredUnlocks {
+		return 0
+	}
+	return lockCount - deferredUnlocks
+}
+
 // copyStats copies all fields from src into dst, cloning slice fields so
 // the two instances do not share backing arrays. It is a no-op if either
 // src or dst is nil.
