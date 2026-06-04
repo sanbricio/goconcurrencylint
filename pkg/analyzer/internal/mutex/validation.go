@@ -332,7 +332,7 @@ func (ma *Checker) reportBranchDelta(mutexName string, initial, final *Stats, is
 		}
 	}
 
-	suppressBorrowedUnlock := ma.unlockDiagnosticSuppressed(mutexName, []string{"Lock", "TryLock"}) ||
+	suppressBorrowedUnlock := ma.unlockDiagnosticSuppressed(mutexName, WriteLockPattern.LockMethods) ||
 		ma.terminatingTailUnlockSuppressed(mutexName)
 	unlockMessage := mutexType + " '" + mutexName + "' is unlocked but not locked"
 	if delta := final.borrowedLock - initial.borrowedLock; delta > 0 && !suppressBorrowedUnlock {
@@ -349,7 +349,7 @@ func (ma *Checker) reportBranchDelta(mutexName string, initial, final *Stats, is
 			}
 		}
 
-		suppressBorrowedRUnlock := ma.unlockDiagnosticSuppressed(mutexName, []string{"RLock", "TryRLock"}) ||
+		suppressBorrowedRUnlock := ma.unlockDiagnosticSuppressed(mutexName, ReadLockPattern.LockMethods) ||
 			ma.terminatingTailUnlockSuppressed(mutexName)
 		runlockMessage := "rwmutex '" + mutexName + "' is runlocked but not rlocked"
 		if delta := final.borrowedRLock - initial.borrowedRLock; delta > 0 && !suppressBorrowedRUnlock {
@@ -414,7 +414,7 @@ func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats 
 		rlockMessage = "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
 	}
 
-	suppressFunctionLevelLock := branchType == "" && ma.lifecycle.returnsHandleFor(mutexName, []string{"Unlock"})
+	suppressFunctionLevelLock := branchType == "" && ma.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods)
 	for _, pos := range ma.trailingPositions(stats.lockPos, remainingLockCount(stats.lock, stats.deferUnlock)) {
 		if suppressFunctionLevelLock {
 			continue
@@ -422,7 +422,7 @@ func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats 
 		ma.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
 	}
 
-	suppressFunctionLevelUnlock := branchType == "" && ma.unlockDiagnosticSuppressed(mutexName, []string{"Lock", "TryLock"})
+	suppressFunctionLevelUnlock := branchType == "" && ma.unlockDiagnosticSuppressed(mutexName, WriteLockPattern.LockMethods)
 	for _, pos := range stats.borrowedUnlockPos {
 		if suppressFunctionLevelUnlock {
 			continue
@@ -431,14 +431,14 @@ func (ma *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats 
 	}
 
 	if isRWMutex {
-		suppressFunctionLevelRLock := branchType == "" && ma.lifecycle.returnsHandleFor(mutexName, []string{"RUnlock"})
+		suppressFunctionLevelRLock := branchType == "" && ma.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods)
 		for _, pos := range ma.trailingPositions(stats.rlockPos, remainingLockCount(stats.rlock, stats.deferRUnlock)) {
 			if suppressFunctionLevelRLock {
 				continue
 			}
 			ma.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
 		}
-		suppressFunctionLevelRUnlock := branchType == "" && ma.unlockDiagnosticSuppressed(mutexName, []string{"RLock", "TryRLock"})
+		suppressFunctionLevelRUnlock := branchType == "" && ma.unlockDiagnosticSuppressed(mutexName, ReadLockPattern.LockMethods)
 		for _, pos := range stats.borrowedRUnlockPos {
 			if suppressFunctionLevelRUnlock {
 				continue

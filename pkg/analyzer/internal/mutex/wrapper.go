@@ -2,6 +2,7 @@ package mutex
 
 import (
 	"go/ast"
+	"slices"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
@@ -64,25 +65,16 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return false
 	}
 
-	switch w.function.Name.Name {
-	case "Lock", "TryLock":
-		return (methodName == "Lock" || methodName == "TryLock") &&
-			w.siblingMethodContainsFieldCall(suffix, []string{"Unlock"}, []string{"Unlock"})
-	case "Unlock":
-		return methodName == "Unlock" &&
-			w.siblingMethodContainsFieldCall(suffix, []string{"Lock", "TryLock"}, []string{"Lock", "TryLock"})
-	case "RLock", "TryRLock":
-		return (methodName == "RLock" || methodName == "TryRLock") &&
-			w.siblingMethodContainsFieldCall(suffix, []string{"RUnlock"}, []string{"RUnlock"})
-	case "RUnlock":
-		return methodName == "RUnlock" &&
-			w.siblingMethodContainsFieldCall(suffix, []string{"RLock", "TryRLock"}, []string{"RLock", "TryRLock"})
-	default:
-		if !methodNameLooksLikeWrapper(w.function.Name.Name, methodName) {
-			return false
-		}
-		return w.anySiblingMethodContainsFieldCall(suffix, w.function.Name.Name, oppositeMethods, oppositeMethods)
+	if group := mutexMethodGroup(w.function.Name.Name); group != nil {
+		return slices.Contains(group, methodName) &&
+			w.siblingMethodContainsFieldCall(suffix, oppositeMethods, oppositeMethods)
 	}
+
+	if !methodNameLooksLikeWrapper(w.function.Name.Name, methodName) {
+		return false
+	}
+	
+	return w.anySiblingMethodContainsFieldCall(suffix, w.function.Name.Name, oppositeMethods, oppositeMethods)
 }
 
 func (w *wrapperResolver) currentMethodContainsFieldCall(varName string, methodNames []string) bool {
@@ -177,23 +169,6 @@ func (w *wrapperResolver) anySiblingMethodContainsFieldSuffix(fieldSuffix, exclu
 	}
 
 	return false
-}
-
-// oppositeMutexMethods returns the method names that balance methodName: the
-// Unlock side for a Lock call and vice versa.
-func oppositeMutexMethods(methodName string) []string {
-	switch methodName {
-	case "Lock", "TryLock":
-		return []string{"Unlock"}
-	case "Unlock":
-		return []string{"Lock", "TryLock"}
-	case "RLock", "TryRLock":
-		return []string{"RUnlock"}
-	case "RUnlock":
-		return []string{"RLock", "TryRLock"}
-	default:
-		return nil
-	}
 }
 
 func methodNameLooksLikeWrapper(fnName, syncMethod string) bool {
