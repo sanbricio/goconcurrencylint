@@ -34,6 +34,17 @@ func (w *workerDoneAnalyzer) isCallbackDeferDone(deferStmt *ast.DeferStmt, wgNam
 	return false
 }
 
+// deferInvokesDone reports whether a defer statement invokes Done on wgName.
+func (w *workerDoneAnalyzer) deferInvokesDone(deferStmt *ast.DeferStmt, wgName string) bool {
+	if w.isSimpleDeferDone(deferStmt, wgName) || w.isCallbackDeferDone(deferStmt, wgName) {
+		return true
+	}
+	if fnLit, ok := deferStmt.Call.Fun.(*ast.FuncLit); ok && fnLit.Body != nil {
+		return w.containsDoneCall(fnLit.Body, wgName)
+	}
+	return false
+}
+
 // isDeferPanicRecoveryPattern detects panic recovery pattern
 func (w *workerDoneAnalyzer) isDeferPanicRecoveryPattern(deferStmt *ast.DeferStmt, wgName string) bool {
 	// Check if the defer has a function literal
