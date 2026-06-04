@@ -200,26 +200,36 @@ More representative cases live under [`pkg/analyzer/testdata/src`](pkg/analyzer/
 
 ## How It Works
 
-`goconcurrencylint` is a thin orchestrator over two focused analyzers:
+`goconcurrencylint` is an umbrella `go/analysis` analyzer composed of three
+independent sub-analyzers, wired together through the standard `Requires` graph:
 
-- **Mutex analyzer** (`pkg/analyzer/mutex`) — tracks `lock`, `rlock`, `borrowed lock`, and `defer unlock` counters per function, visiting each control-flow node and reconciling state at join points. Final state is validated at function exit.
-- **WaitGroup analyzer** (`pkg/analyzer/waitgroup`) — collects every `Add`, `Done`, `Wait`, and `Go` call with its position, builds a reachability map for calls inside goroutines, and validates the balance along every path. Calls that escape the function scope are intentionally excluded to minimize false positives.
+- **Mutex analyzer** — tracks `lock`, `rlock`, `borrowed lock`, and `defer unlock` counters per function, visiting each control-flow node and reconciling state at join points. Final state is validated at function exit.
+- **WaitGroup analyzer** — collects every `Add`, `Done`, `Wait`, and `Go` call with its position, builds a reachability map for calls inside goroutines, and validates the balance along every path. Calls that escape the function scope are intentionally excluded to minimize false positives.
+- **Copy analyzer** — flags any `sync.Mutex`, `sync.RWMutex` or `sync.WaitGroup` (or a struct embedding one) copied by value.
 
-Both analyzers share helpers for type detection (`IsMutex`, `IsRWMutex`, `IsWaitGroup`), comment-aware filtering, and consistent error reporting.
+Two foundation analyzers run once per package and share their results with the sub-analyzers: one discovers `sync` primitive declarations, the other identifies generated files and builds the comment filters behind `// goconcurrencylint:ignore`. All checks also share helpers for type detection (`IsMutex`, `IsRWMutex`, `IsWaitGroup`) and deterministic, deduplicated error reporting.
+
+For a contributor-level map of the analyzer graph and the journey of a single diagnostic, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Project Layout
 
 ```
 goconcurrencylint/
-├── cmd/goconcurrencylint/   # CLI entry point (singlechecker)
+├── cmd/goconcurrencylint/       # CLI entry point (singlechecker)
 ├── pkg/analyzer/
-│   ├── analyzer.go          # Top-level orchestrator
-│   ├── mutex/               # Mutex / RWMutex analyzer
-│   ├── waitgroup/           # WaitGroup analyzer
-│   ├── common/              # Shared type detection and reporting
-│   └── testdata/src/        # analysistest fixtures
-├── assets/                  # Logo and branding
-└── .github/workflows/       # CI and release pipelines
+│   ├── analyzer.go              # Umbrella analyzer (re-emits sub-analyzer diagnostics)
+│   ├── internal/
+│   │   ├── driver/              # Shared per-function run skeleton
+│   │   ├── primitives/          # Discovers sync primitive names
+│   │   ├── filesetup/           # Generated-file detection + comment filters
+│   │   ├── mutex/               # Mutex / RWMutex analyzer
+│   │   ├── waitgroup/           # WaitGroup analyzer
+│   │   ├── copycheck/           # Copy-by-value analyzer
+│   │   └── common/              # Shared helpers, category IDs, reporting
+│   └── testdata/src/            # analysistest fixtures
+├── assets/                      # Logo and branding
+├── ARCHITECTURE.md              # Internal design & data flow
+└── .github/workflows/           # CI and release pipelines
 ```
 
 ## Contributing
