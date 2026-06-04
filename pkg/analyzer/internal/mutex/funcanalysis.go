@@ -13,28 +13,24 @@ type funcAnalysis struct {
 	deferErrors            *deferErrorCollector
 	rawBodyEffects         bool
 	goroutineLockConflicts []goroutineLockConflict
-	tryLockResults         map[string]*tryLockResult
-	collectionLengths      map[string]int
+	tryLock                *tryLockTracker
+	wrapper                *wrapperResolver
+	lifecycle              *lifecycleResolver
+	panicDetector          *lockedPanicDetector
 	terminatingTailDepth   int
 	labelGotoSnapshots     map[string]map[string]*Stats
 	simulationStack        map[methodSimulationKey]bool
 	localFuncStack         map[*ast.FuncLit]bool
-
-	// callerManagedCache memoizes functionIsCallerManagedReleaseFor results
-	// for the current function. It belongs here (not on Checker) because the
-	// underlying computation reads ma.function; sharing the cache across
-	// functions would surface stale results for unrelated callers.
-	callerManagedCache map[callerManagedKey]bool
 }
 
 func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
+	// tryLock is wired separately (in AnalyzeFunction / forkForSimulation)
+	// because the tracker needs the Checker's names and reporting boundary,
+	// which newFuncAnalysis does not have.
 	return &funcAnalysis{
-		function:           fn,
-		stats:              make(map[string]*Stats),
-		deferErrors:        newDeferErrorCollector(),
-		tryLockResults:     make(map[string]*tryLockResult),
-		collectionLengths:  make(map[string]int),
-		callerManagedCache: make(map[callerManagedKey]bool),
+		function:    fn,
+		stats:       make(map[string]*Stats),
+		deferErrors: newDeferErrorCollector(),
 	}
 }
 
@@ -61,16 +57,26 @@ func newSimulationFuncAnalysis(fn *ast.FuncDecl, simStack map[methodSimulationKe
 // configuration with the receiver but uses the supplied per-function state
 // and primitive name maps. The fork gets its own ErrorCollector so
 // simulation diagnostics do not leak into the parent run.
-func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames map[string]bool) *Checker {
-	return &Checker{
+func (c *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames map[string]bool) *Checker {
+	sim := &Checker{
 		mutexNames:            mutexNames,
 		rwMutexNames:          rwMutexNames,
 		errorCollector:        &report.ErrorCollector{},
-		commentFilter:         ma.commentFilter,
-		typesInfo:             ma.typesInfo,
-		receiverMethods:       ma.receiverMethods,
-		functions:             ma.functions,
-		explicitTransferCache: ma.explicitTransferCache,
+		commentFilter:         c.commentFilter,
+		typesInfo:             c.typesInfo,
+		receiverMethods:       c.receiverMethods,
+		functions:             c.functions,
+		termination:           c.termination,
+		loopCarry:             c.loopCarry,
+		explicitTransferCache: c.explicitTransferCache,
 		funcAnalysis:          fa,
 	}
+	// Wire the per-function collaborators against the fork's own names and
+	// (isolated) collector so simulation diagnostics never leak into the parent
+	// run. fa.rawBodyEffects is true here, so the wrapper resolver stays inert.
+	sim.tryLock = newTryLockTracker(sim.mutexNames, sim.rwMutexNames, sim.commentFilter, sim.errorCollector)
+	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects)
+	sim.lifecycle = newLifecycleResolver(sim.receiverMethods, sim.functions, sim.typesInfo, sim.explicitTransferCache, fa.function)
+	sim.panicDetector = newLockedPanicDetector(sim.mutexNames, sim.rwMutexNames, sim.typesInfo, sim.errorCollector, fa.rawBodyEffects)
+	return sim
 }

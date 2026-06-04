@@ -6,28 +6,28 @@ import (
 )
 
 // captureGotoSnapshot records lock state at a `goto label`.
-func (ma *Checker) captureGotoSnapshot(labelName string, stats map[string]*Stats) {
+func (c *Checker) captureGotoSnapshot(labelName string, stats map[string]*Stats) {
 	if labelName == "" || stats == nil {
 		return
 	}
-	if ma.labelGotoSnapshots == nil {
-		ma.labelGotoSnapshots = make(map[string]map[string]*Stats)
+	if c.labelGotoSnapshots == nil {
+		c.labelGotoSnapshots = make(map[string]map[string]*Stats)
 	}
 
-	existing := ma.labelGotoSnapshots[labelName]
+	existing := c.labelGotoSnapshots[labelName]
 	if existing == nil {
-		ma.labelGotoSnapshots[labelName] = ma.cloneStatsMap(stats)
+		c.labelGotoSnapshots[labelName] = cloneStatsMap(stats)
 		return
 	}
 	mergeStatsByMax(existing, stats)
 }
 
 // applyLabelSnapshot merges lock state captured for `labelName`.
-func (ma *Checker) applyLabelSnapshot(labelName string, stats map[string]*Stats) {
-	if labelName == "" || ma.labelGotoSnapshots == nil {
+func (c *Checker) applyLabelSnapshot(labelName string, stats map[string]*Stats) {
+	if labelName == "" || c.labelGotoSnapshots == nil {
 		return
 	}
-	snapshot, ok := ma.labelGotoSnapshots[labelName]
+	snapshot, ok := c.labelGotoSnapshots[labelName]
 	if !ok {
 		return
 	}

@@ -8,80 +8,80 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 )
 
-func (wga *Checker) checkDoneNotDeferredInWorker() {
-	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+func (w *workerDoneAnalyzer) checkDoneNotDeferredInWorker() {
+	ast.Inspect(w.function.Body, func(n ast.Node) bool {
 		goStmt, ok := n.(*ast.GoStmt)
-		if !ok || wga.commentFilter.ShouldSkipStatement(goStmt) {
+		if !ok || w.commentFilter.ShouldSkipStatement(goStmt) {
 			return true
 		}
 		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
 		if !ok || fnLit.Body == nil {
 			return true
 		}
-		for wgName := range wga.waitGroupNames {
-			wga.checkDoneNotDeferredInBlock(fnLit.Body.List, wgName, false)
+		for wgName := range w.waitGroupNames {
+			w.checkDoneNotDeferredInBlock(fnLit.Body.List, wgName, false)
 		}
 		return true
 	})
 }
 
-func (wga *Checker) checkDoneNotDeferredInBlock(stmts []ast.Stmt, wgName string, riskyBefore bool) bool {
+func (w *workerDoneAnalyzer) checkDoneNotDeferredInBlock(stmts []ast.Stmt, wgName string, riskyBefore bool) bool {
 	risky := riskyBefore
 	for _, stmt := range stmts {
-		if stmt == nil || wga.commentFilter.ShouldSkipStatement(stmt) {
+		if stmt == nil || w.commentFilter.ShouldSkipStatement(stmt) {
 			continue
 		}
 		switch s := stmt.(type) {
 		case *ast.DeferStmt:
-			if wga.deferInvokesDone(s, wgName) {
+			if w.deferInvokesDone(s, wgName) {
 				continue
 			}
 			// A defer registers the call for execution at function exit; the
 			// deferred call itself does not run inline. Only the argument
 			// expressions are evaluated synchronously, so only those can mark
 			// subsequent code as risky.
-			if wga.deferArgsMayAbortWorker(s, wgName) {
+			if w.deferArgsMayAbortWorker(s, wgName) {
 				risky = true
 			}
 		case *ast.ExprStmt:
-			if call, ok := s.X.(*ast.CallExpr); ok && wga.callInvokesDone(call, wgName) {
+			if call, ok := s.X.(*ast.CallExpr); ok && w.callInvokesDone(call, wgName) {
 				if risky {
-					wga.errorCollector.AddError(call.Pos(), category.DoneNotDeferred, "waitgroup '"+wgName+"' Done should be deferred so it runs on panic or runtime.Goexit")
+					w.errorCollector.AddError(call.Pos(), category.DoneNotDeferred, "waitgroup '"+wgName+"' Done should be deferred so it runs on panic or runtime.Goexit")
 				}
 				continue
 			}
-			if wga.statementMayAbortWorker(s, wgName) {
+			if w.statementMayAbortWorker(s, wgName) {
 				risky = true
 			}
 		case *ast.IfStmt:
-			thenRisky := wga.checkDoneNotDeferredInBlock(s.Body.List, wgName, risky)
+			thenRisky := w.checkDoneNotDeferredInBlock(s.Body.List, wgName, risky)
 			elseRisky := risky
 			if s.Else != nil {
-				elseRisky = wga.checkDoneNotDeferredInElse(s.Else, wgName, risky)
+				elseRisky = w.checkDoneNotDeferredInElse(s.Else, wgName, risky)
 			}
 			risky = thenRisky || elseRisky
 		case *ast.BlockStmt:
-			risky = wga.checkDoneNotDeferredInBlock(s.List, wgName, risky)
+			risky = w.checkDoneNotDeferredInBlock(s.List, wgName, risky)
 		case *ast.LabeledStmt:
-			risky = wga.checkDoneNotDeferredInBlock([]ast.Stmt{s.Stmt}, wgName, risky)
+			risky = w.checkDoneNotDeferredInBlock([]ast.Stmt{s.Stmt}, wgName, risky)
 		default:
-			if wga.statementMayAbortWorker(s, wgName) {
+			if w.statementMayAbortWorker(s, wgName) {
 				risky = true
 			}
 		}
-		if wga.isTerminatingStatement(stmt) {
+		if w.isTerminatingStatement(stmt) {
 			return risky
 		}
 	}
 	return risky
 }
 
-func (wga *Checker) checkDoneNotDeferredInElse(stmt ast.Stmt, wgName string, risky bool) bool {
+func (w *workerDoneAnalyzer) checkDoneNotDeferredInElse(stmt ast.Stmt, wgName string, risky bool) bool {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
-		return wga.checkDoneNotDeferredInBlock(s.List, wgName, risky)
+		return w.checkDoneNotDeferredInBlock(s.List, wgName, risky)
 	case *ast.IfStmt:
-		return wga.checkDoneNotDeferredInBlock([]ast.Stmt{s}, wgName, risky)
+		return w.checkDoneNotDeferredInBlock([]ast.Stmt{s}, wgName, risky)
 	default:
 		return risky
 	}
@@ -91,19 +91,19 @@ func (wga *Checker) checkDoneNotDeferredInElse(stmt ast.Stmt, wgName string, ris
 // deferred call can explicitly abort the worker. The deferred call itself runs
 // at function exit, so its body cannot interrupt the ongoing flow; only the
 // argument expressions evaluated at the defer point can.
-func (wga *Checker) deferArgsMayAbortWorker(stmt *ast.DeferStmt, wgName string) bool {
+func (w *workerDoneAnalyzer) deferArgsMayAbortWorker(stmt *ast.DeferStmt, wgName string) bool {
 	if stmt == nil || stmt.Call == nil {
 		return false
 	}
 	for _, arg := range stmt.Call.Args {
-		if wga.exprMayAbortWorker(arg, wgName) {
+		if w.exprMayAbortWorker(arg, wgName) {
 			return true
 		}
 	}
 	return false
 }
 
-func (wga *Checker) exprMayAbortWorker(expr ast.Expr, wgName string) bool {
+func (w *workerDoneAnalyzer) exprMayAbortWorker(expr ast.Expr, wgName string) bool {
 	if expr == nil {
 		return false
 	}
@@ -116,13 +116,13 @@ func (wga *Checker) exprMayAbortWorker(expr ast.Expr, wgName string) bool {
 			return false
 		}
 		call, ok := n.(*ast.CallExpr)
-		if !ok || wga.commentFilter.ShouldSkipCall(call) {
+		if !ok || w.commentFilter.ShouldSkipCall(call) {
 			return true
 		}
-		if wga.isWaitGroupHousekeepingCall(call, wgName) {
+		if w.isWaitGroupHousekeepingCall(call, wgName) {
 			return true
 		}
-		if wga.callAbortsWorker(call) {
+		if w.callAbortsWorker(call) {
 			found = true
 			return false
 		}
@@ -134,7 +134,7 @@ func (wga *Checker) exprMayAbortWorker(expr ast.Expr, wgName string) bool {
 	return found
 }
 
-func (wga *Checker) statementMayAbortWorker(stmt ast.Stmt, wgName string) bool {
+func (w *workerDoneAnalyzer) statementMayAbortWorker(stmt ast.Stmt, wgName string) bool {
 	if _, ok := stmt.(*ast.GoStmt); ok {
 		return false
 	}
@@ -147,13 +147,13 @@ func (wga *Checker) statementMayAbortWorker(stmt ast.Stmt, wgName string) bool {
 			return false
 		}
 		call, ok := n.(*ast.CallExpr)
-		if !ok || wga.commentFilter.ShouldSkipCall(call) {
+		if !ok || w.commentFilter.ShouldSkipCall(call) {
 			return true
 		}
-		if wga.isWaitGroupHousekeepingCall(call, wgName) {
+		if w.isWaitGroupHousekeepingCall(call, wgName) {
 			return true
 		}
-		if wga.callAbortsWorker(call) {
+		if w.callAbortsWorker(call) {
 			found = true
 			return false
 		}
@@ -165,13 +165,13 @@ func (wga *Checker) statementMayAbortWorker(stmt ast.Stmt, wgName string) bool {
 	return found
 }
 
-func (wga *Checker) callAbortsWorker(call *ast.CallExpr) bool {
+func (w *workerDoneAnalyzer) callAbortsWorker(call *ast.CallExpr) bool {
 	if call == nil {
 		return false
 	}
 
 	if ident, ok := call.Fun.(*ast.Ident); ok {
-		return wga.isBuiltinPanic(ident)
+		return w.isBuiltinPanic(ident)
 	}
 
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -179,8 +179,8 @@ func (wga *Checker) callAbortsWorker(call *ast.CallExpr) bool {
 		return false
 	}
 
-	if wga.typesInfo != nil {
-		if obj := wga.typesInfo.ObjectOf(sel.Sel); obj != nil && obj.Pkg() != nil {
+	if w.typesInfo != nil {
+		if obj := w.typesInfo.ObjectOf(sel.Sel); obj != nil && obj.Pkg() != nil {
 			return obj.Pkg().Path() == "runtime"
 		}
 	}
@@ -188,14 +188,14 @@ func (wga *Checker) callAbortsWorker(call *ast.CallExpr) bool {
 	return common.GetVarName(sel.X) == "runtime"
 }
 
-func (wga *Checker) isBuiltinPanic(ident *ast.Ident) bool {
+func (w *workerDoneAnalyzer) isBuiltinPanic(ident *ast.Ident) bool {
 	if ident == nil || ident.Name != "panic" {
 		return false
 	}
-	if wga.typesInfo == nil {
+	if w.typesInfo == nil {
 		return true
 	}
-	obj := wga.typesInfo.ObjectOf(ident)
+	obj := w.typesInfo.ObjectOf(ident)
 	if obj == nil {
 		return true
 	}
@@ -203,7 +203,7 @@ func (wga *Checker) isBuiltinPanic(ident *ast.Ident) bool {
 	return ok
 }
 
-func (wga *Checker) isWaitGroupHousekeepingCall(call *ast.CallExpr, wgName string) bool {
+func (w *workerDoneAnalyzer) isWaitGroupHousekeepingCall(call *ast.CallExpr, wgName string) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || common.GetVarName(sel.X) != wgName {
 		return false

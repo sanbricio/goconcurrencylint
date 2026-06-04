@@ -526,7 +526,6 @@ func BadMutexDeclParen(rw *sync.RWMutex) {
 	(rw.RLock()) // want "rwmutex 'rw' is rlocked but not runlocked"
 }
 
-
 // ========== COPY-BY-VALUE TESTS ==========
 
 func takesMutexByValue(mu sync.Mutex) { // want "mutex 'mu' is copied by value"
