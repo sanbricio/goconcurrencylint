@@ -57,18 +57,18 @@ func newSimulationFuncAnalysis(fn *ast.FuncDecl, simStack map[methodSimulationKe
 // configuration with the receiver but uses the supplied per-function state
 // and primitive name maps. The fork gets its own ErrorCollector so
 // simulation diagnostics do not leak into the parent run.
-func (ma *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames map[string]bool) *Checker {
+func (c *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames map[string]bool) *Checker {
 	sim := &Checker{
 		mutexNames:            mutexNames,
 		rwMutexNames:          rwMutexNames,
 		errorCollector:        &report.ErrorCollector{},
-		commentFilter:         ma.commentFilter,
-		typesInfo:             ma.typesInfo,
-		receiverMethods:       ma.receiverMethods,
-		functions:             ma.functions,
-		termination:           ma.termination,
-		loopCarry:             ma.loopCarry,
-		explicitTransferCache: ma.explicitTransferCache,
+		commentFilter:         c.commentFilter,
+		typesInfo:             c.typesInfo,
+		receiverMethods:       c.receiverMethods,
+		functions:             c.functions,
+		termination:           c.termination,
+		loopCarry:             c.loopCarry,
+		explicitTransferCache: c.explicitTransferCache,
 		funcAnalysis:          fa,
 	}
 	// Wire the per-function collaborators against the fork's own names and

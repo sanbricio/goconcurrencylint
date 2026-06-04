@@ -9,7 +9,7 @@ import (
 )
 
 // analyzeExpressionStatement handles expression statements (Lock/Unlock calls)
-func (ma *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
+func (c *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[string]*Stats) {
 	expr := common.UnwrapParenExpr(stmt.X)
 
 	call, ok := expr.(*ast.CallExpr)
@@ -17,11 +17,11 @@ func (ma *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[stri
 		return
 	}
 
-	if ma.commentFilter.ShouldSkipCall(call) {
+	if c.commentFilter.ShouldSkipCall(call) {
 		return
 	}
 
-	if ma.applyLocalFunctionLiteralLifecycleEffects(call, stats) {
+	if c.applyLocalFunctionLiteralLifecycleEffects(call, stats) {
 		return
 	}
 
@@ -32,7 +32,7 @@ func (ma *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[stri
 
 	if sel.Sel.Name == "Cleanup" && len(call.Args) == 1 {
 		if fnlit, ok := call.Args[0].(*ast.FuncLit); ok {
-			ma.handleDeferFunctionLiteral(fnlit, call.Pos(), stats)
+			c.handleDeferFunctionLiteral(fnlit, call.Pos(), stats)
 		}
 		return
 	}
@@ -44,42 +44,42 @@ func (ma *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[stri
 	// that assumes the lock is held is racy.
 	switch sel.Sel.Name {
 	case "TryLock":
-		if ma.mutexNames[varName] {
-			ma.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "mutex '"+varName+"' TryLock return value not checked, lock may not be held")
+		if c.mutexNames[varName] {
+			c.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "mutex '"+varName+"' TryLock return value not checked, lock may not be held")
 			return
 		}
-		if ma.rwMutexNames[varName] {
-			ma.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "rwmutex '"+varName+"' TryLock return value not checked, lock may not be held")
+		if c.rwMutexNames[varName] {
+			c.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "rwmutex '"+varName+"' TryLock return value not checked, lock may not be held")
 			return
 		}
 	case "TryRLock":
-		if ma.rwMutexNames[varName] {
-			ma.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "rwmutex '"+varName+"' TryRLock return value not checked, lock may not be held")
+		if c.rwMutexNames[varName] {
+			c.errorCollector.AddError(call.Pos(), category.UncheckedTryLock, "rwmutex '"+varName+"' TryRLock return value not checked, lock may not be held")
 			return
 		}
 	}
 
-	if ma.mutexNames[varName] {
-		ma.handleMutexCall(varName, sel.Sel.Name, call.Pos(), stats)
+	if c.mutexNames[varName] {
+		c.handleMutexCall(varName, sel.Sel.Name, call.Pos(), stats)
 	}
 
-	if ma.rwMutexNames[varName] {
-		ma.handleRWMutexCall(varName, sel.Sel.Name, call.Pos(), stats)
+	if c.rwMutexNames[varName] {
+		c.handleRWMutexCall(varName, sel.Sel.Name, call.Pos(), stats)
 	}
 
-	ma.applyLocalMethodLifecycleEffects(call, stats)
+	c.applyLocalMethodLifecycleEffects(call, stats)
 }
 
 // handleMutexCall processes mutex method calls
-func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
-	if ma.wrapper.resolve(varName, methodName) {
+func (c *Checker) handleMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
+	if c.wrapper.resolve(varName, methodName) {
 		return
 	}
 
 	switch methodName {
 	case "Lock":
 		if stats[varName].lock > 0 {
-			ma.errorCollector.AddError(pos, category.DoubleLock, "mutex '"+varName+"' is re-locked before unlock")
+			c.errorCollector.AddError(pos, category.DoubleLock, "mutex '"+varName+"' is re-locked before unlock")
 		}
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
@@ -98,7 +98,7 @@ func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, st
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
-			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, WriteLockPattern) {
+			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern) {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -111,15 +111,15 @@ func (ma *Checker) handleMutexCall(varName, methodName string, pos token.Pos, st
 }
 
 // handleRWMutexCall processes rwmutex method calls
-func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
-	if ma.wrapper.resolve(varName, methodName) {
+func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
+	if c.wrapper.resolve(varName, methodName) {
 		return
 	}
 
 	switch methodName {
 	case "Lock":
 		if stats[varName].rlock > 0 {
-			ma.errorCollector.AddError(pos, category.DoubleLock, "rwmutex '"+varName+"' attempts write Lock while read lock is held")
+			c.errorCollector.AddError(pos, category.DoubleLock, "rwmutex '"+varName+"' attempts write Lock while read lock is held")
 		}
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
@@ -140,13 +140,13 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 		// Unlock called when only a read lock is held.
 		// Correct the state as if RUnlock was called to avoid cascading errors.
 		if stats[varName].rlock > 0 && stats[varName].lock == 0 {
-			ma.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' Unlock called but only read lock is held, did you mean RUnlock?")
+			c.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' Unlock called but only read lock is held, did you mean RUnlock?")
 			stats[varName].rlock--
 			stats[varName].removeFirstRLockPos()
 			return
 		}
 		if stats[varName].lock == 0 {
-			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, WriteLockPattern) {
+			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern) {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -167,13 +167,13 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 		// RUnlock called when only a write lock is held.
 		// Correct the state as if Unlock was called to avoid cascading errors.
 		if stats[varName].lock > 0 && stats[varName].rlock == 0 {
-			ma.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' RUnlock called but only write lock is held, did you mean Unlock?")
+			c.errorCollector.AddError(pos, category.RWMutexAPIMismatch, "rwmutex '"+varName+"' RUnlock called but only write lock is held, did you mean Unlock?")
 			stats[varName].lock--
 			stats[varName].removeFirstLockPos()
 			return
 		}
 		if stats[varName].rlock == 0 {
-			if ma.loopCarry.isCarriedLoopUnlock(varName, pos, ma.function, ReadLockPattern) {
+			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, ReadLockPattern) {
 				return
 			}
 			stats[varName].borrowedRLock++
@@ -188,13 +188,13 @@ func (ma *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, 
 // analyzeAssignStatement handles assignments: collection-length bookkeeping,
 // potential-panic-while-locked reporting, and TryLock result tracking (the
 // latter delegated to the per-function tryLockTracker).
-func (ma *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]*Stats) {
-	ma.panicDetector.recordCollectionLengthsFromAssign(stmt)
-	ma.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
-	ma.tryLock.recordAssignment(stmt)
+func (c *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]*Stats) {
+	c.panicDetector.recordCollectionLengthsFromAssign(stmt)
+	c.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
+	c.tryLock.recordAssignment(stmt)
 }
 
-func (ma *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {
-	ma.panicDetector.recordCollectionLengthsFromDecl(stmt)
-	ma.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
+func (c *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {
+	c.panicDetector.recordCollectionLengthsFromDecl(stmt)
+	c.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
 }

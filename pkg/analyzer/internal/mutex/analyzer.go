@@ -73,7 +73,7 @@ type deferErrorCollector struct {
 // rwmutex names visible inside the function being analyzed.
 func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Checker {
 	term := newTerminationAnalyzer(typesInfo)
-	ma := &Checker{
+	c := &Checker{
 		mutexNames:            fr.Mutexes,
 		rwMutexNames:          fr.RWMutexes,
 		errorCollector:        errorCollector,
@@ -84,22 +84,22 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		termination:           term,
 		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
 	}
-	ma.loopCarry = newLoopCarryAnalyzer(ma.mutexNames, ma.rwMutexNames, cf, errorCollector, term)
-	return ma
+	c.loopCarry = newLoopCarryAnalyzer(c.mutexNames, c.rwMutexNames, cf, errorCollector, term)
+	return c
 }
 
-func (ma *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
-	ma.funcAnalysis = newFuncAnalysis(fn)
-	ma.tryLock = newTryLockTracker(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.errorCollector)
-	ma.wrapper = newWrapperResolver(ma.receiverMethods, ma.function, ma.rawBodyEffects)
-	ma.lifecycle = newLifecycleResolver(ma.receiverMethods, ma.functions, ma.typesInfo, ma.explicitTransferCache, ma.function)
-	ma.panicDetector = newLockedPanicDetector(ma.mutexNames, ma.rwMutexNames, ma.typesInfo, ma.errorCollector, ma.rawBodyEffects)
-	ma.stats = initialStats(ma.mutexNames, ma.rwMutexNames)
-	lockOrder := newLockOrderDetector(ma.mutexNames, ma.rwMutexNames, ma.commentFilter, ma.typesInfo, ma.errorCollector)
+func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
+	c.funcAnalysis = newFuncAnalysis(fn)
+	c.tryLock = newTryLockTracker(c.mutexNames, c.rwMutexNames, c.commentFilter, c.errorCollector)
+	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects)
+	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.function)
+	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
+	c.stats = initialStats(c.mutexNames, c.rwMutexNames)
+	lockOrder := newLockOrderDetector(c.mutexNames, c.rwMutexNames, c.commentFilter, c.typesInfo, c.errorCollector)
 	lockOrder.check(fn.Body)
-	finalStats := ma.analyzeBlock(fn.Body, ma.stats)
-	ma.tryLock.reportUnchecked()
-	ma.reportUnmatchedLocks(finalStats)
+	finalStats := c.analyzeBlock(fn.Body, c.stats)
+	c.tryLock.reportUnchecked()
+	c.reportUnmatchedLocks(finalStats)
 }
 
 func relativeMutexPath(varName, prefix string) (string, bool) {
@@ -120,11 +120,11 @@ func splitBaseAndSuffix(varName string) (string, string, bool) {
 
 // functionIsParameterUnlockHelper reports helpers that only release a mutex
 // parameter.
-func (ma *Checker) functionIsParameterUnlockHelper(varName string, acquireMethods []string) bool {
-	if ma.function == nil || ma.function.Body == nil {
+func (c *Checker) functionIsParameterUnlockHelper(varName string, acquireMethods []string) bool {
+	if c.function == nil || c.function.Body == nil {
 		return false
 	}
-	if !ma.varRootIsFunctionParameter(varName) {
+	if !c.varRootIsFunctionParameter(varName) {
 		return false
 	}
 
@@ -145,7 +145,7 @@ func (ma *Checker) functionIsParameterUnlockHelper(varName string, acquireMethod
 
 	sawRelease := false
 	sawAcquire := false
-	ast.Inspect(ma.function.Body, func(n ast.Node) bool {
+	ast.Inspect(c.function.Body, func(n ast.Node) bool {
 		if sawAcquire {
 			return false
 		}
@@ -176,15 +176,15 @@ func (ma *Checker) functionIsParameterUnlockHelper(varName string, acquireMethod
 }
 
 // varRootIsFunctionParameter reports whether `varName` starts at a parameter.
-func (ma *Checker) varRootIsFunctionParameter(varName string) bool {
-	if ma.function == nil || ma.function.Type == nil || ma.function.Type.Params == nil {
+func (c *Checker) varRootIsFunctionParameter(varName string) bool {
+	if c.function == nil || c.function.Type == nil || c.function.Type.Params == nil {
 		return false
 	}
 	base := varName
 	if before, _, ok := strings.Cut(varName, "."); ok {
 		base = before
 	}
-	for _, field := range ma.function.Type.Params.List {
+	for _, field := range c.function.Type.Params.List {
 		for _, name := range field.Names {
 			if name.Name == base {
 				return true
@@ -194,15 +194,15 @@ func (ma *Checker) varRootIsFunctionParameter(varName string) bool {
 	return false
 }
 
-func (ma *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
+func (c *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
 	if fn == nil || fn.Body == nil {
 		return nil
 	}
 
-	stack := ma.simulationStack
+	stack := c.simulationStack
 	if stack == nil {
 		stack = make(map[methodSimulationKey]bool)
-		ma.simulationStack = stack
+		c.simulationStack = stack
 	}
 
 	key := methodSimulationKey{fn: fn, varName: varName, isRWMutex: isRWMutex}
@@ -221,8 +221,8 @@ func (ma *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMu
 		mutexNames[varName] = true
 	}
 
-	sub := newSimulationFuncAnalysis(fn, stack, ma.localFuncStack)
-	simulated := ma.forkForSimulation(sub, mutexNames, rwMutexNames)
+	sub := newSimulationFuncAnalysis(fn, stack, c.localFuncStack)
+	simulated := c.forkForSimulation(sub, mutexNames, rwMutexNames)
 
 	start := map[string]*Stats{varName: cloneStats(initial)}
 	final := simulated.analyzeBlock(fn.Body, start)
@@ -230,21 +230,21 @@ func (ma *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMu
 	return cloneStats(final[varName])
 }
 
-func (ma *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
+func (c *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
 	ident, ok := call.Fun.(*ast.Ident)
 	if !ok {
 		return false
 	}
 
-	fnlit := ma.localFunctionLiteralBefore(ident.Name, call.Pos())
+	fnlit := c.localFunctionLiteralBefore(ident.Name, call.Pos())
 	if fnlit == nil || fnlit.Body == nil {
 		return false
 	}
 
-	stack := ma.localFuncStack
+	stack := c.localFuncStack
 	if stack == nil {
 		stack = make(map[*ast.FuncLit]bool)
-		ma.localFuncStack = stack
+		c.localFuncStack = stack
 	}
 	if stack[fnlit] {
 		return false
@@ -253,8 +253,8 @@ func (ma *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr,
 	stack[fnlit] = true
 	defer delete(stack, fnlit)
 
-	sub := newSimulationFuncAnalysis(ma.function, ma.simulationStack, stack)
-	simulated := ma.forkForSimulation(sub, ma.mutexNames, ma.rwMutexNames)
+	sub := newSimulationFuncAnalysis(c.function, c.simulationStack, stack)
+	simulated := c.forkForSimulation(sub, c.mutexNames, c.rwMutexNames)
 
 	baseline := cloneStatsMap(stats)
 	final := simulated.analyzeBlock(fnlit.Body, baseline)
@@ -263,13 +263,13 @@ func (ma *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr,
 	return true
 }
 
-func (ma *Checker) localFunctionLiteralBefore(name string, before token.Pos) *ast.FuncLit {
-	if ma.function == nil || ma.function.Body == nil {
+func (c *Checker) localFunctionLiteralBefore(name string, before token.Pos) *ast.FuncLit {
+	if c.function == nil || c.function.Body == nil {
 		return nil
 	}
 
 	var found *ast.FuncLit
-	ast.Inspect(ma.function.Body, func(n ast.Node) bool {
+	ast.Inspect(c.function.Body, func(n ast.Node) bool {
 		if n == nil || n.Pos() >= before {
 			return false
 		}
@@ -302,7 +302,7 @@ func (ma *Checker) localFunctionLiteralBefore(name string, before token.Pos) *as
 	return found
 }
 
-func (ma *Checker) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
+func (c *Checker) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
 	for name, st := range stats {
 		baselineDeferUnlocks := 0
 		baselineDeferRUnlocks := 0
@@ -326,7 +326,7 @@ func (ma *Checker) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
 	}
 }
 
-func (ma *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
+func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
@@ -337,13 +337,13 @@ func (ma *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats ma
 		return false
 	}
 
-	receiverType := baseTypeNameFromType(ma.typesInfo.TypeOf(sel.X))
+	receiverType := baseTypeNameFromType(c.typesInfo.TypeOf(sel.X))
 	if receiverType == "" {
 		return false
 	}
 
-	callee := ma.receiverMethods[receiverType][sel.Sel.Name]
-	if callee == nil || callee.Body == nil || callee == ma.function {
+	callee := c.receiverMethods[receiverType][sel.Sel.Name]
+	if callee == nil || callee.Body == nil || callee == c.function {
 		return false
 	}
 
@@ -354,13 +354,13 @@ func (ma *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats ma
 
 	changed := false
 
-	for mutexName := range ma.mutexNames {
+	for mutexName := range c.mutexNames {
 		relativePath, ok := relativeMutexPath(mutexName, baseVar)
 		if !ok {
 			continue
 		}
 
-		simulated := ma.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName])
+		simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName])
 		if simulated == nil {
 			continue
 		}
@@ -369,13 +369,13 @@ func (ma *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats ma
 		changed = true
 	}
 
-	for rwMutexName := range ma.rwMutexNames {
+	for rwMutexName := range c.rwMutexNames {
 		relativePath, ok := relativeMutexPath(rwMutexName, baseVar)
 		if !ok {
 			continue
 		}
 
-		simulated := ma.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName])
+		simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName])
 		if simulated == nil {
 			continue
 		}

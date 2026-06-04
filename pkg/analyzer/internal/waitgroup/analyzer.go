@@ -67,20 +67,20 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 }
 
 // AnalyzeFunction analyzes WaitGroup usage in a function
-func (wga *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
-	wga.function = fn
-	wga.worker = newWorkerDoneAnalyzer(fn, wga.waitGroupNames, wga.commentFilter, wga.typesInfo, wga.errorCollector)
-	wga.iteration = newIterationEstimator(fn, wga.typesInfo, wga.commentFilter)
-	wga.escape = newEscapeAnalyzer(
+func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
+	c.function = fn
+	c.worker = newWorkerDoneAnalyzer(fn, c.waitGroupNames, c.commentFilter, c.typesInfo, c.errorCollector)
+	c.iteration = newIterationEstimator(fn, c.typesInfo, c.commentFilter)
+	c.escape = newEscapeAnalyzer(
 		fn,
-		wga.relatedWaitGroupForCall,
-		wga.functionCouldManageWaitGroup,
-		wga.analyzeDoneCallsWithVisited,
-		wga.worker.isLocallyCreatedChannel,
-		func(fun ast.Expr) *ast.FuncDecl { return resolveFunctionExpr(fun, wga.typesInfo, wga.functionDecls) },
+		c.relatedWaitGroupForCall,
+		c.functionCouldManageWaitGroup,
+		c.analyzeDoneCallsWithVisited,
+		c.worker.isLocallyCreatedChannel,
+		func(fun ast.Expr) *ast.FuncDecl { return resolveFunctionExpr(fun, c.typesInfo, c.functionDecls) },
 	)
-	stats := wga.collectStats()
-	wga.validateUsage(stats)
+	stats := c.collectStats()
+	c.validateUsage(stats)
 }
 
 // Includes generated files so relatedWaitGroupForCall can resolve helpers
@@ -99,17 +99,17 @@ func buildFunctionDeclMap(files []*ast.File) map[token.Pos]*ast.FuncDecl {
 }
 
 // collectStats collects statistics for all WaitGroups in the function
-func (wga *Checker) collectStats() map[string]*Stats {
-	stats := wga.initializeStats()
-	wga.findDeferDoneCalls(stats)
-	wga.collectCalls(stats)
+func (c *Checker) collectStats() map[string]*Stats {
+	stats := c.initializeStats()
+	c.findDeferDoneCalls(stats)
+	c.collectCalls(stats)
 	return stats
 }
 
 // initializeStats creates initial stats for all known WaitGroups
-func (wga *Checker) initializeStats() map[string]*Stats {
+func (c *Checker) initializeStats() map[string]*Stats {
 	stats := make(map[string]*Stats)
-	for wgName := range wga.waitGroupNames {
+	for wgName := range c.waitGroupNames {
 		stats[wgName] = &Stats{
 			addCalls:       []addCall{},
 			doneCalls:      []token.Pos{},
@@ -122,8 +122,8 @@ func (wga *Checker) initializeStats() map[string]*Stats {
 }
 
 // handleGoCall processes WaitGroup.Go() calls.
-func (wga *Checker) handleGoCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
-	if wga.commentFilter.ShouldSkipCall(call) {
+func (c *Checker) handleGoCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
+	if c.commentFilter.ShouldSkipCall(call) {
 		return
 	}
 
@@ -131,26 +131,26 @@ func (wga *Checker) handleGoCall(call *ast.CallExpr, wgName string, stats map[st
 }
 
 // handleAddCall processes Add() calls
-func (wga *Checker) handleAddCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
-	if wga.commentFilter.ShouldSkipCall(call) {
+func (c *Checker) handleAddCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
+	if c.commentFilter.ShouldSkipCall(call) {
 		return
 	}
 
 	addValue := common.GetAddValue(call)
 	addKnown := false
 	if len(call.Args) > 0 {
-		if constantValue, ok := wga.addValueAt(call.Args[0], call.Pos()); ok {
+		if constantValue, ok := c.addValueAt(call.Args[0], call.Pos()); ok {
 			// Keep exact typed constants so balance and literal loop checks see
 			// wg.Add(workers) the same way they see wg.Add(4).
 			addValue = constantValue
 			addKnown = true
 			if addValue < 0 {
-				wga.errorCollector.AddError(call.Pos(), category.AddNegative, "waitgroup '"+wgName+"' has negative Add("+strconv.Itoa(addValue)+")")
+				c.errorCollector.AddError(call.Pos(), category.AddNegative, "waitgroup '"+wgName+"' has negative Add("+strconv.Itoa(addValue)+")")
 			}
 			// Require a compile-time constant: the len(ident) heuristic above
 			// can underestimate when the collection is mutated through a closure.
-			if addValue == 0 && common.IsConstantIntExpr(call.Args[0], wga.typesInfo) {
-				wga.errorCollector.AddError(call.Pos(), category.AddZero, "waitgroup '"+wgName+"' Add(0) is a no-op")
+			if addValue == 0 && common.IsConstantIntExpr(call.Args[0], c.typesInfo) {
+				c.errorCollector.AddError(call.Pos(), category.AddZero, "waitgroup '"+wgName+"' Add(0) is a no-op")
 			}
 		}
 	}
@@ -162,8 +162,8 @@ func (wga *Checker) handleAddCall(call *ast.CallExpr, wgName string, stats map[s
 	stats[wgName].totalAdd += addValue
 }
 
-func (wga *Checker) addValueAt(expr ast.Expr, pos token.Pos) (int, bool) {
-	if value, ok := common.ConstantIntValue(expr, wga.typesInfo); ok {
+func (c *Checker) addValueAt(expr ast.Expr, pos token.Pos) (int, bool) {
+	if value, ok := common.ConstantIntValue(expr, c.typesInfo); ok {
 		return value, true
 	}
 	call, ok := expr.(*ast.CallExpr)
@@ -178,15 +178,15 @@ func (wga *Checker) addValueAt(expr ast.Expr, pos token.Pos) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	if wga.iteration == nil {
+	if c.iteration == nil {
 		return 0, false
 	}
-	return wga.iteration.collectionLengthBefore(argIdent.Name, pos)
+	return c.iteration.collectionLengthBefore(argIdent.Name, pos)
 }
 
 // handleDoneCall processes Done() calls
-func (wga *Checker) handleDoneCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
-	if wga.commentFilter.ShouldSkipCall(call) {
+func (c *Checker) handleDoneCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
+	if c.commentFilter.ShouldSkipCall(call) {
 		return
 	}
 
@@ -195,8 +195,8 @@ func (wga *Checker) handleDoneCall(call *ast.CallExpr, wgName string, stats map[
 }
 
 // handleWaitCall processes Wait() calls
-func (wga *Checker) handleWaitCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
-	if wga.commentFilter.ShouldSkipCall(call) {
+func (c *Checker) handleWaitCall(call *ast.CallExpr, wgName string, stats map[string]*Stats) {
+	if c.commentFilter.ShouldSkipCall(call) {
 		return
 	}
 
@@ -235,7 +235,7 @@ func isWaitGroupArgument(arg ast.Expr, wgName string) bool {
 	return false
 }
 
-func (wga *Checker) functionCouldManageWaitGroup(fn *ast.FuncDecl, wgName string, visited map[token.Pos]bool) bool {
+func (c *Checker) functionCouldManageWaitGroup(fn *ast.FuncDecl, wgName string, visited map[token.Pos]bool) bool {
 	if fn == nil || fn.Body == nil || wgName == "" {
 		return false
 	}
@@ -246,7 +246,7 @@ func (wga *Checker) functionCouldManageWaitGroup(fn *ast.FuncDecl, wgName string
 	visited[fn.Pos()] = true
 	defer delete(visited, fn.Pos())
 
-	return wga.analyzeDoneCallsWithVisited(fn.Body, wgName, visited).hasAnyDone
+	return c.analyzeDoneCallsWithVisited(fn.Body, wgName, visited).hasAnyDone
 }
 
 func resolveCalledFunction(call *ast.CallExpr, typesInfo *types.Info, functionDecls map[token.Pos]*ast.FuncDecl) *ast.FuncDecl {
@@ -272,17 +272,17 @@ func resolveFunctionExpr(fun ast.Expr, typesInfo *types.Info, functionDecls map[
 	return nil
 }
 
-func (wga *Checker) currentFunctionShadowsPackageLevelWaitGroup(wgName string) bool {
-	if wga.localWaitGroupNames[wgName] {
+func (c *Checker) currentFunctionShadowsPackageLevelWaitGroup(wgName string) bool {
+	if c.localWaitGroupNames[wgName] {
 		return true
 	}
 
-	if wga.function == nil || wga.function.Type == nil || wga.function.Type.Params == nil {
+	if c.function == nil || c.function.Type == nil || c.function.Type.Params == nil {
 		return false
 	}
 
-	for _, field := range wga.function.Type.Params.List {
-		typ := wga.typesInfo.TypeOf(field.Type)
+	for _, field := range c.function.Type.Params.List {
+		typ := c.typesInfo.TypeOf(field.Type)
 		if !common.IsWaitGroup(typ) {
 			continue
 		}
@@ -296,8 +296,8 @@ func (wga *Checker) currentFunctionShadowsPackageLevelWaitGroup(wgName string) b
 	return false
 }
 
-func (wga *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*ast.FuncDecl, string, bool) {
-	fn := resolveCalledFunction(call, wga.typesInfo, wga.functionDecls)
+func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*ast.FuncDecl, string, bool) {
+	fn := resolveCalledFunction(call, c.typesInfo, c.functionDecls)
 	if fn == nil || fn.Body == nil {
 		return nil, "", false
 	}
@@ -316,9 +316,9 @@ func (wga *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (
 	}
 
 	if fn.Type == nil || fn.Type.Params == nil {
-		if wga.packageLevelWaitGroupNames[wgName] &&
-			!wga.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
-			wga.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
+		if c.packageLevelWaitGroupNames[wgName] &&
+			!c.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
+			c.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
 			return fn, wgName, true
 		}
 		return nil, "", false
@@ -346,9 +346,9 @@ func (wga *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (
 		}
 	}
 
-	if wga.packageLevelWaitGroupNames[wgName] &&
-		!wga.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
-		wga.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
+	if c.packageLevelWaitGroupNames[wgName] &&
+		!c.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
+		c.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
 		return fn, wgName, true
 	}
 

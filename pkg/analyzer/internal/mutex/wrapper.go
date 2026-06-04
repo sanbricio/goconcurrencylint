@@ -73,7 +73,7 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 	if !methodNameLooksLikeWrapper(w.function.Name.Name, methodName) {
 		return false
 	}
-	
+
 	return w.anySiblingMethodContainsFieldCall(suffix, w.function.Name.Name, oppositeMethods, oppositeMethods)
 }
 

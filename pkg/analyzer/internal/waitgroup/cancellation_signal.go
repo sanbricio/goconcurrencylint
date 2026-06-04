@@ -9,7 +9,7 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
-func (wga *Checker) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName string, visited map[token.Pos]bool) bool {
+func (c *Checker) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName string, visited map[token.Pos]bool) bool {
 	if body == nil {
 		return false
 	}
@@ -25,12 +25,12 @@ func (wga *Checker) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName stri
 		}
 		for _, stmt := range selectStmt.Body.List {
 			cc, ok := stmt.(*ast.CommClause)
-			if !ok || !wga.commClauseReceivesDoneSignal(cc) {
+			if !ok || !c.commClauseReceivesDoneSignal(cc) {
 				continue
 			}
 			caseBlock := &ast.BlockStmt{List: cc.Body}
-			caseInfo := wga.analyzeDoneCallsWithVisited(caseBlock, wgName, visited)
-			if caseInfo.hasGuaranteedDone && wga.worker.blockAlwaysTerminates(caseBlock) {
+			caseInfo := c.analyzeDoneCallsWithVisited(caseBlock, wgName, visited)
+			if caseInfo.hasGuaranteedDone && c.worker.blockAlwaysTerminates(caseBlock) {
 				found = true
 				return false
 			}
@@ -40,23 +40,23 @@ func (wga *Checker) loopHasCancellationDoneExit(body *ast.BlockStmt, wgName stri
 	return found
 }
 
-func (wga *Checker) commClauseReceivesDoneSignal(cc *ast.CommClause) bool {
+func (c *Checker) commClauseReceivesDoneSignal(cc *ast.CommClause) bool {
 	if cc == nil || cc.Comm == nil {
 		return false
 	}
 
 	switch comm := cc.Comm.(type) {
 	case *ast.ExprStmt:
-		return wga.exprReceivesDoneSignal(comm.X)
+		return c.exprReceivesDoneSignal(comm.X)
 	case *ast.AssignStmt:
-		if slices.ContainsFunc(comm.Rhs, wga.exprReceivesDoneSignal) {
+		if slices.ContainsFunc(comm.Rhs, c.exprReceivesDoneSignal) {
 			return true
 		}
 	}
 	return false
 }
 
-func (wga *Checker) exprReceivesDoneSignal(expr ast.Expr) bool {
+func (c *Checker) exprReceivesDoneSignal(expr ast.Expr) bool {
 	unary, ok := expr.(*ast.UnaryExpr)
 	if !ok || unary.Op != token.ARROW {
 		return false
@@ -64,21 +64,21 @@ func (wga *Checker) exprReceivesDoneSignal(expr ast.Expr) bool {
 	switch x := unary.X.(type) {
 	case *ast.CallExpr:
 		sel, ok := x.Fun.(*ast.SelectorExpr)
-		return ok && sel.Sel.Name == "Done" && wga.callReturnsContextDoneSignal(sel.X, x)
+		return ok && sel.Sel.Name == "Done" && c.callReturnsContextDoneSignal(sel.X, x)
 	case *ast.Ident:
 		// `case <-chClose:` where chClose is closed in the enclosing function —
 		// the "close to broadcast cancellation" pattern.
-		return wga.identIsClosedChannel(x.Name)
+		return c.identIsClosedChannel(x.Name)
 	}
 	return false
 }
 
-func (wga *Checker) identIsClosedChannel(name string) bool {
-	if name == "" || wga.function == nil || wga.function.Body == nil {
+func (c *Checker) identIsClosedChannel(name string) bool {
+	if name == "" || c.function == nil || c.function.Body == nil {
 		return false
 	}
 	found := false
-	ast.Inspect(wga.function.Body, func(n ast.Node) bool {
+	ast.Inspect(c.function.Body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
@@ -99,15 +99,15 @@ func (wga *Checker) identIsClosedChannel(name string) bool {
 	return found
 }
 
-func (wga *Checker) callReturnsContextDoneSignal(receiver ast.Expr, call *ast.CallExpr) bool {
-	if wga.typesInfo == nil {
+func (c *Checker) callReturnsContextDoneSignal(receiver ast.Expr, call *ast.CallExpr) bool {
+	if c.typesInfo == nil {
 		return false
 	}
-	receiverType := types.Unalias(wga.typesInfo.TypeOf(receiver))
+	receiverType := types.Unalias(c.typesInfo.TypeOf(receiver))
 	if !common.MatchesPkgAndName(receiverType, "context", "Context") {
 		return false
 	}
-	typ := types.Unalias(wga.typesInfo.TypeOf(call))
+	typ := types.Unalias(c.typesInfo.TypeOf(call))
 	ch, ok := typ.(*types.Chan)
 	if !ok || ch.Dir() == types.SendOnly {
 		return false
