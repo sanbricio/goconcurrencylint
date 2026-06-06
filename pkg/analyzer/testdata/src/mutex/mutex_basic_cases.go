@@ -112,6 +112,28 @@ func GoodDeferUnlock() {
 	defer mu.Unlock()
 }
 
+type conditionalBufferedConn struct {
+	mu           sync.Mutex
+	buffered     bool
+	flushStarted bool
+}
+
+// Good: the lock is released immediately on the non-buffered path, and by the
+// deferred closure on the buffered path.
+func (c *conditionalBufferedConn) GoodConditionalDeferFunctionUnlock() {
+	c.mu.Lock()
+	if c.buffered {
+		defer func() {
+			c.flushStarted = true
+			c.mu.Unlock()
+		}()
+	} else {
+		c.mu.Unlock()
+	}
+
+	_ = c.flushStarted
+}
+
 // TryLock success branch owns the lock and may unlock it.
 func GoodTryLockUnlocksOnlyOnSuccess() {
 	var mu sync.Mutex

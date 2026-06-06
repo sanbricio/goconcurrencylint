@@ -54,6 +54,12 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return false
 	}
 
+	// A single-statement Lock/Unlock split across sibling methods is an
+	// intentional cross-method barrier, not a leak.
+	if w.isBarrierPairHalf(varName, methodName, oppositeMethods) {
+		return true
+	}
+
 	if _, fieldSuffix, ok := splitBaseAndSuffix(varName); ok &&
 		methodNameLooksLikeWrapper(w.function.Name.Name, methodName) &&
 		w.anySiblingMethodContainsFieldSuffix(fieldSuffix, w.function.Name.Name, oppositeMethods, oppositeMethods) {
@@ -173,6 +179,67 @@ func (w *wrapperResolver) anySiblingMethodContainsFieldSuffix(fieldSuffix, exclu
 
 func methodNameLooksLikeWrapper(fnName, syncMethod string) bool {
 	return methodNameMatchesAnyHint(fnName, []string{syncMethod})
+}
+
+// isBarrierPairHalf reports whether the current method consists of exactly one
+// mutex call on a field, balanced by a sibling method consisting of exactly one
+// matching opposite call on the same field. Both halves being single statements
+// is the signal that the split across methods is an intentional barrier/latch
+// rather than a forgotten unlock, so it holds regardless of the method names.
+func (w *wrapperResolver) isBarrierPairHalf(varName, methodName string, oppositeMethods []string) bool {
+	_, fieldSuffix, ok := splitBaseAndSuffix(varName)
+	if !ok {
+		return false
+	}
+	if !bodyIsSingleFieldSuffixCall(w.function.Body, fieldSuffix, []string{methodName}) {
+		return false
+	}
+	return w.anySiblingBodyIsSingleFieldSuffixCall(fieldSuffix, w.function.Name.Name, oppositeMethods)
+}
+
+func (w *wrapperResolver) anySiblingBodyIsSingleFieldSuffixCall(fieldSuffix, excludeMethod string, methodNames []string) bool {
+	receiverType := receiverTypeName(w.function)
+	if receiverType == "" {
+		return false
+	}
+
+	for methodName, fn := range w.receiverMethods[receiverType] {
+		if methodName == excludeMethod || fn == nil {
+			continue
+		}
+		if bodyIsSingleFieldSuffixCall(fn.Body, fieldSuffix, methodNames) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// bodyIsSingleFieldSuffixCall reports whether body is exactly one expression
+// statement calling one of methodNames on a field whose suffix equals
+// fieldSuffix (e.g. body `{ b.lock.Unlock() }` with suffix "lock").
+func bodyIsSingleFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string, methodNames []string) bool {
+	if body == nil || len(body.List) != 1 {
+		return false
+	}
+
+	exprStmt, ok := body.List[0].(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+
+	call, ok := exprStmt.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !containsMethod(methodNames, sel.Sel.Name) {
+		return false
+	}
+
+	_, suffix, ok := splitBaseAndSuffix(common.GetVarName(sel.X))
+	return ok && suffix == fieldSuffix
 }
 
 func functionBodyContainsFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string, methodNames []string) bool {

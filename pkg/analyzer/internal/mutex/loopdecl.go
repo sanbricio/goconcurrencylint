@@ -44,35 +44,27 @@ func (d *loopMutexDetector) check(loopBody *ast.BlockStmt) {
 				if !ok {
 					continue
 				}
-				d.reportValueSpec(vs)
+				d.reportValueSpec(vs, loopBody)
 			}
 		case *ast.AssignStmt:
 			if s.Tok == token.DEFINE {
-				d.reportAssign(s)
+				d.reportAssign(s, loopBody)
 			}
 		}
 	}
 }
 
-func (d *loopMutexDetector) reportValueSpec(vs *ast.ValueSpec) {
+func (d *loopMutexDetector) reportValueSpec(vs *ast.ValueSpec, loopBody *ast.BlockStmt) {
 	for _, name := range vs.Names {
 		obj := d.typesInfo.Defs[name]
 		if obj == nil {
 			continue
 		}
-		typ := obj.Type()
-		switch {
-		case common.IsMutex(typ):
-			d.reporter.AddError(name.Pos(),
-				category.MutexInLoop, "mutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
-		case common.IsRWMutex(typ):
-			d.reporter.AddError(name.Pos(),
-				category.MutexInLoop, "rwmutex '"+name.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
-		}
+		d.reportMutexDecl(obj.Type(), name.Name, name.Pos(), loopBody)
 	}
 }
 
-func (d *loopMutexDetector) reportAssign(s *ast.AssignStmt) {
+func (d *loopMutexDetector) reportAssign(s *ast.AssignStmt, loopBody *ast.BlockStmt) {
 	for i, lhs := range s.Lhs {
 		ident, ok := lhs.(*ast.Ident)
 		if !ok || i >= len(s.Rhs) {
@@ -82,14 +74,78 @@ func (d *loopMutexDetector) reportAssign(s *ast.AssignStmt) {
 		if typ == nil {
 			continue
 		}
-		typ = common.DerefOnceAndUnalias(typ)
-		switch {
-		case common.IsMutex(typ):
-			d.reporter.AddError(ident.Pos(),
-				category.MutexInLoop, "mutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
-		case common.IsRWMutex(typ):
-			d.reporter.AddError(ident.Pos(),
-				category.MutexInLoop, "rwmutex '"+ident.Name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
-		}
+		d.reportMutexDecl(common.DerefOnceAndUnalias(typ), ident.Name, ident.Pos(), loopBody)
 	}
+}
+
+// reportMutexDecl flags a mutex/rwmutex declared inside a loop, unless the mutex
+// is shared with per-iteration goroutines that are joined before the iteration
+// ends, in which case a fresh mutex per iteration is intentional.
+func (d *loopMutexDetector) reportMutexDecl(typ types.Type, name string, pos token.Pos, loopBody *ast.BlockStmt) {
+	isMutex := common.IsMutex(typ)
+	isRWMutex := common.IsRWMutex(typ)
+	if !isMutex && !isRWMutex {
+		return
+	}
+
+	if mutexProtectsJoinedWorkers(loopBody, name) {
+		return
+	}
+
+	mutexType := "mutex"
+	if isRWMutex {
+		mutexType = "rwmutex"
+	}
+	d.reporter.AddError(pos, category.MutexInLoop,
+		mutexType+" '"+name+"' declared inside loop, each iteration creates a new mutex that cannot protect shared state")
+}
+
+// mutexProtectsJoinedWorkers reports whether the loop-declared mutex is captured
+// by a goroutine in the same iteration that is then joined (a `.Wait()` call), so
+// the workers cannot outlive the iteration.
+func mutexProtectsJoinedWorkers(loopBody *ast.BlockStmt, varName string) bool {
+	return blockContainsWaitCall(loopBody) && goroutineCapturesVar(loopBody, varName)
+}
+
+// blockContainsWaitCall reports whether block contains a `.Wait()` call
+// (sync.WaitGroup, errgroup.Group, etc.).
+func blockContainsWaitCall(block *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(block, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Wait" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// goroutineCapturesVar reports whether block launches a goroutine whose call
+// references varName.
+func goroutineCapturesVar(block *ast.BlockStmt, varName string) bool {
+	found := false
+	ast.Inspect(block, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		ast.Inspect(goStmt.Call, func(inner ast.Node) bool {
+			if ident, ok := inner.(*ast.Ident); ok && ident.Name == varName {
+				found = true
+				return false
+			}
+			return true
+		})
+		return !found
+	})
+	return found
 }

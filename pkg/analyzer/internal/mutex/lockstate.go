@@ -25,6 +25,10 @@ func (c *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[strin
 		return
 	}
 
+	if c.applyLocalFunctionCallLifecycleEffects(call, stats) {
+		return
+	}
+
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return
@@ -88,6 +92,7 @@ func (c *Checker) handleMutexCall(varName, methodName string, pos token.Pos, sta
 		}
 		stats[varName].lock++
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
+		c.creditFlagGuardedRelease(varName, stats)
 	case "TryLock":
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
@@ -110,6 +115,16 @@ func (c *Checker) handleMutexCall(varName, methodName string, pos token.Pos, sta
 	}
 }
 
+// creditFlagGuardedRelease records a deferred-unlock credit for a lock whose
+// release is delegated to a deferred, flag-guarded unlock (see
+// detectFlagGuardedReleases): the acquisition is balanced like
+// `mu.Lock(); defer mu.Unlock()`.
+func (c *Checker) creditFlagGuardedRelease(varName string, stats map[string]*Stats) {
+	if c.flagGuardedMutexes[varName] {
+		stats[varName].deferUnlock++
+	}
+}
+
 // handleRWMutexCall processes rwmutex method calls
 func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, stats map[string]*Stats) {
 	if c.wrapper.resolve(varName, methodName) {
@@ -128,6 +143,7 @@ func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, s
 		}
 		stats[varName].lock++
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
+		c.creditFlagGuardedRelease(varName, stats)
 	case "TryLock":
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--

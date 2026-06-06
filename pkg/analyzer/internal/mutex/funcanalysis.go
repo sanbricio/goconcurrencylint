@@ -21,6 +21,10 @@ type funcAnalysis struct {
 	labelGotoSnapshots     map[string]map[string]*Stats
 	simulationStack        map[methodSimulationKey]bool
 	localFuncStack         map[*ast.FuncLit]bool
+
+	// flagGuardedMutexes holds mutexes released by a deferred, flag-guarded unlock
+	// (see detectFlagGuardedReleases). Populated once per real function.
+	flagGuardedMutexes map[string]bool
 }
 
 func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {

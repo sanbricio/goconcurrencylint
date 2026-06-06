@@ -187,12 +187,14 @@ func (c *Checker) sameBranchState(a, b *Stats) bool {
 		return a == b
 	}
 
-	return a.lock == b.lock &&
-		a.rlock == b.rlock &&
+	// Compare the net outstanding lock count rather than the raw lock and
+	// deferUnlock fields. Two branches that both leave the lock released by
+	// function exit are equivalent even when one releases directly and the
+	// other defers it (lock=1,deferUnlock=1 vs lock=0,deferUnlock=0).
+	return remainingLockCount(a.lock, a.deferUnlock) == remainingLockCount(b.lock, b.deferUnlock) &&
+		remainingLockCount(a.rlock, a.deferRUnlock) == remainingLockCount(b.rlock, b.deferRUnlock) &&
 		a.borrowedLock == b.borrowedLock &&
-		a.borrowedRLock == b.borrowedRLock &&
-		a.deferUnlock == b.deferUnlock &&
-		a.deferRUnlock == b.deferRUnlock
+		a.borrowedRLock == b.borrowedRLock
 }
 
 // analyzeGoStatement handles goroutine statements

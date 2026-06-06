@@ -73,6 +73,47 @@ func GoodConstCountMatchesMultipleForLoopGoroutines() {
 	wg.Wait()
 }
 
+func GoodRangeLoopAddWithDeferredGoroutineDone(shardsByKeyspace map[string][]string) {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	mu.Lock()
+	for keyspace, shards := range shardsByKeyspace {
+		wg.Add(1)
+		go func(keyspace string, shards []string) {
+			defer wg.Done()
+
+			if len(shards) == 0 {
+				mu.Lock()
+				defer mu.Unlock()
+				shardsByKeyspace[keyspace] = []string{"0"}
+				return
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			shardsByKeyspace[keyspace] = shards[:1]
+		}(keyspace, shards)
+	}
+	mu.Unlock()
+
+	wg.Wait()
+}
+
+func GoodAddLenThenLaunchRangeWorkers(trace []int) {
+	var wg sync.WaitGroup
+
+	wg.Add(len(trace))
+	for _, req := range trace {
+		go func(req int) {
+			defer wg.Done()
+			_ = req
+		}(req)
+	}
+
+	wg.Wait()
+}
+
 // Add inside a loop but Done may be missing in some paths
 func BadLoopAddMissingDone() {
 	var wg sync.WaitGroup
@@ -373,6 +414,28 @@ func BadConditionalDone() {
 			wg.Done()
 		}
 	}()
+	wg.Wait()
+}
+
+func BadConditionalEventDoneCanLeaveWaitHanging(events <-chan string) {
+	shards := []string{"-40", "40-80", "80-"}
+	seen := make(map[string]bool, len(shards))
+	var wg sync.WaitGroup
+
+	for _, shard := range shards {
+		seen[shard] = false
+		wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	}
+
+	go func() {
+		for shard := range events {
+			if !seen[shard] {
+				seen[shard] = true
+				wg.Done()
+			}
+		}
+	}()
+
 	wg.Wait()
 }
 

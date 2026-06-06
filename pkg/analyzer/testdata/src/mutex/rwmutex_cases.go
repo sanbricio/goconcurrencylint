@@ -303,6 +303,38 @@ func GoodRWMutexCorrectWriteAPI() {
 	mu.Unlock()
 }
 
+type oneWayLatchPendingResult struct {
+	executing sync.RWMutex
+}
+
+func (r *oneWayLatchPendingResult) GoodCreateLocksUntilBroadcast() {
+	r.executing.Lock()
+}
+
+func (r *oneWayLatchPendingResult) GoodBroadcastUnlocksCreateLock() {
+	r.executing.Unlock()
+}
+
+func (r *oneWayLatchPendingResult) BadWaitUsesReadLockAsOneWayLatch() {
+	r.executing.RLock() // want "rwmutex 'r.executing' is rlocked but not runlocked"
+}
+
+type crossMethodBarrier struct {
+	lock sync.RWMutex
+}
+
+func (b *crossMethodBarrier) GoodCreateThreadsHoldsBarrier() {
+	b.lock.Lock()
+}
+
+func (b *crossMethodBarrier) GoodRunTestReleasesBarrier() {
+	b.lock.Unlock()
+}
+
+func (b *crossMethodBarrier) BadWorkerNeverReleasesReadBarrier() {
+	b.lock.RLock() // want "rwmutex 'b.lock' is rlocked but not runlocked"
+}
+
 // Double unlocks (runlock twice)
 func BadRWDoubleRUnlock() {
 	var mu sync.RWMutex
