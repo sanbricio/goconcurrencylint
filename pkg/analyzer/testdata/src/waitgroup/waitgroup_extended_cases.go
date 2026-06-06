@@ -121,6 +121,33 @@ func GoodReuseWaitGroup() {
 	wg.Wait()
 }
 
+type TwoPhaseBench struct {
+	wg      sync.WaitGroup
+	barrier sync.RWMutex
+	threads int
+}
+
+func (b *TwoPhaseBench) GoodTwoPhaseWaitGroupLifecycle() {
+	b.barrier.Lock()
+
+	for i := 0; i < b.threads; i++ {
+		b.wg.Add(1)
+		go b.clientLoop()
+	}
+
+	b.wg.Wait()
+	b.wg.Add(b.threads)
+	b.barrier.Unlock()
+	b.wg.Wait()
+}
+
+func (b *TwoPhaseBench) clientLoop() {
+	b.wg.Done()
+	b.barrier.RLock()
+	b.barrier.RUnlock()
+	b.wg.Done()
+}
+
 // ---------- Struct Member Patterns ----------
 
 type MyStruct struct {

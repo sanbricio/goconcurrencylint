@@ -168,6 +168,27 @@ func GoodMutexInFuncLiteralInsideLoop() {
 	}
 }
 
+func GoodPerIterationMutexProtectsPerIterationState(shards []int) {
+	for _, shard := range shards {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		results := make([]int, 0, 2)
+
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(value int) {
+				defer wg.Done()
+				mu.Lock()
+				results = append(results, value)
+				mu.Unlock()
+			}(shard)
+		}
+
+		wg.Wait()
+		_ = results
+	}
+}
+
 // Bad: Lock with defer Unlock in a loop stacks defers until the function returns.
 func BadForLoopDeferUnlock() {
 	var mu sync.Mutex
@@ -945,6 +966,24 @@ func (h *HelperUnlockedState) GoodHelperReleasesCallerLockSync() {
 	h.releaseHelper()
 }
 
+type helperReleasedShard struct {
+	mu   sync.RWMutex
+	size int
+}
+
+func GoodHelperReleasesRWMutexField(shard *helperReleasedShard) {
+	shard.mu.Lock()
+	if shard.size > 10 {
+		releaseShardLock(shard)
+		return
+	}
+	shard.mu.Unlock()
+}
+
+func releaseShardLock(shard *helperReleasedShard) {
+	shard.mu.Unlock()
+}
+
 // Asynchronous release: `go h.releaseHelper()` runs the Unlock in a separate
 // goroutine that may not have started by the time the function returns, so
 // the caller exits while the lock is still held. Flag as locked-but-not-unlocked.
@@ -1383,6 +1422,29 @@ func GoodConditionalUnlockBeforePanic(isRecovering bool) {
 	}
 }
 
+type chunkedStream struct {
+	mu                sync.Mutex
+	chunkingEnabled   bool
+	accumulatedEnough bool
+}
+
+// Good: the deferred unlock is guarded by the same local flag that is set only
+// after the later lock acquisition succeeds.
+func (s *chunkedStream) GoodDeferredUnlockGuardedByHeldFlag() {
+	lockHeld := false
+	defer func() {
+		if lockHeld {
+			s.mu.Unlock()
+			lockHeld = false
+		}
+	}()
+
+	if s.chunkingEnabled && s.accumulatedEnough {
+		s.mu.Lock()
+		lockHeld = true
+	}
+}
+
 type goodCallerManagedStream struct {
 	mu sync.RWMutex
 }
@@ -1410,6 +1472,26 @@ func GoodCallerManagedByParameter(mu *sync.Mutex, needLock bool) error {
 		return err
 	}
 	return nil
+}
+
+type closeLockedEngine struct {
+	mu     sync.Mutex
+	isOpen bool
+}
+
+func (e *closeLockedEngine) GoodCloseTransfersUnlockToCloseLocked() {
+	e.mu.Lock()
+	if !e.isOpen {
+		e.mu.Unlock()
+		return
+	}
+
+	e.closeLocked()
+}
+
+func (e *closeLockedEngine) closeLocked() {
+	e.isOpen = false
+	e.mu.Unlock()
 }
 
 func decodeFP() error   { return nil }

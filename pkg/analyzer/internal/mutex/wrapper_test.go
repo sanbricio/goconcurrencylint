@@ -75,3 +75,51 @@ func (s *S) RUnlock() { s.mu.RUnlock() }`
 		t.Error("expected s.mu.RUnlock() to be recognized as a borrowed wrapper")
 	}
 }
+
+func TestWrapperResolver_CrossMethodBarrierByRole(t *testing.T) {
+	// Methods named by role rather than "Lock"/"Unlock", each a single statement:
+	// a write Lock balanced by a sibling write Unlock on the same field is an
+	// intentional barrier, recognized structurally without a name hint.
+	src := `package p
+import "sync"
+type B struct{ lock sync.RWMutex }
+func (b *B) Hold()    { b.lock.Lock() }
+func (b *B) Release() { b.lock.Unlock() }`
+
+	w := buildResolver(t, src, "B", "Hold", false)
+	if !w.resolve("b.lock", "Lock") {
+		t.Error("a single-statement Lock balanced by a single-statement Unlock sibling must be recognized as a barrier pair")
+	}
+}
+
+func TestWrapperResolver_BarrierRequiresSingleStatement(t *testing.T) {
+	// The Lock method does work besides locking, so it is not a pure barrier
+	// half; with role names and no opposite call inside, it stays unmatched.
+	src := `package p
+import "sync"
+type B struct{ lock sync.RWMutex }
+func (b *B) Hold()    { b.lock.Lock(); b.work() }
+func (b *B) Release() { b.lock.Unlock() }
+func (b *B) work()    {}`
+
+	w := buildResolver(t, src, "B", "Hold", false)
+	if w.resolve("b.lock", "Lock") {
+		t.Error("a multi-statement method must not be treated as a barrier half")
+	}
+}
+
+func TestWrapperResolver_BarrierNeedsOppositeSibling(t *testing.T) {
+	// RLock with no single-statement RUnlock sibling (the read side is never
+	// released): the lock is genuinely unmatched and must be reported.
+	src := `package p
+import "sync"
+type B struct{ lock sync.RWMutex }
+func (b *B) Hold()     { b.lock.Lock() }
+func (b *B) Release()  { b.lock.Unlock() }
+func (b *B) ReadHold() { b.lock.RLock() }`
+
+	w := buildResolver(t, src, "B", "ReadHold", false)
+	if w.resolve("b.lock", "RLock") {
+		t.Error("RLock without a matching RUnlock sibling must stay unmatched")
+	}
+}

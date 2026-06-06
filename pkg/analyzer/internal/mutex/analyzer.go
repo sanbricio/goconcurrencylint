@@ -94,6 +94,7 @@ func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects)
 	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.function)
 	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
+	c.flagGuardedMutexes = c.detectFlagGuardedReleases(fn)
 	c.stats = initialStats(c.mutexNames, c.rwMutexNames)
 	lockOrder := newLockOrderDetector(c.mutexNames, c.rwMutexNames, c.commentFilter, c.typesInfo, c.errorCollector)
 	lockOrder.check(fn.Body)
@@ -385,6 +386,121 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 	}
 
 	return changed
+}
+
+// applyLocalFunctionCallLifecycleEffects models a call to a top-level (non-method)
+// function that releases a lock held on one of its arguments, e.g.
+// `releaseShardLock(shard)` whose body runs `shard.mu.Unlock()`. Without this the
+// caller appears to leak the lock on the delegated path. It mirrors
+// applyLocalMethodLifecycleEffects but maps the locked variable through the
+// argument position to the callee's parameter name.
+func (c *Checker) applyLocalFunctionCallLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return false
+	}
+
+	callee := c.topLevelFunctionNamed(ident.Name)
+	if callee == nil || callee.Body == nil || callee == c.function {
+		return false
+	}
+
+	changed := false
+	applyAll := func(names map[string]bool, isRWMutex bool) {
+		for name := range names {
+			if c.applyArgumentReleaseEffect(call, callee, name, isRWMutex, stats) {
+				changed = true
+			}
+		}
+	}
+
+	applyAll(c.mutexNames, false)
+	applyAll(c.rwMutexNames, true)
+	return changed
+}
+
+// applyArgumentReleaseEffect simulates the callee's effect on a single mutex that
+// the caller passes in as an argument, remapping the caller's variable to the
+// matching parameter name inside the callee.
+func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.FuncDecl, mutexName string, isRWMutex bool, stats map[string]*Stats) bool {
+	base, suffix, ok := splitBaseAndSuffix(mutexName)
+	if !ok {
+		return false
+	}
+
+	paramName, ok := calleeParamNameForArg(call, callee, base)
+	if !ok {
+		return false
+	}
+
+	simulated := c.simulateMethodEffect(callee, paramName+"."+suffix, isRWMutex, stats[mutexName])
+	if simulated == nil {
+		return false
+	}
+
+	stats[mutexName] = simulated
+	return true
+}
+
+// topLevelFunctionNamed returns the package-level (non-method) function with the
+// given name, or nil when there is none.
+func (c *Checker) topLevelFunctionNamed(name string) *ast.FuncDecl {
+	for _, fn := range c.functions {
+		if fn != nil && fn.Recv == nil && fn.Name != nil && fn.Name.Name == name {
+			return fn
+		}
+	}
+	return nil
+}
+
+// calleeParamNameForArg returns the callee parameter name that receives the
+// argument whose variable name equals base. It returns false when the argument
+// is absent or the matching parameter is unnamed or blank.
+func calleeParamNameForArg(call *ast.CallExpr, callee *ast.FuncDecl, base string) (string, bool) {
+	if callee.Type == nil {
+		return "", false
+	}
+
+	argIndex := -1
+	for i, arg := range call.Args {
+		if common.GetVarName(arg) == base {
+			argIndex = i
+			break
+		}
+	}
+	if argIndex < 0 {
+		return "", false
+	}
+
+	names := flattenParamNames(callee.Type.Params)
+	if argIndex >= len(names) || names[argIndex] == "" {
+		return "", false
+	}
+	return names[argIndex], true
+}
+
+// flattenParamNames returns one entry per positional parameter, using "" for
+// unnamed or blank ("_") parameters so the slice index lines up with call args.
+func flattenParamNames(params *ast.FieldList) []string {
+	if params == nil {
+		return nil
+	}
+
+	var names []string
+	for _, field := range params.List {
+		if len(field.Names) == 0 {
+			names = append(names, "")
+			continue
+		}
+		for _, name := range field.Names {
+			if name == nil || name.Name == "_" {
+				names = append(names, "")
+				continue
+			}
+			names = append(names, name.Name)
+		}
+	}
+	return names
 }
 
 // removeFirstLockPos removes the first lock position from the list
