@@ -1,31 +1,39 @@
-name: Tag binaries
+name: Release binaries
 
 # Tagsmith owns CHANGELOG.md and GitHub Release creation locally. This workflow
-# only validates tagged commits and stores the compiled binaries as run artifacts.
+# runs after Tagsmith publishes the release and attaches compiled binaries to it.
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to backfill, for example v0.4.0'
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
-    name: Build binaries
+    name: Build and upload binaries
     runs-on: ubuntu-latest
     env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
 
-      - name: Validate tag source branch
+      - name: Validate release tag source branch
         run: |
-          git fetch origin "${DEFAULT_BRANCH}"
-          git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}"
+          git fetch origin "${DEFAULT_BRANCH}" --tags
+          tag_commit="$(git rev-list -n 1 "${TAG_NAME}")"
+          git merge-base --is-ancestor "${tag_commit}" "origin/${DEFAULT_BRANCH}"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -43,8 +51,7 @@ jobs:
           GOOS=darwin  GOARCH=arm64 go build -o dist/goconcurrencylint-darwin-arm64  ./cmd/goconcurrencylint
           GOOS=windows GOARCH=amd64 go build -o dist/goconcurrencylint-windows-amd64.exe ./cmd/goconcurrencylint
 
-      - name: Upload binaries
-        uses: actions/upload-artifact@v7
-        with:
-          name: goconcurrencylint-${{ github.ref_name }}
-          path: dist/*
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${TAG_NAME}" dist/* --clobber
