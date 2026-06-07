@@ -1,0 +1,50 @@
+name: Tag binaries
+
+# Tagsmith owns CHANGELOG.md and GitHub Release creation locally. This workflow
+# only validates tagged commits and stores the compiled binaries as run artifacts.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag source branch
+        run: |
+          git fetch origin "${DEFAULT_BRANCH}"
+          git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${DEFAULT_BRANCH}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run tests
+        run: go test -race ./...
+
+      - name: Build binaries
+        run: |
+          GOOS=linux   GOARCH=amd64 go build -o dist/goconcurrencylint-linux-amd64   ./cmd/goconcurrencylint
+          GOOS=linux   GOARCH=arm64 go build -o dist/goconcurrencylint-linux-arm64   ./cmd/goconcurrencylint
+          GOOS=darwin  GOARCH=amd64 go build -o dist/goconcurrencylint-darwin-amd64  ./cmd/goconcurrencylint
+          GOOS=darwin  GOARCH=arm64 go build -o dist/goconcurrencylint-darwin-arm64  ./cmd/goconcurrencylint
+          GOOS=windows GOARCH=amd64 go build -o dist/goconcurrencylint-windows-amd64.exe ./cmd/goconcurrencylint
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: goconcurrencylint-${{ github.ref_name }}
+          path: dist/*

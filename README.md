@@ -229,7 +229,7 @@ goconcurrencylint/
 │   └── testdata/src/            # analysistest fixtures
 ├── assets/                      # Logo and branding
 ├── ARCHITECTURE.md              # Internal design & data flow
-└── .github/workflows/           # CI and release pipelines
+└── .github/workflows/           # CI, tag build, and integration pipelines
 ```
 
 ## Contributing

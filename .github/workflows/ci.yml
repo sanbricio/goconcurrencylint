@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [ main, feature/**, bugfix/** , hotfix/**]
+    paths-ignore:
+      - 'CHANGELOG.md'
   pull_request:
     branches: [ main ]
 
