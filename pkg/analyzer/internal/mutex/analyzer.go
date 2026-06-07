@@ -34,6 +34,10 @@ type Checker struct {
 	// treat it as read-only.
 	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
 
+	// lifecycleScanCache memoizes per-function AST scans (returned idents and
+	// composite literals), shared by reference across functions; read-only.
+	lifecycleScanCache *lifecycleScanCache
+
 	*funcAnalysis
 }
 
@@ -69,9 +73,31 @@ type deferErrorCollector struct {
 	badDeferRUnlock map[string]bool
 }
 
-// NewChecker creates a new mutex checker. fr supplies the mutex and
-// rwmutex names visible inside the function being analyzed.
-func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, files []*ast.File) *Checker {
+// packageScope holds analysis state shared by every function in a package: the
+// receiver-method index, the function list, and the lifecycle caches. Building
+// it once per pass (instead of once per function) is what keeps the lifecycle
+// ownership checks from rescanning every package function for each analyzed
+// function.
+type packageScope struct {
+	receiverMethods       map[string]map[string]*ast.FuncDecl
+	functions             []*ast.FuncDecl
+	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
+	scanCache             *lifecycleScanCache
+}
+
+func newPackageScope(files []*ast.File) *packageScope {
+	return &packageScope{
+		receiverMethods:       buildReceiverMethodMap(files),
+		functions:             collectFunctionDecls(files),
+		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
+		scanCache:             newLifecycleScanCache(),
+	}
+}
+
+// NewChecker creates a new mutex checker. fr supplies the mutex and rwmutex
+// names visible inside the function being analyzed; scope carries the
+// package-wide state shared across functions.
+func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, cf *commentfilter.CommentFilter, typesInfo *types.Info, scope *packageScope) *Checker {
 	term := newTerminationAnalyzer(typesInfo)
 	c := &Checker{
 		mutexNames:            fr.Mutexes,
@@ -79,10 +105,11 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		errorCollector:        errorCollector,
 		commentFilter:         cf,
 		typesInfo:             typesInfo,
-		receiverMethods:       buildReceiverMethodMap(files),
-		functions:             collectFunctionDecls(files),
+		receiverMethods:       scope.receiverMethods,
+		functions:             scope.functions,
 		termination:           term,
-		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
+		explicitTransferCache: scope.explicitTransferCache,
+		lifecycleScanCache:    scope.scanCache,
 	}
 	c.loopCarry = newLoopCarryAnalyzer(c.mutexNames, c.rwMutexNames, cf, errorCollector, term)
 	return c
@@ -91,10 +118,10 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	c.funcAnalysis = newFuncAnalysis(fn)
 	c.tryLock = newTryLockTracker(c.mutexNames, c.rwMutexNames, c.commentFilter, c.errorCollector)
-	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects)
-	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.function)
+	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects, c.typesInfo)
+	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.lifecycleScanCache, c.function)
 	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
-	c.flagGuardedMutexes = c.detectFlagGuardedReleases(fn)
+	c.flagGuardedFlags = c.detectFlagGuardedReleaseFlags(fn)
 	c.stats = initialStats(c.mutexNames, c.rwMutexNames)
 	lockOrder := newLockOrderDetector(c.mutexNames, c.rwMutexNames, c.commentFilter, c.typesInfo, c.errorCollector)
 	lockOrder.check(fn.Body)
@@ -195,6 +222,14 @@ func (c *Checker) varRootIsFunctionParameter(varName string) bool {
 	return false
 }
 
+// maxSimulationDepth caps how deep the lifecycle simulation recurses through
+// chained method/function calls. The simulationStack already breaks exact
+// cycles, but a wide call graph (e.g. a struct-with-mutex threaded through many
+// helpers) can still fan out into a very large simulation tree. Beyond this
+// depth we assume no net effect, which keeps analysis time bounded on large
+// real-world packages.
+const maxSimulationDepth = 24
+
 func (c *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
 	if fn == nil || fn.Body == nil {
 		return nil
@@ -204,6 +239,9 @@ func (c *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMut
 	if stack == nil {
 		stack = make(map[methodSimulationKey]bool)
 		c.simulationStack = stack
+	}
+	if len(stack) >= maxSimulationDepth {
+		return cloneStats(initial)
 	}
 
 	key := methodSimulationKey{fn: fn, varName: varName, isRWMutex: isRWMutex}
@@ -357,32 +395,34 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 
 	for mutexName := range c.mutexNames {
 		relativePath, ok := relativeMutexPath(mutexName, baseVar)
-		if !ok {
-			continue
+		if ok {
+			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName])
+			if simulated != nil {
+				stats[mutexName] = simulated
+				changed = true
+				continue
+			}
 		}
 
-		simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName])
-		if simulated == nil {
-			continue
+		if c.applyArgumentReleaseEffect(call, callee, mutexName, false, stats) {
+			changed = true
 		}
-
-		stats[mutexName] = simulated
-		changed = true
 	}
 
 	for rwMutexName := range c.rwMutexNames {
 		relativePath, ok := relativeMutexPath(rwMutexName, baseVar)
-		if !ok {
-			continue
+		if ok {
+			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName])
+			if simulated != nil {
+				stats[rwMutexName] = simulated
+				changed = true
+				continue
+			}
 		}
 
-		simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName])
-		if simulated == nil {
-			continue
+		if c.applyArgumentReleaseEffect(call, callee, rwMutexName, true, stats) {
+			changed = true
 		}
-
-		stats[rwMutexName] = simulated
-		changed = true
 	}
 
 	return changed
@@ -419,6 +459,12 @@ func (c *Checker) applyLocalFunctionCallLifecycleEffects(call *ast.CallExpr, sta
 	return changed
 }
 
+// argumentReleaseMethods are the unlock calls that make simulating a callee
+// worthwhile in applyArgumentReleaseEffect: if the callee never unlocks the
+// passed-in lock, simulating it cannot turn an unbalanced lock into a balanced
+// one, so the (recursive, expensive) simulation is skipped.
+var argumentReleaseMethods = []string{"Unlock", "RUnlock"}
+
 // applyArgumentReleaseEffect simulates the callee's effect on a single mutex that
 // the caller passes in as an argument, remapping the caller's variable to the
 // matching parameter name inside the callee.
@@ -433,7 +479,16 @@ func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.Fun
 		return false
 	}
 
-	simulated := c.simulateMethodEffect(callee, paramName+"."+suffix, isRWMutex, stats[mutexName])
+	// Cheap pre-filter before the recursive simulation: only callees that
+	// actually unlock the passed-in lock can balance it. This keeps analysis
+	// time bounded on packages that thread a struct-with-mutex through many
+	// helpers, where most callees never touch the lock.
+	releaseTarget := paramName + "." + suffix
+	if !functionBodyContainsFieldCall(callee.Body, releaseTarget, argumentReleaseMethods) {
+		return false
+	}
+
+	simulated := c.simulateMethodEffect(callee, releaseTarget, isRWMutex, stats[mutexName])
 	if simulated == nil {
 		return false
 	}
@@ -445,12 +500,7 @@ func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.Fun
 // topLevelFunctionNamed returns the package-level (non-method) function with the
 // given name, or nil when there is none.
 func (c *Checker) topLevelFunctionNamed(name string) *ast.FuncDecl {
-	for _, fn := range c.functions {
-		if fn != nil && fn.Recv == nil && fn.Name != nil && fn.Name.Name == name {
-			return fn
-		}
-	}
-	return nil
+	return topLevelFunctionNamed(c.functions, name)
 }
 
 // calleeParamNameForArg returns the callee parameter name that receives the

@@ -103,6 +103,9 @@ func (c *Checker) handleMutexCall(varName, methodName string, pos token.Pos, sta
 		stats[varName].lockPos = append(stats[varName].lockPos, pos)
 	case "Unlock":
 		if stats[varName].lock == 0 {
+			if c.unlockIsGuardedByFlag(varName, pos) {
+				return
+			}
 			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern) {
 				return
 			}
@@ -120,7 +123,7 @@ func (c *Checker) handleMutexCall(varName, methodName string, pos token.Pos, sta
 // detectFlagGuardedReleases): the acquisition is balanced like
 // `mu.Lock(); defer mu.Unlock()`.
 func (c *Checker) creditFlagGuardedRelease(varName string, stats map[string]*Stats) {
-	if c.flagGuardedMutexes[varName] {
+	if c.isFlagGuarded(varName) {
 		stats[varName].deferUnlock++
 	}
 }
@@ -162,6 +165,9 @@ func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, s
 			return
 		}
 		if stats[varName].lock == 0 {
+			if c.unlockIsGuardedByFlag(varName, pos) {
+				return
+			}
 			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern) {
 				return
 			}

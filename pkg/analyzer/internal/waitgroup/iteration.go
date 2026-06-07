@@ -182,6 +182,9 @@ func (e *iterationEstimator) collectCollectionLengthsBefore(stmts []ast.Stmt, be
 		case *ast.ForStmt:
 			iterations, ok := e.estimateForIterationsKnown(s)
 			if !ok || s.Body == nil {
+				if s.Body != nil {
+					e.invalidateIndexedCollectionLengthsInStatements(s.Body.List, lengths, known)
+				}
 				continue
 			}
 			if !e.collectCollectionLengthsBefore(s.Body.List, before, multiplier*iterations, lengths, known) {
@@ -190,6 +193,9 @@ func (e *iterationEstimator) collectCollectionLengthsBefore(stmts []ast.Stmt, be
 		case *ast.RangeStmt:
 			iterations, ok := e.estimateRangeIterationsKnown(s)
 			if !ok || s.Body == nil {
+				if s.Body != nil {
+					e.invalidateIndexedCollectionLengthsInStatements(s.Body.List, lengths, known)
+				}
 				continue
 			}
 			if !e.collectCollectionLengthsBefore(s.Body.List, before, multiplier*iterations, lengths, known) {
@@ -231,10 +237,29 @@ func (e *iterationEstimator) recordCollectionDeclLengths(stmt *ast.DeclStmt, len
 	}
 }
 
+func (e *iterationEstimator) invalidateIndexedCollectionLengthsInStatements(stmts []ast.Stmt, lengths map[string]int, known map[string]bool) {
+	for _, stmt := range stmts {
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range assign.Lhs {
+				e.invalidateIndexedCollectionLength(lhs, lengths, known)
+			}
+			return true
+		})
+	}
+}
+
 func (e *iterationEstimator) recordCollectionAssignLengths(stmt *ast.AssignStmt, multiplier int, lengths map[string]int, known map[string]bool) {
 	for i, lhs := range stmt.Lhs {
 		ident, ok := lhs.(*ast.Ident)
-		if !ok || i >= len(stmt.Rhs) {
+		if !ok {
+			e.invalidateIndexedCollectionLength(lhs, lengths, known)
+			continue
+		}
+		if i >= len(stmt.Rhs) {
 			continue
 		}
 		if e.recordAppendLength(ident.Name, stmt.Rhs[i], multiplier, lengths, known) {
@@ -242,6 +267,25 @@ func (e *iterationEstimator) recordCollectionAssignLengths(stmt *ast.AssignStmt,
 		}
 		e.setCollectionLength(ident.Name, stmt.Rhs[i], lengths, known)
 	}
+}
+
+func (e *iterationEstimator) invalidateIndexedCollectionLength(lhs ast.Expr, lengths map[string]int, known map[string]bool) {
+	var target ast.Expr
+	switch expr := lhs.(type) {
+	case *ast.IndexExpr:
+		target = expr.X
+	case *ast.IndexListExpr:
+		target = expr.X
+	default:
+		return
+	}
+
+	ident, ok := target.(*ast.Ident)
+	if !ok {
+		return
+	}
+	delete(lengths, ident.Name)
+	delete(known, ident.Name)
 }
 
 func (e *iterationEstimator) setCollectionLength(name string, expr ast.Expr, lengths map[string]int, known map[string]bool) {

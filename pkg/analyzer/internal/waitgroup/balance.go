@@ -307,7 +307,61 @@ func (b *balanceValidator) addCoveredByVariableDoneLoop(addPos token.Pos, wgName
 		}
 		return true
 	})
+	if found {
+		return true
+	}
+	found = b.addLoopCoveredByFollowingVariableDoneWorker(b.function.Body.List, addPos, wgName)
 	return found
+}
+
+func (b *balanceValidator) addLoopCoveredByFollowingVariableDoneWorker(stmts []ast.Stmt, addPos token.Pos, wgName string) bool {
+	for i, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.ForStmt:
+			if nodeContainsPos(s.Body, addPos) {
+				return b.laterStatementsHaveVariableDoneWorker(stmts[i+1:], wgName)
+			}
+			if b.addLoopCoveredByFollowingVariableDoneWorker(s.Body.List, addPos, wgName) {
+				return true
+			}
+		case *ast.RangeStmt:
+			if nodeContainsPos(s.Body, addPos) {
+				return b.laterStatementsHaveVariableDoneWorker(stmts[i+1:], wgName)
+			}
+			if b.addLoopCoveredByFollowingVariableDoneWorker(s.Body.List, addPos, wgName) {
+				return true
+			}
+		case *ast.BlockStmt:
+			if b.addLoopCoveredByFollowingVariableDoneWorker(s.List, addPos, wgName) {
+				return true
+			}
+		case *ast.IfStmt:
+			if b.addLoopCoveredByFollowingVariableDoneWorker(s.Body.List, addPos, wgName) {
+				return true
+			}
+			if block, ok := s.Else.(*ast.BlockStmt); ok && b.addLoopCoveredByFollowingVariableDoneWorker(block.List, addPos, wgName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *balanceValidator) laterStatementsHaveVariableDoneWorker(stmts []ast.Stmt, wgName string) bool {
+	for _, stmt := range stmts {
+		goStmt, ok := stmt.(*ast.GoStmt)
+		if !ok {
+			continue
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			continue
+		}
+		if b.blockHasVariableDoneLoop(fnLit.Body, wgName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *balanceValidator) loopBodyHasVariableDoneWorker(body *ast.BlockStmt, after token.Pos, wgName string) bool {

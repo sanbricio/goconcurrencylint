@@ -9,6 +9,29 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
+// returnedIdent pairs an identifier appearing in a return statement's results
+// with its enclosing return statement.
+type returnedIdent struct {
+	ident *ast.Ident
+	ret   *ast.ReturnStmt
+}
+
+// lifecycleScanCache memoizes per-function AST scans that the lifecycle checks
+// repeat for every function in the package on each unbalanced lock/unlock. It is
+// shared package-wide (like explicitTransferCache) so each function body is
+// scanned at most once instead of O(functions) times.
+type lifecycleScanCache struct {
+	returnedIdents        map[*ast.FuncDecl][]returnedIdent
+	returnedCompositeLits map[*ast.FuncDecl][]*ast.CompositeLit
+}
+
+func newLifecycleScanCache() *lifecycleScanCache {
+	return &lifecycleScanCache{
+		returnedIdents:        make(map[*ast.FuncDecl][]returnedIdent),
+		returnedCompositeLits: make(map[*ast.FuncDecl][]*ast.CompositeLit),
+	}
+}
+
 // lifecycleResolver recognizes ownership-transfer patterns where a lock is
 // acquired in one function but intentionally released by a returned handle or
 // by a caller that owns the acquire/release protocol.
@@ -17,6 +40,7 @@ type lifecycleResolver struct {
 	functions             []*ast.FuncDecl
 	typesInfo             *types.Info
 	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
+	scanCache             *lifecycleScanCache
 	function              *ast.FuncDecl
 	callerManagedCache    map[callerManagedKey]bool
 }
@@ -31,10 +55,14 @@ func newLifecycleResolver(
 	functions []*ast.FuncDecl,
 	typesInfo *types.Info,
 	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{},
+	scanCache *lifecycleScanCache,
 	function *ast.FuncDecl,
 ) *lifecycleResolver {
 	if explicitTransferCache == nil {
 		explicitTransferCache = make(map[*ast.BlockStmt]map[token.Pos]struct{})
+	}
+	if scanCache == nil {
+		scanCache = newLifecycleScanCache()
 	}
 
 	return &lifecycleResolver{
@@ -42,6 +70,7 @@ func newLifecycleResolver(
 		functions:             functions,
 		typesInfo:             typesInfo,
 		explicitTransferCache: explicitTransferCache,
+		scanCache:             scanCache,
 		function:              function,
 		callerManagedCache:    make(map[callerManagedKey]bool),
 	}
@@ -86,11 +115,14 @@ func (l *lifecycleResolver) returnsHandleFor(mutexName string, methodNames []str
 		}
 	}
 
-	return false
+	return l.returnsVariableWithReleaseFor(baseVar, suffix, methodNames)
 }
 
 func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string) bool {
-	if l.function == nil || l.function.Name == nil || !methodNameMatchesAnyHint(l.function.Name.Name, []string{"Close", "Unlock", "Release"}) {
+	if l.function == nil || l.function.Name == nil || l.function.Body == nil {
+		return false
+	}
+	if !functionBodyContainsFieldCall(l.function.Body, mutexName, matchingUnlockMethods(methodNames)) {
 		return false
 	}
 
@@ -137,6 +169,84 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 
 			targetVar := sourceVar + "." + suffix
 			if functionBodyContainsFieldCall(fn.Body, targetVar, methodNames) {
+				return true
+			}
+		}
+
+		if l.functionReturningCurrentReceiverAfterAcquire(fn, currentType, path, methodNames) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (l *lifecycleResolver) returnsVariableWithReleaseFor(baseVar, suffix string, methodNames []string) bool {
+	if l.function == nil || l.function.Body == nil || l.typesInfo == nil {
+		return false
+	}
+
+	for _, ident := range l.returnedIdentsNamed(l.function, baseVar) {
+		returnedType := baseTypeNameFromType(l.typesInfo.TypeOf(ident))
+		if returnedType == "" {
+			continue
+		}
+		if l.releaseMethodUnlocks(returnedType, "", suffix, methodNames) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (l *lifecycleResolver) functionReturningCurrentReceiverAfterAcquire(fn *ast.FuncDecl, currentType, path string, acquireMethods []string) bool {
+	if l.typesInfo == nil {
+		return false
+	}
+
+	for _, ri := range l.returnedIdents(fn) {
+		if baseTypeNameFromType(l.typesInfo.TypeOf(ri.ident)) != currentType {
+			continue
+		}
+		if functionBodyContainsFieldCallBefore(fn.Body, ri.ident.Name+"."+path, acquireMethods, ri.ret.Pos()) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *lifecycleResolver) returnsFuncFor(mutexName string, methodNames []string) bool {
+	if l.function == nil || l.function.Body == nil {
+		return false
+	}
+
+	for _, name := range l.returnedFunctionNames(l.function) {
+		fn := topLevelFunctionNamed(l.functions, name)
+		if fn != nil && functionBodyContainsFieldCall(fn.Body, mutexName, methodNames) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (l *lifecycleResolver) isReturnedFuncReleaseFor(mutexName string, acquireMethods []string) bool {
+	if l.function == nil || l.function.Name == nil || l.function.Body == nil {
+		return false
+	}
+	if !functionBodyContainsFieldCall(l.function.Body, mutexName, matchingUnlockMethods(acquireMethods)) {
+		return false
+	}
+
+	for _, fn := range l.functions {
+		if fn == nil || fn.Body == nil || fn == l.function {
+			continue
+		}
+		for _, ret := range l.returnedFunctionNames(fn) {
+			if ret != l.function.Name.Name {
+				continue
+			}
+			if functionBodyContainsFieldCallBefore(fn.Body, mutexName, acquireMethods, l.functionReturnPos(fn, ret)) {
 				return true
 			}
 		}
@@ -216,8 +326,8 @@ func (l *lifecycleResolver) releaseMethodUnlocks(returnedType, fieldName, suffix
 		return false
 	}
 
-	for methodName, fn := range methods {
-		if fn == nil || fn.Body == nil || !methodNameMatchesAnyHint(methodName, []string{"Close", "Unlock", "Release"}) {
+	for _, fn := range methods {
+		if fn == nil || fn.Body == nil {
 			continue
 		}
 
@@ -241,6 +351,9 @@ func (l *lifecycleResolver) releaseMethodUnlocks(returnedType, fieldName, suffix
 func (l *lifecycleResolver) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.CompositeLit {
 	if fn == nil || fn.Body == nil {
 		return nil
+	}
+	if cached, ok := l.scanCache.returnedCompositeLits[fn]; ok {
+		return cached
 	}
 
 	localValues := make(map[string]ast.Expr)
@@ -283,6 +396,7 @@ func (l *lifecycleResolver) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.C
 		return true
 	})
 
+	l.scanCache.returnedCompositeLits[fn] = returned
 	return returned
 }
 
@@ -361,6 +475,9 @@ func (l *lifecycleResolver) explicitTransferCallPositions(body *ast.BlockStmt) m
 			}
 		case *ast.GoStmt:
 			recordCall(s.Call)
+			if fnlit, ok := s.Call.Fun.(*ast.FuncLit); ok && fnlit.Body != nil {
+				visitStmtList(fnlit.Body.List)
+			}
 		case *ast.IfStmt:
 			visitStmtList(s.Body.List)
 			if s.Else != nil {
@@ -486,4 +603,83 @@ func compositeLiteralUnkeyedVarNames(lit *ast.CompositeLit) []string {
 	}
 
 	return names
+}
+
+func matchingUnlockMethods(acquireMethods []string) []string {
+	var methods []string
+	for _, acquire := range acquireMethods {
+		if release := matchingUnlockMethod(acquire); release != "" {
+			methods = append(methods, release)
+		}
+	}
+	return methods
+}
+
+func topLevelFunctionNamed(functions []*ast.FuncDecl, name string) *ast.FuncDecl {
+	for _, fn := range functions {
+		if fn != nil && fn.Recv == nil && fn.Name != nil && fn.Name.Name == name {
+			return fn
+		}
+	}
+	return nil
+}
+
+// returnedIdents returns every identifier appearing in fn's return statements
+// paired with its enclosing return. The scan is memoized per function (shared
+// package-wide) because the lifecycle checks re-scan every package function for
+// many lock/unlock pairs; without the cache this is the dominant cost on large
+// packages.
+func (l *lifecycleResolver) returnedIdents(fn *ast.FuncDecl) []returnedIdent {
+	if fn == nil || fn.Body == nil {
+		return nil
+	}
+	if cached, ok := l.scanCache.returnedIdents[fn]; ok {
+		return cached
+	}
+
+	var result []returnedIdent
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, res := range ret.Results {
+			if ident, ok := res.(*ast.Ident); ok {
+				result = append(result, returnedIdent{ident: ident, ret: ret})
+			}
+		}
+		return true
+	})
+
+	l.scanCache.returnedIdents[fn] = result
+	return result
+}
+
+func (l *lifecycleResolver) returnedFunctionNames(fn *ast.FuncDecl) []string {
+	var names []string
+	for _, ri := range l.returnedIdents(fn) {
+		if ri.ident.Name != "" && ri.ident.Name != "nil" {
+			names = append(names, ri.ident.Name)
+		}
+	}
+	return names
+}
+
+func (l *lifecycleResolver) returnedIdentsNamed(fn *ast.FuncDecl, name string) []*ast.Ident {
+	var idents []*ast.Ident
+	for _, ri := range l.returnedIdents(fn) {
+		if ri.ident.Name == name {
+			idents = append(idents, ri.ident)
+		}
+	}
+	return idents
+}
+
+func (l *lifecycleResolver) functionReturnPos(fn *ast.FuncDecl, returnedName string) token.Pos {
+	for _, ri := range l.returnedIdents(fn) {
+		if ri.ident.Name == returnedName {
+			return ri.ret.Pos()
+		}
+	}
+	return token.NoPos
 }
