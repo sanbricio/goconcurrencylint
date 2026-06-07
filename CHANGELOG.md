@@ -1,3 +1,60 @@
+## [0.4.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.4.0) - 2026-06-07
+
+### 🚀 Features
+
+- Add integration workflow and reporting script for real-world repos ([#30](https://github.com/sanbricio/goconcurrencylint/issues/30))
+- Skip analysis on generated files and add related test cases
+- Add UnwrapParenExpr function and corresponding tests for parenthesized expressions ([#36](https://github.com/sanbricio/goconcurrencylint/issues/36))
+- Implement goto label snapshot capturing and merging for mutex lock states
+- Enhance WaitGroup and Mutex Analyzers with New Cases and Logic
+- Handle parentheses in mutex method calls and add test cases ([#47](https://github.com/sanbricio/goconcurrencylint/issues/47))
+- *(mutex,waitgroup)* Detect ownership-transfer and one-way lock patterns ([#51](https://github.com/sanbricio/goconcurrencylint/issues/51))
+
+### 🐛 Bug Fixes
+
+- *(mutex)* Handle balanced guarded locks and deferred relocks
+- Update integration workflow to use stable Go version and improve error handling
+- Adjust timeout settings for integration workflow steps to improve reliability
+- *(waitgroup)* Only flag Add(0) for compile-time constants
+- *(waitgroup)* Fix two Add/Done balance false positives ([#40](https://github.com/sanbricio/goconcurrencylint/issues/40))
+- *(waitgroup)* Don't flag Add after Wait when the Wait early-exits
+- *(mutex)* Ignore go method() lifecycle effects on caller state
+- *(mutex)* Stop flagging cross-goroutine unlock handoffs ([#46](https://github.com/sanbricio/goconcurrencylint/issues/46))
+
+### 🚜 Refactor
+
+- Simplify with modernize suggestions
+- Centralize Stats copying logic and fix package name ([#28](https://github.com/sanbricio/goconcurrencylint/issues/28))
+- Introduce Reporter interface and type Category ([#29](https://github.com/sanbricio/goconcurrencylint/issues/29))
+- Centralize type matching ([#33](https://github.com/sanbricio/goconcurrencylint/issues/33))
+- Consolidate unlock, lock, and runlock checks into a single method ([#35](https://github.com/sanbricio/goconcurrencylint/issues/35))
+- Simplify varRootIsFunctionParameter by using strings.Cut for base extraction
+- Optimize ReportAll and add filterAndPrepare for diagnostics
+- Code structure for improved readability and maintainability ([#44](https://github.com/sanbricio/goconcurrencylint/issues/44))
+- Extract funcAnalysis for per-function state management in Checker ([#45](https://github.com/sanbricio/goconcurrencylint/issues/45))
+- Mutex and waitgroup analysis with tracking, detection, and lifecycle management ([#48](https://github.com/sanbricio/goconcurrencylint/issues/48))
+
+### 📚 Documentation
+
+- *(changelog)* Update for v0.3.0
+
+### ⚡ Performance
+
+- *(commentfilter)* O(log N) IsInComment, -31% on nats-server ([#31](https://github.com/sanbricio/goconcurrencylint/issues/31))
+- *(mutex)* Memoize functionIsCallerManagedReleaseFor ([#32](https://github.com/sanbricio/goconcurrencylint/issues/32))
+
+### 🌟 New Contributors
+
+- @Rafael24595 made their first contribution in [#47](https://github.com/sanbricio/goconcurrencylint/pull/47)
+- @alexandear made their first contribution
+
+### ❤️ Contributors
+
+- @sanbricio
+- @Rafael24595
+- @alexandear
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.3.0...v0.4.0
 ## [0.3.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.3.0) - 2026-05-10
 
 ### 🚀 Features
