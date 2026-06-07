@@ -1494,6 +1494,176 @@ func (e *closeLockedEngine) closeLocked() {
 	e.mu.Unlock()
 }
 
+type closeLockedEngineWithStopper struct {
+	mu         sync.Mutex
+	stopper    closeLockedStopper
+	historian  closeLockedCloseable
+	conns      closeLockedCloseable
+	tables     map[string]int
+	notifiers  map[string]int
+	lastChange int
+	isOpen     bool
+}
+
+type closeLockedStopper struct{}
+type closeLockedCloseable struct{}
+
+func (closeLockedStopper) Stop()    {}
+func (closeLockedCloseable) Close() {}
+
+func (e *closeLockedEngineWithStopper) GoodCloseTransfersUnlockToCloseLockedWithWorker() {
+	e.mu.Lock()
+	if !e.isOpen {
+		e.mu.Unlock()
+		return
+	}
+
+	e.closeLockedWithWorker()
+}
+
+func (e *closeLockedEngineWithStopper) closeLockedWithWorker() {
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		e.stopper.Stop()
+	})
+	e.historian.Close()
+	e.conns.Close()
+
+	e.tables = make(map[string]int)
+	e.lastChange = 0
+	e.notifiers = make(map[string]int)
+	e.isOpen = false
+	e.mu.Unlock()
+	wg.Wait()
+}
+
+func GoodCloseLockedCalledInsideGoroutineAfterLock(e *closeLockedEngineWithStopper, finished chan bool) {
+	go func() {
+		e.mu.Lock()
+		waitForCloseTick()
+		e.closeLockedWithWorker()
+		finished <- true
+	}()
+}
+
+func waitForCloseTick() {}
+
+type conditionalLockHeldStream struct {
+	mu      sync.Mutex
+	enabled bool
+	limit   int
+}
+
+func (s *conditionalLockHeldStream) GoodConditionalFlagGuardedUnlock(events []int) {
+	lockHeld := false
+	inTransaction := false
+	accumulatedSize := 0
+
+	defer func() {
+		if lockHeld {
+			s.mu.Unlock()
+			lockHeld = false
+		}
+	}()
+
+	for _, event := range events {
+		if event == 0 {
+			inTransaction = false
+			accumulatedSize = 0
+			if s.enabled && lockHeld {
+				s.mu.Unlock()
+				lockHeld = false
+			}
+			continue
+		}
+
+		inTransaction = true
+		accumulatedSize += event
+		if s.enabled && inTransaction && !lockHeld && accumulatedSize > s.limit {
+			s.mu.Lock()
+			lockHeld = true
+		}
+	}
+}
+
+type conditionalStreamRunner struct{}
+
+func (conditionalStreamRunner) Stream(callback func([]int) error) error {
+	return callback([]int{1, 2, 0})
+}
+
+func (s *conditionalLockHeldStream) GoodConditionalFlagGuardedUnlockInCallback(runner conditionalStreamRunner) error {
+	for {
+		lockHeld := false
+		inTransaction := false
+		accumulatedSize := 0
+
+		defer func() {
+			if lockHeld {
+				s.mu.Unlock()
+				lockHeld = false
+			}
+		}()
+
+		if err := runner.Stream(func(events []int) error {
+			for _, event := range events {
+				if event == 0 {
+					inTransaction = false
+					accumulatedSize = 0
+					if s.enabled && lockHeld {
+						s.mu.Unlock()
+						lockHeld = false
+					}
+					continue
+				}
+
+				inTransaction = true
+				accumulatedSize += event
+				if s.enabled && inTransaction && !lockHeld && accumulatedSize > s.limit {
+					s.mu.Lock()
+					lockHeld = true
+					handleConditionalChunk()
+				}
+				if s.enabled && lockHeld && !inTransaction {
+					s.mu.Unlock()
+					lockHeld = false
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+func handleConditionalChunk() {}
+
+var setupReturnedCleanupMu sync.Mutex
+
+func cleanupReturnedFromSetup() {
+	setupReturnedCleanupMu.Unlock()
+}
+
+func setupReturnsCleanup(ok bool) (func(), int) {
+	if !ok {
+		return nil, 1
+	}
+
+	setupReturnedCleanupMu.Lock()
+	return cleanupReturnedFromSetup, 0
+}
+
+func GoodSetupReturnsCleanupFunction(ok bool) int {
+	cleanup, ret := setupReturnsCleanup(ok)
+	if ret > 0 {
+		return ret
+	}
+
+	defer cleanup()
+	return 0
+}
+
 func decodeFP() error   { return nil }
 func mustPanicFP() bool { return false }
 

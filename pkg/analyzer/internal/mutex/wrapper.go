@@ -2,6 +2,7 @@ package mutex
 
 import (
 	"go/ast"
+	"go/types"
 	"slices"
 	"strings"
 
@@ -23,13 +24,15 @@ type wrapperResolver struct {
 	receiverMethods map[string]map[string]*ast.FuncDecl
 	function        *ast.FuncDecl
 	rawBodyEffects  bool
+	typesInfo       *types.Info
 }
 
-func newWrapperResolver(receiverMethods map[string]map[string]*ast.FuncDecl, function *ast.FuncDecl, rawBodyEffects bool) *wrapperResolver {
+func newWrapperResolver(receiverMethods map[string]map[string]*ast.FuncDecl, function *ast.FuncDecl, rawBodyEffects bool, typesInfo *types.Info) *wrapperResolver {
 	return &wrapperResolver{
 		receiverMethods: receiverMethods,
 		function:        function,
 		rawBodyEffects:  rawBodyEffects,
+		typesInfo:       typesInfo,
 	}
 }
 
@@ -52,6 +55,14 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 	oppositeMethods := oppositeMutexMethods(methodName)
 	if len(oppositeMethods) == 0 || w.currentMethodContainsFieldCall(varName, oppositeMethods) {
 		return false
+	}
+
+	if methodName == "RLock" && w.isOneWayReadLatch(varName) {
+		return true
+	}
+
+	if (methodName == "Lock" || methodName == "Unlock") && w.isOneWayWriteBarrier(varName, methodName) {
+		return true
 	}
 
 	// A single-statement Lock/Unlock split across sibling methods is an
@@ -81,6 +92,76 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 	}
 
 	return w.anySiblingMethodContainsFieldCall(suffix, w.function.Name.Name, oppositeMethods, oppositeMethods)
+}
+
+// isOneWayReadLatch recognizes a read lock used as a one-way "start gate": a
+// waiter/worker method RLocks and intentionally never RUnlocks because the read
+// lock is released elsewhere (e.g. a Broadcast/Release method on the same type
+// unlocks the field). This is a name-hint heuristic and only fires when BOTH the
+// current method's name looks like a waiter AND a sibling method that actually
+// releases the same field exists. The sibling requirement is the safety net:
+// a genuinely leaked latch with no releasing sibling is still reported (see
+// lonelyOneWayLatch in testdata). Trade-off: the hints are broad, so this favors
+// fewer false positives at the cost of an occasional false negative.
+func (w *wrapperResolver) isOneWayReadLatch(varName string) bool {
+	baseVar, fieldSuffix, ok := splitBaseAndSuffix(varName)
+	if !ok {
+		return false
+	}
+	if !methodNameMatchesAnyHint(w.function.Name.Name, []string{"Wait", "Loop", "Worker", "Barrier", "Gate", "Latch"}) {
+		return false
+	}
+	if functionBodyContainsFieldCall(w.function.Body, varName, []string{"RUnlock"}) {
+		return false
+	}
+	if w.anySiblingMethodContainsFieldSuffix(fieldSuffix, w.function.Name.Name, []string{"Unlock"}, []string{"Unlock", "Release", "Broadcast", "Run"}) {
+		return true
+	}
+	if receiverType := w.typeNameForBaseVar(baseVar); receiverType != "" {
+		return w.anyMethodOnTypeContainsFieldSuffix(receiverType, "", fieldSuffix, []string{"Unlock"}, []string{"Unlock", "Release", "Broadcast", "Run"})
+	}
+	return false
+}
+
+// isOneWayWriteBarrier recognizes a write Lock/Unlock split across sibling
+// methods as a deliberate cross-method barrier: e.g. Start/Open Locks and
+// Stop/Close/Release Unlocks the same field. Like isOneWayReadLatch it is a
+// name-hint heuristic guarded by the requirement that a sibling method really
+// performs the opposite operation on the field, so an unmatched Lock with no
+// releasing sibling is still reported. Trade-off: the hints (Start/Open/Run/
+// Stop...) are broad, trading a possible false negative for fewer false
+// positives on legitimate barrier pairs.
+func (w *wrapperResolver) isOneWayWriteBarrier(varName, methodName string) bool {
+	baseVar, fieldSuffix, ok := splitBaseAndSuffix(varName)
+	if !ok {
+		return false
+	}
+
+	var currentHints, siblingHints, siblingMethods []string
+	switch methodName {
+	case "Lock":
+		currentHints = []string{"Create", "Start", "Prepare", "Open"}
+		siblingHints = []string{"Unlock", "Release", "Broadcast", "Run", "Close", "Stop"}
+		siblingMethods = []string{"Unlock"}
+	case "Unlock":
+		currentHints = []string{"Unlock", "Release", "Broadcast", "Run", "Close", "Stop"}
+		siblingHints = []string{"Create", "Start", "Prepare", "Open"}
+		siblingMethods = []string{"Lock"}
+	default:
+		return false
+	}
+
+	if !methodNameMatchesAnyHint(w.function.Name.Name, currentHints) {
+		return false
+	}
+
+	if w.anySiblingMethodContainsFieldSuffix(fieldSuffix, w.function.Name.Name, siblingMethods, siblingHints) {
+		return true
+	}
+	if receiverType := w.typeNameForBaseVar(baseVar); receiverType != "" {
+		return w.anyMethodOnTypeContainsFieldSuffix(receiverType, w.function.Name.Name, fieldSuffix, siblingMethods, siblingHints)
+	}
+	return false
 }
 
 func (w *wrapperResolver) currentMethodContainsFieldCall(varName string, methodNames []string) bool {
@@ -156,7 +237,10 @@ func (w *wrapperResolver) anySiblingMethodContainsFieldSuffix(fieldSuffix, exclu
 	if receiverType == "" {
 		return false
 	}
+	return w.anyMethodOnTypeContainsFieldSuffix(receiverType, excludeMethod, fieldSuffix, fieldMethods, nameHints)
+}
 
+func (w *wrapperResolver) anyMethodOnTypeContainsFieldSuffix(receiverType, excludeMethod, fieldSuffix string, fieldMethods, nameHints []string) bool {
 	methods := w.receiverMethods[receiverType]
 	if len(methods) == 0 {
 		return false
@@ -175,6 +259,32 @@ func (w *wrapperResolver) anySiblingMethodContainsFieldSuffix(fieldSuffix, exclu
 	}
 
 	return false
+}
+
+func (w *wrapperResolver) typeNameForBaseVar(baseVar string) string {
+	if baseVar == "" {
+		return ""
+	}
+	if baseVar == common.ReceiverName(w.function) {
+		return receiverTypeName(w.function)
+	}
+	if w.function == nil || w.function.Body == nil || w.typesInfo == nil {
+		return ""
+	}
+
+	found := ""
+	ast.Inspect(w.function.Body, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		ident, ok := n.(*ast.Ident)
+		if !ok || ident.Name != baseVar {
+			return true
+		}
+		found = baseTypeNameFromType(w.typesInfo.TypeOf(ident))
+		return found == ""
+	})
+	return found
 }
 
 func methodNameLooksLikeWrapper(fnName, syncMethod string) bool {

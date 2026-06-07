@@ -86,6 +86,7 @@ func (c *Checker) reportBranchDelta(mutexName string, initial, final *Stats, isR
 // current lock/unlock pair.
 func (c *Checker) unlockDiagnosticSuppressed(mutexName string, acquireMethods []string) bool {
 	return c.lifecycle.isReleaseFor(mutexName, acquireMethods) ||
+		c.lifecycle.isReturnedFuncReleaseFor(mutexName, acquireMethods) ||
 		c.lifecycle.isCallerManagedReleaseFor(mutexName, acquireMethods) ||
 		c.functionIsParameterUnlockHelper(mutexName, acquireMethods)
 }
@@ -119,7 +120,9 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 		rlockMessage = "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
 	}
 
-	suppressFunctionLevelLock := branchType == "" && c.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods)
+	suppressFunctionLevelLock := branchType == "" &&
+		(c.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods) ||
+			c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods))
 	for _, pos := range trailingPositions(stats.lockPos, remainingLockCount(stats.lock, stats.deferUnlock)) {
 		if suppressFunctionLevelLock {
 			continue
@@ -136,7 +139,9 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 	}
 
 	if isRWMutex {
-		suppressFunctionLevelRLock := branchType == "" && c.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods)
+		suppressFunctionLevelRLock := branchType == "" &&
+			(c.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods) ||
+				c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods))
 		for _, pos := range trailingPositions(stats.rlockPos, remainingLockCount(stats.rlock, stats.deferRUnlock)) {
 			if suppressFunctionLevelRLock {
 				continue

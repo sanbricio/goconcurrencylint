@@ -22,9 +22,10 @@ type funcAnalysis struct {
 	simulationStack        map[methodSimulationKey]bool
 	localFuncStack         map[*ast.FuncLit]bool
 
-	// flagGuardedMutexes holds mutexes released by a deferred, flag-guarded unlock
-	// (see detectFlagGuardedReleases). Populated once per real function.
-	flagGuardedMutexes map[string]bool
+	// flagGuardedFlags maps mutexes released by a deferred, flag-guarded unlock
+	// (see detectFlagGuardedReleaseFlags) to their guard flag name. Populated once
+	// per real function.
+	flagGuardedFlags map[string]string
 }
 
 func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
@@ -73,14 +74,15 @@ func (c *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames m
 		termination:           c.termination,
 		loopCarry:             c.loopCarry,
 		explicitTransferCache: c.explicitTransferCache,
+		lifecycleScanCache:    c.lifecycleScanCache,
 		funcAnalysis:          fa,
 	}
 	// Wire the per-function collaborators against the fork's own names and
 	// (isolated) collector so simulation diagnostics never leak into the parent
 	// run. fa.rawBodyEffects is true here, so the wrapper resolver stays inert.
 	sim.tryLock = newTryLockTracker(sim.mutexNames, sim.rwMutexNames, sim.commentFilter, sim.errorCollector)
-	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects)
-	sim.lifecycle = newLifecycleResolver(sim.receiverMethods, sim.functions, sim.typesInfo, sim.explicitTransferCache, fa.function)
+	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects, sim.typesInfo)
+	sim.lifecycle = newLifecycleResolver(sim.receiverMethods, sim.functions, sim.typesInfo, sim.explicitTransferCache, sim.lifecycleScanCache, fa.function)
 	sim.panicDetector = newLockedPanicDetector(sim.mutexNames, sim.rwMutexNames, sim.typesInfo, sim.errorCollector, fa.rawBodyEffects)
 	return sim
 }

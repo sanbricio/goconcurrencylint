@@ -17,7 +17,7 @@ func buildLifecycleResolver(t *testing.T, src, receiverType, methodName string) 
 	if fn == nil {
 		t.Fatalf("method %s.%s not found in receiver map", receiverType, methodName)
 	}
-	return newLifecycleResolver(rm, collectFunctionDecls([]*ast.File{file}), info, nil, fn)
+	return newLifecycleResolver(rm, collectFunctionDecls([]*ast.File{file}), info, nil, nil, fn)
 }
 
 func parseTypedLifecycleFile(t *testing.T, src string) (*ast.File, *types.Info) {

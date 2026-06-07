@@ -26,10 +26,18 @@ var SubAnalyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (any, error) {
+	// scope is built once on first use and shared across every function in the
+	// pass, so the package-wide indexes and lifecycle caches are not rebuilt per
+	// function. driver.Run visits functions sequentially, so the lazy init needs
+	// no synchronization.
+	var scope *packageScope
 	return driver.Run(pass, driver.Config[*Checker]{
 		Guard: primitives.HasMutexes,
 		NewChecker: func(fr *primitives.FunctionResult, ec report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Checker {
-			return NewChecker(fr, ec, cf, pass.TypesInfo, pass.Files)
+			if scope == nil {
+				scope = newPackageScope(pass.Files)
+			}
+			return NewChecker(fr, ec, cf, pass.TypesInfo, scope)
 		},
 	})
 }

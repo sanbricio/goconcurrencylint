@@ -6,7 +6,7 @@ import (
 )
 
 // flagGuardFuncDecl parses src with the typed lifecycle helper and returns the
-// top-level function named name, ready to feed to detectFlagGuardedReleases.
+// top-level function named name, ready to feed to detectFlagGuardedReleaseFlags.
 func flagGuardFuncDecl(t *testing.T, src, name string) *ast.FuncDecl {
 	t.Helper()
 	file, _ := parseTypedLifecycleFile(t, src)
@@ -153,9 +153,9 @@ func f(c bool) {
 			fn := flagGuardFuncDecl(t, tc.src, "f")
 			c := &Checker{mutexNames: tc.mutex, rwMutexNames: tc.rwMutex}
 
-			got := c.detectFlagGuardedReleases(fn)
-			if got[tc.varName] != tc.want {
-				t.Errorf("detectFlagGuardedReleases()[%q] = %v, want %v", tc.varName, got[tc.varName], tc.want)
+			got := c.detectFlagGuardedReleaseFlags(fn)
+			if (got[tc.varName] != "") != tc.want {
+				t.Errorf("detectFlagGuardedReleaseFlags()[%q] present = %v, want %v", tc.varName, got[tc.varName] != "", tc.want)
 			}
 		})
 	}
@@ -163,8 +163,8 @@ func f(c bool) {
 
 func TestDetectFlagGuardedReleases_NilFunc(t *testing.T) {
 	c := &Checker{mutexNames: map[string]bool{"mu": true}}
-	if got := c.detectFlagGuardedReleases(nil); got != nil {
-		t.Errorf("detectFlagGuardedReleases(nil) = %v, want nil", got)
+	if got := c.detectFlagGuardedReleaseFlags(nil); got != nil {
+		t.Errorf("detectFlagGuardedReleaseFlags(nil) = %v, want nil", got)
 	}
 }
 

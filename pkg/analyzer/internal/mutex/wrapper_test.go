@@ -16,7 +16,7 @@ func buildResolver(t *testing.T, src, receiverType, methodName string, rawBodyEf
 	if fn == nil {
 		t.Fatalf("method %s.%s not found in receiver map", receiverType, methodName)
 	}
-	return newWrapperResolver(rm, fn, rawBodyEffects)
+	return newWrapperResolver(rm, fn, rawBodyEffects, nil)
 }
 
 func TestWrapperResolver_RecognizesWrapperPair(t *testing.T) {

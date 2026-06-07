@@ -303,6 +303,44 @@ func GoodRWMutexCorrectWriteAPI() {
 	mu.Unlock()
 }
 
+type delegatedRWUnlockShard struct {
+	mu    sync.RWMutex
+	qlen  int
+	qsize int
+}
+
+type delegatedRWUnlockStore struct{}
+
+func (s *delegatedRWUnlockStore) setEntry(shard *delegatedRWUnlockShard, cost int) {
+	if cost > shard.qsize {
+		shard.mu.Unlock()
+		return
+	}
+
+	shard.qlen += cost
+	s.processDeque(shard)
+}
+
+func (s *delegatedRWUnlockStore) processDeque(shard *delegatedRWUnlockShard) {
+	if shard.qlen <= shard.qsize {
+		shard.mu.Unlock()
+		return
+	}
+
+	shard.qlen = shard.qsize
+	shard.mu.Unlock()
+}
+
+func (s *delegatedRWUnlockStore) GoodRWMutexWriteUnlockDelegatedThroughHelpers(shard *delegatedRWUnlockShard, exists bool, cost int) {
+	shard.mu.Lock()
+	if exists {
+		shard.mu.Unlock()
+		return
+	}
+
+	s.setEntry(shard, cost)
+}
+
 type oneWayLatchPendingResult struct {
 	executing sync.RWMutex
 }
@@ -315,25 +353,106 @@ func (r *oneWayLatchPendingResult) GoodBroadcastUnlocksCreateLock() {
 	r.executing.Unlock()
 }
 
-func (r *oneWayLatchPendingResult) BadWaitUsesReadLockAsOneWayLatch() {
-	r.executing.RLock() // want "rwmutex 'r.executing' is rlocked but not runlocked"
+func (r *oneWayLatchPendingResult) GoodWaitUsesReadLockAsOneWayLatch() {
+	r.executing.RLock()
+}
+
+// Boundary cases: the one-way latch/barrier heuristics must only suppress when a
+// sibling method on the same type actually releases the field. A method whose
+// name merely matches the hints, with no releasing sibling, must still report.
+type lonelyOneWayLatch struct {
+	gate    sync.RWMutex
+	barrier sync.Mutex
+}
+
+func (l *lonelyOneWayLatch) WorkerLoopNeverRunlocks() {
+	l.gate.RLock() // want "rwmutex 'l.gate' is rlocked but not runlocked"
+}
+
+func (l *lonelyOneWayLatch) StartProcessingNeverUnlocks() {
+	l.barrier.Lock() // want "mutex 'l.barrier' is locked but not unlocked"
+}
+
+type nonTrivialConsolidator struct {
+	mu      sync.Mutex
+	queries map[string]*nonTrivialPendingResult
+}
+
+type nonTrivialPendingResult struct {
+	executing    sync.RWMutex
+	consolidator *nonTrivialConsolidator
+	query        string
+}
+
+func (co *nonTrivialConsolidator) GoodCreateLocksPendingResultUntilBroadcast(query string) (*nonTrivialPendingResult, bool) {
+	co.mu.Lock()
+	defer co.mu.Unlock()
+
+	if r, ok := co.queries[query]; ok {
+		return r, false
+	}
+
+	r := &nonTrivialPendingResult{consolidator: co, query: query}
+	r.executing.Lock()
+	co.queries[query] = r
+	return r, true
+}
+
+func (r *nonTrivialPendingResult) GoodBroadcastUnlocksPendingResult() {
+	r.consolidator.mu.Lock()
+	defer r.consolidator.mu.Unlock()
+
+	delete(r.consolidator.queries, r.query)
+	r.executing.Unlock()
 }
 
 type crossMethodBarrier struct {
-	lock sync.RWMutex
+	lock    sync.RWMutex
+	wg      sync.WaitGroup
+	threads []crossMethodBarrierThread
+	count   int
+}
+
+type crossMethodBarrierThread struct {
+	parent *crossMethodBarrier
+	index  int
 }
 
 func (b *crossMethodBarrier) GoodCreateThreadsHoldsBarrier() {
 	b.lock.Lock()
+
+	logBarrierEvent("starting")
+	for i := range b.threads {
+		b.wg.Add(1)
+		go b.threads[i].GoodClientLoopUsesReadLockAsOneWayStartGate()
+	}
+
+	logBarrierEvent("waiting")
+	b.wg.Wait()
+	b.wg.Add(len(b.threads))
 }
 
 func (b *crossMethodBarrier) GoodRunTestReleasesBarrier() {
+	logBarrierEvent("running")
 	b.lock.Unlock()
+
+	b.wg.Wait()
 }
 
-func (b *crossMethodBarrier) BadWorkerNeverReleasesReadBarrier() {
-	b.lock.RLock() // want "rwmutex 'b.lock' is rlocked but not runlocked"
+func (bt *crossMethodBarrierThread) GoodClientLoopUsesReadLockAsOneWayStartGate() {
+	b := bt.parent
+
+	b.wg.Done()
+	logBarrierEvent("waiting for barrier")
+	b.lock.RLock()
+	logBarrierEvent("started")
+
+	for i := 0; i < b.count; i++ {
+		_ = i + bt.index
+	}
 }
+
+func logBarrierEvent(string) {}
 
 // Double unlocks (runlock twice)
 func BadRWDoubleRUnlock() {

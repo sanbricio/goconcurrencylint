@@ -598,6 +598,41 @@ func (h *HandlerLike) Start() {
 	h.startWG.Done()
 }
 
+type workerSliceLifecycle struct {
+	wg      sync.WaitGroup
+	started chan struct{}
+	workers []workerSliceLifecycleThread
+}
+
+type workerSliceLifecycleThread struct {
+	parent *workerSliceLifecycle
+}
+
+func (b *workerSliceLifecycle) GoodAddInLoopDoneInIndexedWorkerMethod() {
+	b.started = make(chan struct{})
+
+	for i := range b.workers {
+		b.wg.Add(1)
+		go b.workers[i].run()
+	}
+
+	b.wg.Wait()
+	b.wg.Add(len(b.workers))
+}
+
+func (b *workerSliceLifecycle) GoodReleaseWorkersAndWaitForSecondPhase() {
+	close(b.started)
+	b.wg.Wait()
+}
+
+func (w *workerSliceLifecycleThread) run() {
+	parent := w.parent
+
+	parent.wg.Done()
+	<-parent.started
+	parent.wg.Done()
+}
+
 // Good: a WaitGroup field whose lifecycle is balanced through returned closers.
 func GoodWaitGroupLifecycleManagedByCloser() {
 	var owner readerLifecycleOwner

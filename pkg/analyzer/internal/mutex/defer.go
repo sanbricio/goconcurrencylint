@@ -133,7 +133,7 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 	// Check for mutex unlocks in function literal
 	for mutexName := range c.mutexNames {
 		if guard.containsUnlock(fnlit.Body, mutexName) && !guard.containsLock(fnlit.Body, mutexName) {
-			if c.flagGuardedMutexes[mutexName] {
+			if c.isFlagGuarded(mutexName) {
 				continue
 			}
 			if stats[mutexName].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, mutexName, "Unlock") {
@@ -146,7 +146,7 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 	// Check for rwmutex unlocks in function literal
 	for rwMutexName := range c.rwMutexNames {
 		if guard.containsUnlock(fnlit.Body, rwMutexName) && !guard.containsLock(fnlit.Body, rwMutexName) {
-			if c.flagGuardedMutexes[rwMutexName] {
+			if c.isFlagGuarded(rwMutexName) {
 				continue
 			}
 			if stats[rwMutexName].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "Unlock") {

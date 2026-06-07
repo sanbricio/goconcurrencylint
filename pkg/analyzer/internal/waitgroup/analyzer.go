@@ -309,7 +309,21 @@ func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*a
 			if strings.HasPrefix(wgName, prefix) {
 				if calleeReceiverName := common.ReceiverName(fn); calleeReceiverName != "" {
 					suffix := strings.TrimPrefix(wgName, receiverExprName)
-					return fn, calleeReceiverName + suffix, true
+					calleeWGName := calleeReceiverName + suffix
+					if functionBodyUsesWaitGroupName(fn.Body, calleeWGName) {
+						return fn, calleeWGName, true
+					}
+				}
+			}
+		}
+		if rootName := rootVarName(sel.X); rootName != "" {
+			prefix := rootName + "."
+			if strings.HasPrefix(wgName, prefix) {
+				if calleeReceiverName := common.ReceiverName(fn); calleeReceiverName != "" {
+					suffix := strings.TrimPrefix(wgName, rootName)
+					if calleeWGName := calleeWaitGroupNameForReceiverAlias(fn, calleeReceiverName, suffix); calleeWGName != "" {
+						return fn, calleeWGName, true
+					}
 				}
 			}
 		}
@@ -353,6 +367,91 @@ func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*a
 	}
 
 	return nil, "", false
+}
+
+func rootVarName(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		return rootVarName(e.X)
+	case *ast.IndexExpr:
+		return rootVarName(e.X)
+	case *ast.IndexListExpr:
+		return rootVarName(e.X)
+	case *ast.ParenExpr:
+		return rootVarName(e.X)
+	case *ast.StarExpr:
+		return rootVarName(e.X)
+	}
+	return ""
+}
+
+func calleeWaitGroupNameForReceiverAlias(fn *ast.FuncDecl, receiverName, suffix string) string {
+	if fn == nil || fn.Body == nil || suffix == "" {
+		return ""
+	}
+
+	candidates := map[string]bool{receiverName + suffix: true}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				if i >= len(node.Rhs) {
+					continue
+				}
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || ident.Name == "_" {
+					continue
+				}
+				rhsName := common.GetVarName(node.Rhs[i])
+				if strings.HasPrefix(rhsName, receiverName+".") {
+					candidates[ident.Name+suffix] = true
+				}
+			}
+		case *ast.ValueSpec:
+			for i, ident := range node.Names {
+				if i >= len(node.Values) || ident == nil || ident.Name == "_" {
+					continue
+				}
+				rhsName := common.GetVarName(node.Values[i])
+				if strings.HasPrefix(rhsName, receiverName+".") {
+					candidates[ident.Name+suffix] = true
+				}
+			}
+		}
+		return true
+	})
+
+	for candidate := range candidates {
+		if functionBodyUsesWaitGroupName(fn.Body, candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func functionBodyUsesWaitGroupName(body *ast.BlockStmt, wgName string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if common.GetVarName(sel.X) == wgName && (sel.Sel.Name == "Add" || sel.Sel.Name == "Done" || sel.Sel.Name == "Wait" || sel.Sel.Name == "Go") {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func calleeWaitGroupNameForArg(arg ast.Expr, wgName string, field *ast.Field, fieldIndex int) (string, bool) {

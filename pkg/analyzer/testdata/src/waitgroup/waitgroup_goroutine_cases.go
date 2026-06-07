@@ -681,6 +681,177 @@ func GoodAddDonePairedInsideRangeOverAssignedSlice(items []int, err error) {
 	wg.Wait()
 }
 
+type deferredClosureBenchmark struct {
+	wg         sync.WaitGroup
+	concurrent deferredClosureAtomic
+	trace      []int
+}
+
+type deferredClosureAtomic struct{}
+
+func (deferredClosureAtomic) Add(delta int) int {
+	return delta
+}
+
+func (b *deferredClosureBenchmark) displayProgress(done <-chan struct{}, total int) {
+	select {
+	case <-done:
+		return
+	default:
+		_ = total
+		return
+	}
+}
+
+func (b *deferredClosureBenchmark) GoodAddLenDoneInDeferredWorkerClosure(fallback []int) {
+	trace := b.trace
+	if len(trace) == 0 {
+		trace = fallback
+	}
+
+	done := make(chan struct{})
+	go b.displayProgress(done, len(trace))
+
+	b.wg.Add(len(trace))
+
+	for _, req := range trace {
+		go func(req int) {
+			b.concurrent.Add(1)
+			defer func() {
+				b.concurrent.Add(-1)
+				b.wg.Done()
+			}()
+
+			_ = req
+		}(req)
+	}
+
+	b.wg.Wait()
+	close(done)
+}
+
+type keyspaceSetLike map[string]bool
+
+func newKeyspaceSetLike(values ...string) keyspaceSetLike {
+	set := keyspaceSetLike{}
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
+func (s keyspaceSetLike) Insert(value string) {
+	s[value] = true
+}
+
+func (s keyspaceSetLike) Len() int {
+	return len(s)
+}
+
+func (s keyspaceSetLike) Intersection(other keyspaceSetLike) keyspaceSetLike {
+	result := keyspaceSetLike{}
+	for value := range s {
+		if other[value] {
+			result[value] = true
+		}
+	}
+	return result
+}
+
+type keyspaceClusterLike struct {
+	missing bool
+}
+
+type keyspaceInfoLike struct {
+	Shards []keyspaceShardLike
+}
+
+type keyspaceShardLike struct {
+	Name string
+}
+
+func (c *keyspaceClusterLike) GetKeyspace(name string) (*keyspaceInfoLike, error) {
+	if c.missing && name == "" {
+		return nil, context.Canceled
+	}
+	return &keyspaceInfoLike{Shards: []keyspaceShardLike{{Name: name}}}, nil
+}
+
+type keyspaceErrorRecorderLike struct{}
+
+func (keyspaceErrorRecorderLike) RecordError(error) {}
+
+func GoodLoopAddsWorkersWithDeferredDoneAndMapLock(cluster *keyspaceClusterLike, results map[string]keyspaceSetLike) {
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		rec keyspaceErrorRecorderLike
+	)
+
+	mu.Lock()
+	for key, values := range results {
+		wg.Add(1)
+
+		go func(key string, values keyspaceSetLike) {
+			defer wg.Done()
+
+			keyspace, err := cluster.GetKeyspace(key)
+			if err != nil {
+				if key == "" {
+					mu.Lock()
+					defer mu.Unlock()
+					delete(results, key)
+					return
+				}
+				rec.RecordError(err)
+				return
+			}
+
+			fullSet := newKeyspaceSetLike()
+			for _, shard := range keyspace.Shards {
+				fullSet.Insert(shard.Name)
+			}
+
+			if values.Len() == 0 {
+				mu.Lock()
+				defer mu.Unlock()
+				results[key] = fullSet
+				return
+			}
+
+			overlap := values.Intersection(fullSet)
+			mu.Lock()
+			defer mu.Unlock()
+			results[key] = overlap
+		}(key, values)
+	}
+	mu.Unlock()
+
+	wg.Wait()
+}
+
+func GoodLoopAddsWorkersAfterMapIndexPopulation(keys []string) {
+	results := map[string]keyspaceSetLike{}
+	for _, key := range keys {
+		if _, ok := results[key]; !ok {
+			results[key] = newKeyspaceSetLike("primary")
+			continue
+		}
+		results[key].Insert("replica")
+	}
+
+	var wg sync.WaitGroup
+	for key, values := range results {
+		wg.Add(1)
+		go func(key string, values keyspaceSetLike) {
+			defer wg.Done()
+			_ = values.Len()
+			_ = key
+		}(key, values)
+	}
+	wg.Wait()
+}
+
 // Cancellation via close() of a local channel: `case <-chClose` drains when
 // the channel is closed, equivalent to `<-ctx.Done()` for context cancellation.
 func GoodWorkerDoneOnCloseOfLocalChannel() {
