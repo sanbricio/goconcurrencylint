@@ -1,3 +1,14 @@
+## [0.4.1](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.4.1) - 2026-06-07
+
+### 🐛 Bug Fixes
+
+- Add GitHub Actions workflow for releasing binaries
+
+### ❤️ Contributors
+
+- @sanbricio
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.4.0...v0.4.1
 ## [0.4.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.4.0) - 2026-06-07
 
 ### 🚀 Features
