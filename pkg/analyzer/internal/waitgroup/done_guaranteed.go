@@ -187,6 +187,14 @@ func (c *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName strin
 					info.hasGuaranteedDone = true
 					return info
 				}
+				// A condition-less `for {}` always enters its body, so a Done the
+				// body itself guarantees (before any conditional break/return)
+				// runs at least once.
+				if forStmt.Cond == nil && loopInfo.hasGuaranteedDone && !mightExitEarly {
+					info.hasAnyDone = true
+					info.hasGuaranteedDone = true
+					return info
+				}
 			} else if rangeStmt, ok := s.(*ast.RangeStmt); ok && rangeStmt.Body != nil {
 				loopInfo = c.analyzeDoneCallsWithVisited(rangeStmt.Body, wgName, visited)
 				if c.loopHasCancellationDoneExit(rangeStmt.Body, wgName, visited) && !mightExitEarly {

@@ -16,19 +16,44 @@ type returnedIdent struct {
 	ret   *ast.ReturnStmt
 }
 
+// methodCallSite is one call expression with a selector (x.Name(...)) paired
+// with the function declaration whose body contains it.
+type methodCallSite struct {
+	call      *ast.CallExpr
+	enclosing *ast.FuncDecl
+}
+
 // lifecycleScanCache memoizes per-function AST scans that the lifecycle checks
 // repeat for every function in the package on each unbalanced lock/unlock. It is
 // shared package-wide (like explicitTransferCache) so each function body is
 // scanned at most once instead of O(functions) times.
+//
+// The *index* fields invert "iterate every package function per query" loops:
+// they are built lazily on first use (driver.Run visits functions sequentially,
+// so no synchronization is needed) and answer subsequent queries in O(1).
 type lifecycleScanCache struct {
 	returnedIdents        map[*ast.FuncDecl][]returnedIdent
 	returnedCompositeLits map[*ast.FuncDecl][]*ast.CompositeLit
+	returnedFuncNames     map[*ast.FuncDecl][]string
+
+	// topLevelFuncIndex maps a name to the package-level (non-method) function.
+	topLevelFuncIndex map[string]*ast.FuncDecl
+	// returnersOfNameIndex maps an identifier name to the functions that
+	// return it.
+	returnersOfNameIndex map[string][]*ast.FuncDecl
+	// returnersOfTypeIndex maps a type name to the functions that return a
+	// composite literal or a typed identifier of that type.
+	returnersOfTypeIndex map[string][]*ast.FuncDecl
+	// callSitesOfNameIndex maps a selector name to every x.Name(...) call in
+	// the package.
+	callSitesOfNameIndex map[string][]methodCallSite
 }
 
 func newLifecycleScanCache() *lifecycleScanCache {
 	return &lifecycleScanCache{
 		returnedIdents:        make(map[*ast.FuncDecl][]returnedIdent),
 		returnedCompositeLits: make(map[*ast.FuncDecl][]*ast.CompositeLit),
+		returnedFuncNames:     make(map[*ast.FuncDecl][]string),
 	}
 }
 
@@ -140,7 +165,7 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 	path := strings.TrimPrefix(mutexName, prefix)
 	parts := strings.Split(path, ".")
 
-	for _, fn := range l.functions {
+	for _, fn := range l.functionsReturningType(currentType) {
 		if fn == nil || fn.Body == nil || fn == l.function {
 			continue
 		}
@@ -221,7 +246,7 @@ func (l *lifecycleResolver) returnsFuncFor(mutexName string, methodNames []strin
 	}
 
 	for _, name := range l.returnedFunctionNames(l.function) {
-		fn := topLevelFunctionNamed(l.functions, name)
+		fn := l.topLevelFunctionNamed(name)
 		if fn != nil && functionBodyContainsFieldCall(fn.Body, mutexName, methodNames) {
 			return true
 		}
@@ -238,21 +263,111 @@ func (l *lifecycleResolver) isReturnedFuncReleaseFor(mutexName string, acquireMe
 		return false
 	}
 
-	for _, fn := range l.functions {
+	for _, fn := range l.functionsReturningName(l.function.Name.Name) {
 		if fn == nil || fn.Body == nil || fn == l.function {
 			continue
 		}
-		for _, ret := range l.returnedFunctionNames(fn) {
-			if ret != l.function.Name.Name {
-				continue
-			}
-			if functionBodyContainsFieldCallBefore(fn.Body, mutexName, acquireMethods, l.functionReturnPos(fn, ret)) {
-				return true
-			}
+		if functionBodyContainsFieldCallBefore(fn.Body, mutexName, acquireMethods, l.functionReturnPos(fn, l.function.Name.Name)) {
+			return true
 		}
 	}
 
 	return false
+}
+
+// topLevelFunctionNamed returns the package-level (non-method) function with
+// the given name through the lazily built package-wide index.
+func (l *lifecycleResolver) topLevelFunctionNamed(name string) *ast.FuncDecl {
+	if l.scanCache.topLevelFuncIndex == nil {
+		idx := make(map[string]*ast.FuncDecl)
+		for _, fn := range l.functions {
+			if fn != nil && fn.Recv == nil && fn.Name != nil {
+				if _, ok := idx[fn.Name.Name]; !ok {
+					idx[fn.Name.Name] = fn
+				}
+			}
+		}
+		l.scanCache.topLevelFuncIndex = idx
+	}
+	return l.scanCache.topLevelFuncIndex[name]
+}
+
+// functionsReturningName returns the package functions that return an
+// identifier with the given name.
+func (l *lifecycleResolver) functionsReturningName(name string) []*ast.FuncDecl {
+	if l.scanCache.returnersOfNameIndex == nil {
+		idx := make(map[string][]*ast.FuncDecl)
+		for _, fn := range l.functions {
+			if fn == nil || fn.Body == nil {
+				continue
+			}
+			seen := make(map[string]bool)
+			for _, returned := range l.returnedFunctionNames(fn) {
+				if !seen[returned] {
+					seen[returned] = true
+					idx[returned] = append(idx[returned], fn)
+				}
+			}
+		}
+		l.scanCache.returnersOfNameIndex = idx
+	}
+	return l.scanCache.returnersOfNameIndex[name]
+}
+
+// functionsReturningType returns the package functions that return a composite
+// literal of the given type or an identifier typed as it. Only those functions
+// can satisfy the ownership-transfer checks in isReleaseFor.
+func (l *lifecycleResolver) functionsReturningType(typeName string) []*ast.FuncDecl {
+	if l.scanCache.returnersOfTypeIndex == nil {
+		idx := make(map[string][]*ast.FuncDecl)
+		for _, fn := range l.functions {
+			if fn == nil || fn.Body == nil {
+				continue
+			}
+			seen := make(map[string]bool)
+			record := func(name string) {
+				if name != "" && !seen[name] {
+					seen[name] = true
+					idx[name] = append(idx[name], fn)
+				}
+			}
+			for _, lit := range l.returnedCompositeLiterals(fn) {
+				record(compositeLiteralTypeName(lit))
+			}
+			if l.typesInfo != nil {
+				for _, ri := range l.returnedIdents(fn) {
+					record(baseTypeNameFromType(l.typesInfo.TypeOf(ri.ident)))
+				}
+			}
+		}
+		l.scanCache.returnersOfTypeIndex = idx
+	}
+	return l.scanCache.returnersOfTypeIndex[typeName]
+}
+
+// callSitesNamed returns every x.<name>(...) call expression in the package
+// paired with its enclosing function.
+func (l *lifecycleResolver) callSitesNamed(name string) []methodCallSite {
+	if l.scanCache.callSitesOfNameIndex == nil {
+		idx := make(map[string][]methodCallSite)
+		for _, fn := range l.functions {
+			if fn == nil || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					idx[sel.Sel.Name] = append(idx[sel.Sel.Name], methodCallSite{call: call, enclosing: fn})
+				}
+				return true
+			})
+		}
+		l.scanCache.callSitesOfNameIndex = idx
+	}
+	return l.scanCache.callSitesOfNameIndex[name]
 }
 
 func (l *lifecycleResolver) isCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
@@ -284,35 +399,21 @@ func (l *lifecycleResolver) computeCallerManagedReleaseFor(mutexName string, met
 
 	totalCallSites := 0
 
-	for _, fn := range l.functions {
-		if fn == nil || fn.Body == nil || fn == l.function {
+	for _, site := range l.callSitesNamed(l.function.Name.Name) {
+		if site.enclosing == l.function {
 			continue
 		}
 
-		explicitTransferPositions := l.explicitTransferCallPositions(fn.Body)
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
+		baseVar, ok := l.callTargetsCurrentMethod(site.call, currentType)
+		if !ok {
+			continue
+		}
 
-			baseVar, ok := l.callTargetsCurrentMethod(call, currentType)
-			if !ok {
-				return true
-			}
-
-			totalCallSites++
-			if _, ok := explicitTransferPositions[call.Pos()]; !ok {
-				totalCallSites = -1
-				return false
-			}
-			if !functionBodyContainsFieldCallBefore(fn.Body, baseVar+"."+relativePath, methodNames, call.Pos()) {
-				totalCallSites = -1
-				return false
-			}
-			return true
-		})
-		if totalCallSites < 0 {
+		totalCallSites++
+		if _, ok := l.explicitTransferCallPositions(site.enclosing.Body)[site.call.Pos()]; !ok {
+			return false
+		}
+		if !functionBodyContainsFieldCallBefore(site.enclosing.Body, baseVar+"."+relativePath, methodNames, site.call.Pos()) {
 			return false
 		}
 	}
@@ -615,15 +716,6 @@ func matchingUnlockMethods(acquireMethods []string) []string {
 	return methods
 }
 
-func topLevelFunctionNamed(functions []*ast.FuncDecl, name string) *ast.FuncDecl {
-	for _, fn := range functions {
-		if fn != nil && fn.Recv == nil && fn.Name != nil && fn.Name.Name == name {
-			return fn
-		}
-	}
-	return nil
-}
-
 // returnedIdents returns every identifier appearing in fn's return statements
 // paired with its enclosing return. The scan is memoized per function (shared
 // package-wide) because the lifecycle checks re-scan every package function for
@@ -655,13 +747,21 @@ func (l *lifecycleResolver) returnedIdents(fn *ast.FuncDecl) []returnedIdent {
 	return result
 }
 
+// returnedFunctionNames is memoized package-wide: isReturnedFuncReleaseFor and
+// the lazy indexes re-request it for every package function.
 func (l *lifecycleResolver) returnedFunctionNames(fn *ast.FuncDecl) []string {
+	if cached, ok := l.scanCache.returnedFuncNames[fn]; ok {
+		return cached
+	}
+
 	var names []string
 	for _, ri := range l.returnedIdents(fn) {
 		if ri.ident.Name != "" && ri.ident.Name != "nil" {
 			names = append(names, ri.ident.Name)
 		}
 	}
+
+	l.scanCache.returnedFuncNames[fn] = names
 	return names
 }
 
