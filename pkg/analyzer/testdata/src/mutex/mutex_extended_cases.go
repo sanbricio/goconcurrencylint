@@ -1741,3 +1741,97 @@ func CommentedBadMutexUsage() {
 //     var mu sync.Mutex
 //     mu.Lock() // This should also be ignored
 // }
+
+// ========== EXHAUSTIVE BRANCH MERGE (switch / type switch / select) ==========
+
+// Good: lock before a switch whose every arm (cases + default) unlocks; the
+// arms converge so the lock is released on every path.
+func GoodLockSwitchEveryArmUnlocks(x int) {
+	var mu sync.Mutex
+	mu.Lock()
+	switch x {
+	case 1:
+		mu.Unlock()
+	case 2:
+		mu.Unlock()
+	default:
+		mu.Unlock()
+	}
+}
+
+// Good: same as above with a tagless switch.
+func GoodLockTaglessSwitchEveryArmUnlocks(ready bool) {
+	var mu sync.Mutex
+	mu.Lock()
+	switch {
+	case ready:
+		mu.Unlock()
+	default:
+		mu.Unlock()
+	}
+}
+
+// Good: every arm unlocks and returns; terminating arms still converge.
+func GoodLockSwitchEveryArmUnlocksAndReturns(x int) int {
+	var mu sync.Mutex
+	mu.Lock()
+	switch x {
+	case 1:
+		mu.Unlock()
+		return 1
+	default:
+		mu.Unlock()
+		return 0
+	}
+}
+
+// Good: a type switch with a default where every arm unlocks.
+func GoodLockTypeSwitchEveryArmUnlocks(v interface{}) {
+	var mu sync.Mutex
+	mu.Lock()
+	switch v.(type) {
+	case int:
+		mu.Unlock()
+	case string:
+		mu.Unlock()
+	default:
+		mu.Unlock()
+	}
+}
+
+// Good: a select runs exactly one arm, so when every arm unlocks the lock is
+// released without needing a default.
+func GoodLockSelectEveryArmUnlocks(ch chan int, done chan struct{}) {
+	var mu sync.Mutex
+	mu.Lock()
+	select {
+	case <-ch:
+		mu.Unlock()
+	case <-done:
+		mu.Unlock()
+	}
+}
+
+// Bad: without a default the switch can match no case and leak the lock.
+func BadLockSwitchNoDefaultLeaks(x int) {
+	var mu sync.Mutex
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	switch x {
+	case 1:
+		mu.Unlock()
+	case 2:
+		mu.Unlock()
+	}
+}
+
+// Bad: arms diverge — one keeps the lock — so the per-arm delta is reported.
+func BadLockSwitchArmKeepsLock(x int) {
+	var mu sync.Mutex
+	switch x {
+	case 1:
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in case"
+	default:
+		mu.Lock()
+		mu.Unlock()
+	}
+}

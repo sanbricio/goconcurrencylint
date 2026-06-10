@@ -498,9 +498,10 @@ func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.Fun
 }
 
 // topLevelFunctionNamed returns the package-level (non-method) function with the
-// given name, or nil when there is none.
+// given name, or nil when there is none. It delegates to the lifecycle
+// resolver's package-wide index.
 func (c *Checker) topLevelFunctionNamed(name string) *ast.FuncDecl {
-	return topLevelFunctionNamed(c.functions, name)
+	return c.lifecycle.topLevelFunctionNamed(name)
 }
 
 // calleeParamNameForArg returns the callee parameter name that receives the

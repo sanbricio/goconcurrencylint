@@ -191,12 +191,12 @@ func TestErrorCollector_ReportAll(t *testing.T) {
 	t.Run("dedup by pos+category+message", func(t *testing.T) {
 		ec := &ErrorCollector{}
 		ec.AddError(pos1, "cat", "msg")
-		ec.AddError(pos1, "cat", "msg")          // exact dup
-		ec.AddError(pos1, "other-cat", "msg")    // different category, kept
-		ec.AddError(pos1, "cat", "different")    // different message, kept
+		ec.AddError(pos1, "cat", "msg")       // exact dup
+		ec.AddError(pos1, "other-cat", "msg") // different category, kept
+		ec.AddError(pos1, "cat", "different") // different message, kept
 		var n int
 		pass := &analysis.Pass{
-			Fset: fset,
+			Fset:   fset,
 			Report: func(d analysis.Diagnostic) { n++ },
 		}
 		ec.ReportAll(pass, nil)

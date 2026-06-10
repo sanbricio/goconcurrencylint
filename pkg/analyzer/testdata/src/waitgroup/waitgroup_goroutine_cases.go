@@ -873,3 +873,60 @@ func GoodWorkerDoneOnCloseOfLocalChannel() {
 	close(chClose)
 	wg.Wait()
 }
+
+// Good: a condition-less for always enters its body, so a Done the body
+// guarantees before any conditional exit runs at least once.
+func GoodDoneGuaranteedInInfiniteLoop() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for {
+			wg.Done()
+			return
+		}
+	}()
+	wg.Wait()
+}
+
+// Good: the labeled break runs after Done has already executed.
+func GoodDoneBeforeLabeledBreakInInfiniteLoop() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+	loop:
+		for {
+			wg.Done()
+			break loop
+		}
+	}()
+	wg.Wait()
+}
+
+// Bad: the conditional break can leave the loop before Done runs.
+func BadConditionalBreakBeforeDoneInInfiniteLoop(stop func() bool) {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		for {
+			if stop() {
+				break
+			}
+			wg.Done()
+			return
+		}
+	}()
+	wg.Wait()
+}
+
+// Bad: a conditioned for can run zero times, so Done is not guaranteed.
+func BadDoneInConditionedLoop(n int) {
+	var wg sync.WaitGroup
+	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	go func() {
+		for i := 0; i < n; i++ {
+			wg.Done()
+			return
+		}
+	}()
+	wg.Wait()
+}

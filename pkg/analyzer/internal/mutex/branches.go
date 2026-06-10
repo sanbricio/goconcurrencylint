@@ -16,34 +16,134 @@ func (c *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*S
 	copyStatsMap(stats, rangeStats)
 }
 
-// analyzeSwitchStatement handles switch statements
-func (c *Checker) analyzeSwitchStatement(stmt *ast.SwitchStmt, stats map[string]*Stats) {
-	for _, caseStmt := range stmt.Body.List {
-		if cc, ok := caseStmt.(*ast.CaseClause); ok {
-			caseStats := c.analyzeStatements(cc.Body, stats)
-			c.reportUnmatchedLocksInBranch(stats, caseStats, "case")
+// branchClause is one arm of a switch, type switch or select statement.
+type branchClause struct {
+	body      []ast.Stmt
+	isDefault bool
+}
+
+// switchClauses extracts the clauses of a switch or type switch body and
+// reports whether any case falls through (which links arm states together and
+// disables the convergence merge).
+func switchClauses(body *ast.BlockStmt) (clauses []branchClause, hasDefault, hasFallthrough bool) {
+	for _, stmt := range body.List {
+		cc, ok := stmt.(*ast.CaseClause)
+		if !ok {
+			continue
+		}
+		if cc.List == nil {
+			hasDefault = true
+		}
+		for _, s := range cc.Body {
+			if branch, ok := s.(*ast.BranchStmt); ok && branch.Tok == token.FALLTHROUGH {
+				hasFallthrough = true
+			}
+		}
+		clauses = append(clauses, branchClause{body: cc.Body, isDefault: cc.List == nil})
+	}
+	return clauses, hasDefault, hasFallthrough
+}
+
+// selectClauses extracts the clauses of a select body.
+func selectClauses(body *ast.BlockStmt) []branchClause {
+	var clauses []branchClause
+	for _, stmt := range body.List {
+		if cc, ok := stmt.(*ast.CommClause); ok {
+			clauses = append(clauses, branchClause{body: cc.Body, isDefault: cc.Comm == nil})
 		}
 	}
+	return clauses
+}
+
+// analyzeSwitchStatement handles switch statements
+func (c *Checker) analyzeSwitchStatement(stmt *ast.SwitchStmt, stats map[string]*Stats) {
+	if stmt.Init != nil {
+		c.analyzeStatement(stmt.Init, stats)
+	}
+	clauses, hasDefault, hasFallthrough := switchClauses(stmt.Body)
+	c.analyzeBranchClauses(clauses, hasDefault && !hasFallthrough, stats, "case")
 }
 
 // analyzeTypeSwitchStatement handles type switch statements
 func (c *Checker) analyzeTypeSwitchStatement(stmt *ast.TypeSwitchStmt, stats map[string]*Stats) {
-	for _, caseStmt := range stmt.Body.List {
-		if cc, ok := caseStmt.(*ast.CaseClause); ok {
-			caseStats := c.analyzeStatements(cc.Body, stats)
-			c.reportUnmatchedLocksInBranch(stats, caseStats, "case")
+	if stmt.Init != nil {
+		c.analyzeStatement(stmt.Init, stats)
+	}
+	clauses, hasDefault, hasFallthrough := switchClauses(stmt.Body)
+	c.analyzeBranchClauses(clauses, hasDefault && !hasFallthrough, stats, "case")
+}
+
+// analyzeSelectStatement handles select statements. A select always executes
+// exactly one of its clauses, so the clause set is exhaustive even without a
+// default arm.
+func (c *Checker) analyzeSelectStatement(stmt *ast.SelectStmt, stats map[string]*Stats) {
+	c.analyzeBranchClauses(selectClauses(stmt.Body), true, stats, "select")
+}
+
+// analyzeBranchClauses analyzes each clause body against the entry state and,
+// mirroring analyzeIfStatement, merges the resulting state back into stats
+// when the clause set covers every path (exhaustive) and the surviving arms
+// agree on the lock state. Otherwise it falls back to reporting the per-arm
+// deltas, leaving stats at the entry state.
+func (c *Checker) analyzeBranchClauses(clauses []branchClause, exhaustive bool, stats map[string]*Stats, branchType string) {
+	if len(clauses) == 0 {
+		return
+	}
+
+	branchStats := make([]map[string]*Stats, len(clauses))
+	terminates := make([]bool, len(clauses))
+	for i, clause := range clauses {
+		branchStats[i] = c.analyzeStatements(clause.body, stats)
+		terminates[i] = c.termination.blockAlwaysTerminates(&ast.BlockStmt{List: clause.body})
+	}
+
+	if exhaustive {
+		// All arms agree (terminating ones included): adopt the common state.
+		if merged := c.convergedBranchState(branchStats, nil); merged != nil {
+			copyStatsMap(stats, merged)
+			return
 		}
+		// Arms that terminate never reach the code after the statement, so
+		// only the surviving arms need to agree.
+		if merged := c.convergedBranchState(branchStats, terminates); merged != nil {
+			copyStatsMap(stats, merged)
+			return
+		}
+		allTerminate := true
+		for _, t := range terminates {
+			if !t {
+				allTerminate = false
+				break
+			}
+		}
+		if allTerminate {
+			return
+		}
+	}
+
+	for i := range clauses {
+		c.reportUnmatchedLocksInBranch(stats, branchStats[i], branchType)
 	}
 }
 
-// analyzeSelectStatement handles select statements
-func (c *Checker) analyzeSelectStatement(stmt *ast.SelectStmt, stats map[string]*Stats) {
-	for _, commClause := range stmt.Body.List {
-		if cc, ok := commClause.(*ast.CommClause); ok {
-			commStats := c.analyzeStatements(cc.Body, stats)
-			c.reportUnmatchedLocksInBranch(stats, commStats, "select")
+// convergedBranchState returns the branch state shared by every considered
+// branch, or nil when they disagree. When skip is non-nil, branches whose skip
+// entry is true are excluded; nil is returned when no branch is considered.
+func (c *Checker) convergedBranchState(branches []map[string]*Stats, skip []bool) map[string]*Stats {
+	var converged map[string]*Stats
+	for i, bs := range branches {
+		if skip != nil && skip[i] {
+			continue
+		}
+		if converged == nil {
+			converged = bs
+			continue
+		}
+		if !c.canMergeBranchStates(converged, bs) {
+			return nil
 		}
 	}
+	return converged
 }
 
 // analyzeStatements is a helper to analyze a list of statements
