@@ -87,7 +87,7 @@ type packageScope struct {
 
 func newPackageScope(files []*ast.File) *packageScope {
 	return &packageScope{
-		receiverMethods:       buildReceiverMethodMap(files),
+		receiverMethods:       common.BuildReceiverMethodMap(files),
 		functions:             collectFunctionDecls(files),
 		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
 		scanCache:             newLifecycleScanCache(),
@@ -376,7 +376,7 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 		return false
 	}
 
-	receiverType := baseTypeNameFromType(c.typesInfo.TypeOf(sel.X))
+	receiverType := common.BaseTypeNameFromType(c.typesInfo.TypeOf(sel.X))
 	if receiverType == "" {
 		return false
 	}

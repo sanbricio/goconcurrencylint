@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <b>A static analyzer for Go that catches common concurrency mistakes around <code>sync.Mutex</code>, <code>sync.RWMutex</code>, and <code>sync.WaitGroup</code> — before they reach production.</b>
+  <b>A static analyzer for Go that catches common concurrency mistakes around <code>sync.Mutex</code>, <code>sync.RWMutex</code>, <code>sync.WaitGroup</code>, and <code>sync.Once</code> — before they reach production.</b>
 </p>
 
 ---
@@ -111,7 +111,9 @@ Because the tool is a standard `go/analysis` single-checker, it accepts the usua
 | `defer-unlock-in-loop` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Unlock()` lives inside a loop body, so the unlock only runs at function return. |
 | `double-lock` | `sync.Mutex`, `sync.RWMutex` | A second `Lock()` is taken while the first is still held (or a write `Lock()` while a read lock is held). |
 | `lock-order-cycle` | `sync.Mutex`, `sync.RWMutex` | Two functions acquire the same pair of mutexes in opposite orders — classic deadlock pattern. |
-| `sync-primitive-copy` | all | A `sync.Mutex`, `sync.RWMutex` or `sync.WaitGroup` (or a struct embedding one) is copied by value. |
+| `once-do-deadlock` | `sync.Once` | `once.Do(f)` where `f` calls `Do` on the same `Once` again — `sync.Once.Do` is not reentrant, so this deadlocks. |
+| `once-do-nil` | `sync.Once` | `once.Do(nil)` panics when the function is invoked. |
+| `sync-primitive-copy` | all | A `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup` or `sync.Once` (or a struct embedding one) is copied by value. |
 
 All checks above also fire on package-scoped primitives declared in any file of the same package — there is no separate ID for that case; the diagnostic carries the same category as the in-function variant.
 
@@ -200,14 +202,15 @@ More representative cases live under [`pkg/analyzer/testdata/src`](pkg/analyzer/
 
 ## How It Works
 
-`goconcurrencylint` is an umbrella `go/analysis` analyzer composed of three
+`goconcurrencylint` is an umbrella `go/analysis` analyzer composed of four
 independent sub-analyzers, wired together through the standard `Requires` graph:
 
 - **Mutex analyzer** — tracks `lock`, `rlock`, `borrowed lock`, and `defer unlock` counters per function, visiting each control-flow node and reconciling state at join points. Final state is validated at function exit.
 - **WaitGroup analyzer** — collects every `Add`, `Done`, `Wait`, and `Go` call with its position, builds a reachability map for calls inside goroutines, and validates the balance along every path. Calls that escape the function scope are intentionally excluded to minimize false positives.
-- **Copy analyzer** — flags any `sync.Mutex`, `sync.RWMutex` or `sync.WaitGroup` (or a struct embedding one) copied by value.
+- **Once analyzer** — resolves the function passed to `once.Do` (literal, named function, or method value) and reports re-entrant `Do` calls that deadlock, plus `Do(nil)` calls that panic.
+- **Copy analyzer** — flags any `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup` or `sync.Once` (or a struct embedding one) copied by value.
 
-Two foundation analyzers run once per package and share their results with the sub-analyzers: one discovers `sync` primitive declarations, the other identifies generated files and builds the comment filters behind `// goconcurrencylint:ignore`. All checks also share helpers for type detection (`IsMutex`, `IsRWMutex`, `IsWaitGroup`) and deterministic, deduplicated error reporting.
+Two foundation analyzers run once per package and share their results with the sub-analyzers: one discovers `sync` primitive declarations, the other identifies generated files and builds the comment filters behind `// goconcurrencylint:ignore`. All checks also share helpers for type detection (`IsMutex`, `IsRWMutex`, `IsWaitGroup`, `IsOnce`) and deterministic, deduplicated error reporting.
 
 For a contributor-level map of the analyzer graph and the journey of a single diagnostic, see [ARCHITECTURE.md](ARCHITECTURE.md).
 

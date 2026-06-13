@@ -152,7 +152,7 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 	}
 
 	currentReceiver := common.ReceiverName(l.function)
-	currentType := receiverTypeName(l.function)
+	currentType := common.ReceiverTypeName(l.function)
 	if currentReceiver == "" || currentType == "" {
 		return false
 	}
@@ -212,7 +212,7 @@ func (l *lifecycleResolver) returnsVariableWithReleaseFor(baseVar, suffix string
 	}
 
 	for _, ident := range l.returnedIdentsNamed(l.function, baseVar) {
-		returnedType := baseTypeNameFromType(l.typesInfo.TypeOf(ident))
+		returnedType := common.BaseTypeNameFromType(l.typesInfo.TypeOf(ident))
 		if returnedType == "" {
 			continue
 		}
@@ -230,7 +230,7 @@ func (l *lifecycleResolver) functionReturningCurrentReceiverAfterAcquire(fn *ast
 	}
 
 	for _, ri := range l.returnedIdents(fn) {
-		if baseTypeNameFromType(l.typesInfo.TypeOf(ri.ident)) != currentType {
+		if common.BaseTypeNameFromType(l.typesInfo.TypeOf(ri.ident)) != currentType {
 			continue
 		}
 		if functionBodyContainsFieldCallBefore(fn.Body, ri.ident.Name+"."+path, acquireMethods, ri.ret.Pos()) {
@@ -336,7 +336,7 @@ func (l *lifecycleResolver) functionsReturningType(typeName string) []*ast.FuncD
 			}
 			if l.typesInfo != nil {
 				for _, ri := range l.returnedIdents(fn) {
-					record(baseTypeNameFromType(l.typesInfo.TypeOf(ri.ident)))
+					record(common.BaseTypeNameFromType(l.typesInfo.TypeOf(ri.ident)))
 				}
 			}
 		}
@@ -387,7 +387,7 @@ func (l *lifecycleResolver) isCallerManagedReleaseFor(mutexName string, methodNa
 
 func (l *lifecycleResolver) computeCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
 	currentReceiver := common.ReceiverName(l.function)
-	currentType := receiverTypeName(l.function)
+	currentType := common.ReceiverTypeName(l.function)
 	if currentReceiver == "" || currentType == "" {
 		return false
 	}
@@ -511,7 +511,7 @@ func (l *lifecycleResolver) callTargetsCurrentMethod(call *ast.CallExpr, receive
 		return "", false
 	}
 
-	if baseTypeNameFromType(l.typesInfo.TypeOf(sel.X)) != receiverType {
+	if common.BaseTypeNameFromType(l.typesInfo.TypeOf(sel.X)) != receiverType {
 		return "", false
 	}
 
@@ -660,7 +660,7 @@ func compositeLiteralTypeName(lit *ast.CompositeLit) string {
 	if lit == nil {
 		return ""
 	}
-	return baseTypeName(lit.Type)
+	return common.BaseTypeName(lit.Type)
 }
 
 func compositeLiteralFieldVarName(lit *ast.CompositeLit, fieldName string) string {

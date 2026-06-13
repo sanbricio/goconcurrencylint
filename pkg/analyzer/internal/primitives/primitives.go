@@ -27,6 +27,7 @@ type Result struct {
 	Mutexes    map[string]bool
 	RWMutexes  map[string]bool
 	WaitGroups map[string]bool
+	Onces      map[string]bool
 }
 
 // FunctionResult lists sync primitive names visible inside a function:
@@ -39,6 +40,7 @@ type FunctionResult struct {
 	Mutexes           map[string]bool
 	RWMutexes         map[string]bool
 	WaitGroups        map[string]bool
+	Onces             map[string]bool
 	LocalWaitGroups   map[string]bool
 	PackageWaitGroups map[string]bool
 }
@@ -48,7 +50,7 @@ type FunctionResult struct {
 // pass.ResultOf[primitives.Analyzer].
 var Analyzer = &analysis.Analyzer{
 	Name:       "goconcurrencylint_primitives",
-	Doc:        "Collects sync.Mutex/RWMutex/WaitGroup variable names declared at package scope.",
+	Doc:        "Collects sync.Mutex/RWMutex/WaitGroup/Once variable names declared at package scope.",
 	Run:        run,
 	ResultType: reflect.TypeFor[*Result](),
 }
@@ -58,6 +60,7 @@ func run(pass *analysis.Pass) (any, error) {
 		Mutexes:    map[string]bool{},
 		RWMutexes:  map[string]bool{},
 		WaitGroups: map[string]bool{},
+		Onces:      map[string]bool{},
 	}
 
 	scope := pass.Pkg.Scope()
@@ -70,10 +73,25 @@ func run(pass *analysis.Pass) (any, error) {
 		if varObj.Pkg() != pass.Pkg {
 			continue
 		}
-		classify(name, varObj.Type(), res.Mutexes, res.RWMutexes, res.WaitGroups)
+		classify(name, varObj.Type(), res.maps())
 	}
 
 	return res, nil
+}
+
+// maps bundles this Result's per-kind name maps for classify.
+func (r *Result) maps() primitiveMaps {
+	return primitiveMaps{mu: r.Mutexes, rw: r.RWMutexes, wg: r.WaitGroups, once: r.Onces}
+}
+
+func (fr *FunctionResult) maps() primitiveMaps {
+	return primitiveMaps{mu: fr.Mutexes, rw: fr.RWMutexes, wg: fr.WaitGroups, once: fr.Onces}
+}
+
+// primitiveMaps bundles the per-kind name maps so classify keeps a single
+// signature as new primitives are added.
+type primitiveMaps struct {
+	mu, rw, wg, once map[string]bool
 }
 
 // ForFunction returns the primitives visible inside fn, merging the
@@ -85,9 +103,10 @@ func ForFunction(fn *ast.FuncDecl, pass *analysis.Pass, pkg *Result) *FunctionRe
 		Mutexes:    map[string]bool{},
 		RWMutexes:  map[string]bool{},
 		WaitGroups: map[string]bool{},
+		Onces:      map[string]bool{},
 	}
 
-	// Function parameters: include mutex/rwmutex but intentionally not
+	// Function parameters: include mutex/rwmutex/once but intentionally not
 	// waitgroups (Done-only worker functions would produce false positives).
 	if fn.Type != nil && fn.Type.Params != nil {
 		for _, field := range fn.Type.Params.List {
@@ -101,6 +120,8 @@ func ForFunction(fn *ast.FuncDecl, pass *analysis.Pass, pkg *Result) *FunctionRe
 					fr.Mutexes[name.Name] = true
 				case common.IsRWMutex(typ):
 					fr.RWMutexes[name.Name] = true
+				case common.IsOnce(typ):
+					fr.Onces[name.Name] = true
 				}
 			}
 		}
@@ -115,6 +136,7 @@ func ForFunction(fn *ast.FuncDecl, pass *analysis.Pass, pkg *Result) *FunctionRe
 	maps.Copy(fr.Mutexes, pkg.Mutexes)
 	maps.Copy(fr.RWMutexes, pkg.RWMutexes)
 	maps.Copy(fr.WaitGroups, pkg.WaitGroups)
+	maps.Copy(fr.Onces, pkg.Onces)
 	fr.LocalWaitGroups = localWG
 	fr.PackageWaitGroups = pkg.WaitGroups
 
@@ -131,6 +153,11 @@ func HasWaitGroups(fr *FunctionResult) bool {
 	return len(fr.WaitGroups) > 0
 }
 
+// HasOnces reports whether any sync.Once name is in scope.
+func HasOnces(fr *FunctionResult) bool {
+	return len(fr.Onces) > 0
+}
+
 func scanBody(body *ast.BlockStmt, pass *analysis.Pass, fr *FunctionResult) {
 	if body == nil {
 		return
@@ -143,7 +170,7 @@ func scanBody(body *ast.BlockStmt, pass *analysis.Pass, fr *FunctionResult) {
 				if typ == nil {
 					continue
 				}
-				classify(name.Name, typ, fr.Mutexes, fr.RWMutexes, fr.WaitGroups)
+				classify(name.Name, typ, fr.maps())
 			}
 
 		case *ast.AssignStmt:
@@ -156,7 +183,7 @@ func scanBody(body *ast.BlockStmt, pass *analysis.Pass, fr *FunctionResult) {
 					continue
 				}
 				if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
-					classify(ident.Name, typ, fr.Mutexes, fr.RWMutexes, fr.WaitGroups)
+					classify(ident.Name, typ, fr.maps())
 				}
 			}
 
@@ -166,7 +193,7 @@ func scanBody(body *ast.BlockStmt, pass *analysis.Pass, fr *FunctionResult) {
 				parentName := common.GetVarName(node.X)
 				if parentName != "?" {
 					compoundName := parentName + "." + node.Sel.Name
-					classify(compoundName, fieldType, fr.Mutexes, fr.RWMutexes, fr.WaitGroups)
+					classify(compoundName, fieldType, fr.maps())
 				}
 			}
 		}
@@ -195,15 +222,17 @@ func variableType(vs *ast.ValueSpec, pass *analysis.Pass) types.Type {
 }
 
 // classify routes name into the matching primitive map. The caller supplies
-// the three target maps so the helper can serve both *Result (package
-// scope) and *FunctionResult (per-function) without duplication.
-func classify(name string, typ types.Type, mu, rw, wg map[string]bool) {
+// the target maps so the helper can serve both *Result (package scope) and
+// *FunctionResult (per-function) without duplication.
+func classify(name string, typ types.Type, into primitiveMaps) {
 	switch {
 	case common.IsMutex(typ):
-		mu[name] = true
+		into.mu[name] = true
 	case common.IsRWMutex(typ):
-		rw[name] = true
+		into.rw[name] = true
 	case common.IsWaitGroup(typ):
-		wg[name] = true
+		into.wg[name] = true
+	case common.IsOnce(typ):
+		into.once[name] = true
 	}
 }

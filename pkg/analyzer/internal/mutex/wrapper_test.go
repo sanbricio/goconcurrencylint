@@ -3,15 +3,17 @@ package mutex
 import (
 	"go/ast"
 	"testing"
+
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
 // buildResolver parses src, indexes its receiver methods the same way the real
-// analyzer does (buildReceiverMethodMap), and returns a resolver bound to the
-// method named methodName on type receiverType.
+// analyzer does (common.BuildReceiverMethodMap), and returns a resolver bound
+// to the method named methodName on type receiverType.
 func buildResolver(t *testing.T, src, receiverType, methodName string, rawBodyEffects bool) *wrapperResolver {
 	t.Helper()
 	file, _ := parseFile(t, src)
-	rm := buildReceiverMethodMap([]*ast.File{file})
+	rm := common.BuildReceiverMethodMap([]*ast.File{file})
 	fn := rm[receiverType][methodName]
 	if fn == nil {
 		t.Fatalf("method %s.%s not found in receiver map", receiverType, methodName)

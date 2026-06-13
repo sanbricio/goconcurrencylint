@@ -51,6 +51,12 @@ func IsWaitGroup(typ types.Type) bool {
 	return MatchesPkgAndName(typ, "sync", "WaitGroup")
 }
 
+// IsOnce returns true if the given type is sync.Once or *sync.Once.
+func IsOnce(typ types.Type) bool {
+	typ = DerefOnce(typ)
+	return MatchesPkgAndName(typ, "sync", "Once")
+}
+
 // MatchesPkgAndName reports whether typ is a named type declared in pkg
 // whose name matches any of names.
 //

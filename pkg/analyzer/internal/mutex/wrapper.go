@@ -169,7 +169,7 @@ func (w *wrapperResolver) currentMethodContainsFieldCall(varName string, methodN
 }
 
 func (w *wrapperResolver) siblingMethodContainsFieldCall(fieldSuffix string, siblingMethods, fieldMethods []string) bool {
-	receiverType := receiverTypeName(w.function)
+	receiverType := common.ReceiverTypeName(w.function)
 	if receiverType == "" {
 		return false
 	}
@@ -200,7 +200,7 @@ func (w *wrapperResolver) siblingMethodContainsFieldCall(fieldSuffix string, sib
 }
 
 func (w *wrapperResolver) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
-	receiverType := receiverTypeName(w.function)
+	receiverType := common.ReceiverTypeName(w.function)
 	if receiverType == "" {
 		return false
 	}
@@ -233,7 +233,7 @@ func (w *wrapperResolver) anySiblingMethodContainsFieldCall(fieldSuffix, exclude
 }
 
 func (w *wrapperResolver) anySiblingMethodContainsFieldSuffix(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
-	receiverType := receiverTypeName(w.function)
+	receiverType := common.ReceiverTypeName(w.function)
 	if receiverType == "" {
 		return false
 	}
@@ -266,7 +266,7 @@ func (w *wrapperResolver) typeNameForBaseVar(baseVar string) string {
 		return ""
 	}
 	if baseVar == common.ReceiverName(w.function) {
-		return receiverTypeName(w.function)
+		return common.ReceiverTypeName(w.function)
 	}
 	if w.function == nil || w.function.Body == nil || w.typesInfo == nil {
 		return ""
@@ -281,7 +281,7 @@ func (w *wrapperResolver) typeNameForBaseVar(baseVar string) string {
 		if !ok || ident.Name != baseVar {
 			return true
 		}
-		found = baseTypeNameFromType(w.typesInfo.TypeOf(ident))
+		found = common.BaseTypeNameFromType(w.typesInfo.TypeOf(ident))
 		return found == ""
 	})
 	return found
@@ -308,7 +308,7 @@ func (w *wrapperResolver) isBarrierPairHalf(varName, methodName string, opposite
 }
 
 func (w *wrapperResolver) anySiblingBodyIsSingleFieldSuffixCall(fieldSuffix, excludeMethod string, methodNames []string) bool {
-	receiverType := receiverTypeName(w.function)
+	receiverType := common.ReceiverTypeName(w.function)
 	if receiverType == "" {
 		return false
 	}
