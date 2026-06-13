@@ -23,6 +23,7 @@ analyzer.Analyzer  ── umbrella: owns no logic, re-emits child diagnostics
         │ Requires
         ├─ mutex.SubAnalyzer      ─┐
         ├─ waitgroup.SubAnalyzer  ─┤  each returns []analysis.Diagnostic as its Result
+        ├─ once.SubAnalyzer       ─┤
         └─ copycheck.Analyzer     ─┘
                                    │  and depends on shared "foundation" analyzers
         foundation (run once per package, shared via pass.ResultOf):
@@ -38,9 +39,10 @@ Why this shape:
   every check would otherwise repeat. Declaring them in `Requires` means
   `go/analysis` runs each one *once per package* and hands the cached `Result` to
   every consumer. That is DRY enforced by the framework.
-- **Each check is an independent sub-analyzer.** `mutex`, `waitgroup` and
-  `copycheck` know nothing about each other. Adding a fourth primitive later
-  (`sync.Once`, `errgroup`…) is a new sibling, not a patch to existing code.
+- **Each check is an independent sub-analyzer.** `mutex`, `waitgroup`, `once`
+  and `copycheck` know nothing about each other. Adding the next primitive
+  (`errgroup`, `atomic`…) is a new sibling, not a patch to existing code —
+  `once` landed exactly this way.
 - **Only the umbrella reports.** Sub-analyzers return their diagnostics as a
   `Result` ([]analysis.Diagnostic) instead of calling `pass.Report`. The umbrella
   collects those slices and re-emits them. This keeps the whole graph observable
@@ -50,9 +52,10 @@ Why this shape:
 
 | Analyzer | Requires | Result |
 |---|---|---|
-| `analyzer.Analyzer` (umbrella) | `mutex`, `waitgroup`, `copycheck` | — (calls `pass.Report`) |
+| `analyzer.Analyzer` (umbrella) | `mutex`, `waitgroup`, `once`, `copycheck` | — (calls `pass.Report`) |
 | `mutex.SubAnalyzer` | `inspect`, `primitives`, `filesetup` | `[]analysis.Diagnostic` |
 | `waitgroup.SubAnalyzer` | `inspect`, `primitives`, `filesetup` | `[]analysis.Diagnostic` |
+| `once.SubAnalyzer` | `inspect`, `primitives`, `filesetup` | `[]analysis.Diagnostic` |
 | `copycheck.Analyzer` | `inspect`, `filesetup` | `[]analysis.Diagnostic` |
 | `primitives.Analyzer` | — (reads `pass.Pkg.Scope()`) | `*primitives.Result` |
 | `filesetup.Analyzer` | — (reads `pass.Files`) | `*filesetup.Result` |
@@ -102,8 +105,9 @@ Tracing `lock-without-unlock` for `mu.Lock()` with no matching `Unlock()`:
    `pass.ResultOf[mutex.SubAnalyzer]` and re-emits each diagnostic via
    `pass.Report`.
 
-`waitgroup` follows the exact same steps 1–4 and 8–9. Only the engine in step 5–7
-differs (see below).
+`waitgroup` and `once` follow the exact same steps 1–4 and 8–9. Only the engine
+in step 5–7 differs (see below); `once` is the smallest of the three — a single
+walk that resolves each `Do` argument and scans it for re-entrant calls.
 
 ### Direct path — `copycheck`
 
@@ -171,6 +175,7 @@ come from?" friction.
 | [`internal/filesetup`](pkg/analyzer/internal/filesetup) | Generated-file detection + per-file comment filters |
 | [`internal/mutex`](pkg/analyzer/internal/mutex) | Mutex / RWMutex engine + collaborators |
 | [`internal/waitgroup`](pkg/analyzer/internal/waitgroup) | WaitGroup engine + collaborators |
+| [`internal/once`](pkg/analyzer/internal/once) | sync.Once checks (re-entrant Do, Do(nil)) |
 | [`internal/copycheck`](pkg/analyzer/internal/copycheck) | Copy-by-value detection |
 | [`internal/common`](pkg/analyzer/internal/common) | Shared AST/type helpers (`IsMutex`, `GetVarName`…) |
 | [`internal/common/category`](pkg/analyzer/internal/common/category) | Stable category IDs (one per check) |

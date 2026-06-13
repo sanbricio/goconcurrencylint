@@ -45,6 +45,10 @@ const (
 	DoneOutsideGoroutine    Category = "done-outside-goroutine"
 	GoPanic                 Category = "go-panic"
 	SyncPrimitiveCopy       Category = "sync-primitive-copy"
+
+	// sync.Once checks.
+	OnceDoDeadlock Category = "once-do-deadlock"
+	OnceDoNil      Category = "once-do-nil"
 )
 
 // All returns every known check category. Order is not significant.
@@ -78,6 +82,8 @@ func All() []Category {
 		DoneOutsideGoroutine,
 		GoPanic,
 		SyncPrimitiveCopy,
+		OnceDoDeadlock,
+		OnceDoNil,
 	}
 }
 

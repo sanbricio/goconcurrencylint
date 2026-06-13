@@ -181,7 +181,7 @@ func valueKind(typ types.Type) string {
 
 func directValueKind(typ types.Type) string {
 	typ = types.Unalias(typ)
-	if match, ok := common.MatchPkgAndName(typ, "sync", "Mutex", "RWMutex", "WaitGroup"); ok {
+	if match, ok := common.MatchPkgAndName(typ, "sync", "Mutex", "RWMutex", "WaitGroup", "Once"); ok {
 		switch match {
 		case "Mutex":
 			return "mutex"
@@ -189,6 +189,8 @@ func directValueKind(typ types.Type) string {
 			return "rwmutex"
 		case "WaitGroup":
 			return "waitgroup"
+		case "Once":
+			return "once"
 		}
 	}
 	return ""

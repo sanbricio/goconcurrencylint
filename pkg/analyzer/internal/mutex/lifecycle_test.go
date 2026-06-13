@@ -7,12 +7,14 @@ import (
 	"go/token"
 	"go/types"
 	"testing"
+
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
 func buildLifecycleResolver(t *testing.T, src, receiverType, methodName string) *lifecycleResolver {
 	t.Helper()
 	file, info := parseTypedLifecycleFile(t, src)
-	rm := buildReceiverMethodMap([]*ast.File{file})
+	rm := common.BuildReceiverMethodMap([]*ast.File{file})
 	fn := rm[receiverType][methodName]
 	if fn == nil {
 		t.Fatalf("method %s.%s not found in receiver map", receiverType, methodName)

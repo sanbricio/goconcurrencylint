@@ -12,6 +12,7 @@ func TestAnalyzerFixtures(t *testing.T) {
 	}{
 		{name: "mutex", packages: []string{"mutex"}},
 		{name: "waitgroup", packages: []string{"waitgroup"}},
+		{name: "once", packages: []string{"once"}},
 		{name: "packagelevel", packages: []string{"packagelevel"}},
 		{name: "ignoredirective", packages: []string{"ignoredirective"}},
 		{name: "generated", packages: []string{"generated"}},
