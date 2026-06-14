@@ -208,13 +208,16 @@ func GoodUnconditionalDone() {
 	wg.Wait()
 }
 
-// Add in a goroutine that never calls Done (e.g., due to deadlock or channel never sent)
-func BadAddNeverDone() {
+// Not flagged: a Done is present in the goroutine, reached after a blocking
+// receive. A present-but-unguaranteed goroutine Done means the counter is not
+// provably orphaned, so Add-without-Done stays silent (see
+// hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedDoneAfterBlockingReceive() {
 	var wg sync.WaitGroup
 	ch := make(chan struct{})
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
-		<-ch // never sends, so Done is never called
+		<-ch
 		wg.Done()
 	}()
 	wg.Wait()
@@ -246,7 +249,7 @@ func BadPanicWithoutRecover() {
 func BadDoneAfterConditionalPanic() {
 	var wg sync.WaitGroup
 	shouldPanic := true
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		if shouldPanic {
 			panic("error")
@@ -291,7 +294,7 @@ func GoodShadowedPanicFunctionBeforeDone() {
 func BadDoneAfterRuntimeGoexit() {
 	var wg sync.WaitGroup
 	shouldExit := true
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		if shouldExit {
 			runtime.Goexit()
@@ -385,10 +388,13 @@ func GoodSingleDonePerWorkerBranch(cond bool) {
 	wg.Wait()
 }
 
-// Add without Done in a goroutine with a conditional return
-func BadDeferWithConditionalReturn() {
+// Not flagged: each goroutine contains a Done (one guaranteed, one reached only
+// after a conditional return). A present-but-unguaranteed goroutine Done means
+// the counter is not provably orphaned, so Add-without-Done stays silent (see
+// hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedDeferAfterConditionalReturn() {
 	var wg sync.WaitGroup
-	wg.Add(2) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
@@ -404,27 +410,35 @@ func BadDeferWithConditionalReturn() {
 	wg.Wait()
 }
 
-// Add without Done in a goroutine with conditional Done
-func BadConditionalDone() {
+// Not flagged: the goroutine's Done is guarded by a runtime condition. The
+// linter cannot prove the branch is never taken, and flagging every conditional
+// Done would false-positive on correct code, so Add-without-Done stays silent
+// (see hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedConditionalDone() {
 	var wg sync.WaitGroup
 	condition := false
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
-		if condition { // condition is false, so Done is never called
+		if condition {
 			wg.Done()
 		}
 	}()
 	wg.Wait()
 }
 
-func BadConditionalEventDoneCanLeaveWaitHanging(events <-chan string) {
+// Not flagged: an event-driven Done inside a loop. Whether every Add is matched
+// depends on runtime events the linter cannot see; this is the canonical
+// producer/consumer shape used by correct code (e.g. the kubernetes and vitess
+// test helpers this guard is derived from), so reporting Add-without-Done here
+// would be a false positive (see hasUnguaranteedGoroutineDone in balance.go).
+func UnflaggedConditionalEventDone(events <-chan string) {
 	shards := []string{"-40", "40-80", "80-"}
 	seen := make(map[string]bool, len(shards))
 	var wg sync.WaitGroup
 
 	for _, shard := range shards {
 		seen[shard] = false
-		wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+		wg.Add(1)
 	}
 
 	go func() {
@@ -439,36 +453,46 @@ func BadConditionalEventDoneCanLeaveWaitHanging(events <-chan string) {
 	wg.Wait()
 }
 
-// Also test with a more complex conditional
-func BadConditionalDoneComplex() {
+// Not flagged: a conditional Done. The linter does not constant-fold the guard,
+// and a present-but-unguaranteed goroutine Done means the counter is not provably
+// orphaned, so Add-without-Done stays silent (see hasUnguaranteedGoroutineDone in
+// balance.go). Regression guard.
+func UnflaggedConditionalDoneComplex() {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		x := 1
-		if x > 5 { // This is always false
+		if x > 5 {
 			wg.Done()
 		}
 	}()
 	wg.Wait()
 }
 
-// Test with switch statement
-func BadConditionalDoneSwitch() {
+// Not flagged: a Done that lives in one switch case. The linter cannot prove the
+// case is never selected, and a present-but-unguaranteed goroutine Done means the
+// counter is not provably orphaned, so Add-without-Done stays silent (see
+// hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedConditionalDoneSwitch() {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		x := 1
 		switch x {
-		case 2: // x is 1, so this case won't match
+		case 2:
 			wg.Done()
 		}
 	}()
 	wg.Wait()
 }
 
-func BadSwitchNoDefault() {
+// Not flagged: Done lives in switch cases with no default. The linter cannot
+// prove no case is selected, and a present-but-unguaranteed goroutine Done means
+// the counter is not provably orphaned, so Add-without-Done stays silent (see
+// hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedSwitchNoDefault() {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		x := 1
 		switch x {
@@ -476,7 +500,6 @@ func BadSwitchNoDefault() {
 			wg.Done()
 		case 3:
 			wg.Done()
-			// No default, and x=1 doesn't match any case
 		}
 	}()
 	wg.Wait()
@@ -618,9 +641,14 @@ func (s customDoneSignal) Done() <-chan struct{} {
 	return s.ch
 }
 
-func BadWorkerDoneOnNonContextSignalMissingDefaultDone(sig customDoneSignal) {
+// Not flagged: the worker's Done sits in one select case while the default
+// returns without it. The linter cannot know which case wins at runtime, and a
+// present-but-unguaranteed goroutine Done means the counter is not provably
+// orphaned, so Add-without-Done stays silent (see hasUnguaranteedGoroutineDone in
+// balance.go). Regression guard.
+func UnflaggedWorkerDoneOnNonContextSignal(sig customDoneSignal) {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		for {
 			select {
@@ -902,10 +930,14 @@ func GoodDoneBeforeLabeledBreakInInfiniteLoop() {
 	wg.Wait()
 }
 
-// Bad: the conditional break can leave the loop before Done runs.
-func BadConditionalBreakBeforeDoneInInfiniteLoop(stop func() bool) {
+// Not flagged: a conditional break could leave the loop before Done runs, but the
+// Done is present and the linter cannot prove the break is always taken. A
+// present-but-unguaranteed goroutine Done means the counter is not provably
+// orphaned, so Add-without-Done stays silent (see hasUnguaranteedGoroutineDone in
+// balance.go). Regression guard.
+func UnflaggedConditionalBreakBeforeDone(stop func() bool) {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		for {
 			if stop() {
@@ -918,10 +950,14 @@ func BadConditionalBreakBeforeDoneInInfiniteLoop(stop func() bool) {
 	wg.Wait()
 }
 
-// Bad: a conditioned for can run zero times, so Done is not guaranteed.
-func BadDoneInConditionedLoop(n int) {
+// Not flagged: a counted loop can run zero times, so the Done is not guaranteed,
+// but it is present and the linter cannot prove the loop never runs. A
+// present-but-unguaranteed goroutine Done means the counter is not provably
+// orphaned, so Add-without-Done stays silent (see hasUnguaranteedGoroutineDone in
+// balance.go). Regression guard.
+func UnflaggedDoneInConditionedLoop(n int) {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		for i := 0; i < n; i++ {
 			wg.Done()

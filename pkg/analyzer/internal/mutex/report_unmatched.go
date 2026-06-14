@@ -55,7 +55,8 @@ func (c *Checker) reportBranchDelta(mutexName string, initial, final *Stats, isR
 	}
 
 	suppressBorrowedUnlock := c.unlockDiagnosticSuppressed(mutexName, WriteLockPattern.LockMethods) ||
-		c.terminatingTailUnlockSuppressed(mutexName)
+		c.terminatingTailUnlockSuppressed(mutexName) ||
+		c.lockAcquiredInCallbackArgument(mutexName, WriteLockPattern.LockMethods)
 	unlockMessage := mutexType + " '" + mutexName + "' is unlocked but not locked"
 	if delta := final.borrowedLock - initial.borrowedLock; delta > 0 && !suppressBorrowedUnlock {
 		for _, pos := range trailingPositions(final.borrowedUnlockPos, delta) {
@@ -72,7 +73,8 @@ func (c *Checker) reportBranchDelta(mutexName string, initial, final *Stats, isR
 		}
 
 		suppressBorrowedRUnlock := c.unlockDiagnosticSuppressed(mutexName, ReadLockPattern.LockMethods) ||
-			c.terminatingTailUnlockSuppressed(mutexName)
+			c.terminatingTailUnlockSuppressed(mutexName) ||
+			c.lockAcquiredInCallbackArgument(mutexName, ReadLockPattern.LockMethods)
 		runlockMessage := "rwmutex '" + mutexName + "' is runlocked but not rlocked"
 		if delta := final.borrowedRLock - initial.borrowedRLock; delta > 0 && !suppressBorrowedRUnlock {
 			for _, pos := range trailingPositions(final.borrowedRUnlockPos, delta) {
@@ -130,7 +132,9 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 		c.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
 	}
 
-	suppressFunctionLevelUnlock := branchType == "" && c.unlockDiagnosticSuppressed(mutexName, WriteLockPattern.LockMethods)
+	suppressFunctionLevelUnlock := branchType == "" &&
+		(c.unlockDiagnosticSuppressed(mutexName, WriteLockPattern.LockMethods) ||
+			c.lockAcquiredInCallbackArgument(mutexName, WriteLockPattern.LockMethods))
 	for _, pos := range stats.borrowedUnlockPos {
 		if suppressFunctionLevelUnlock {
 			continue
@@ -148,7 +152,9 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 			}
 			c.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
 		}
-		suppressFunctionLevelRUnlock := branchType == "" && c.unlockDiagnosticSuppressed(mutexName, ReadLockPattern.LockMethods)
+		suppressFunctionLevelRUnlock := branchType == "" &&
+			(c.unlockDiagnosticSuppressed(mutexName, ReadLockPattern.LockMethods) ||
+				c.lockAcquiredInCallbackArgument(mutexName, ReadLockPattern.LockMethods))
 		for _, pos := range stats.borrowedRUnlockPos {
 			if suppressFunctionLevelRUnlock {
 				continue

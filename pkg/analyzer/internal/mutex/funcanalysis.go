@@ -75,6 +75,7 @@ func (c *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames m
 		loopCarry:             c.loopCarry,
 		explicitTransferCache: c.explicitTransferCache,
 		lifecycleScanCache:    c.lifecycleScanCache,
+		safeDeferBeforeLock:   c.safeDeferBeforeLock,
 		funcAnalysis:          fa,
 	}
 	// Wire the per-function collaborators against the fork's own names and

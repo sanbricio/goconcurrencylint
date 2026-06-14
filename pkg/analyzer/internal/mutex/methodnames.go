@@ -33,3 +33,16 @@ func matchingUnlockMethod(methodName string) string {
 		return ""
 	}
 }
+
+// matchingLockMethod is the inverse of matchingUnlockMethod: the lock call that
+// balances a given unlock call.
+func matchingLockMethod(methodName string) string {
+	switch methodName {
+	case "Unlock":
+		return "Lock"
+	case "RUnlock":
+		return "RLock"
+	default:
+		return ""
+	}
+}

@@ -166,6 +166,13 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 // handleDeferUnlock processes defer unlock calls
 func (c *Checker) handleDeferUnlock(varName string, pos token.Pos, stats map[string]*Stats, isRWMutex bool) {
 	if stats[varName].lock == 0 {
+		if c.safeDeferBeforeLock[pos] {
+			// defer-before-lock: the matching Lock immediately follows in the
+			// same block, so this deferred unlock balances it at return. Credit
+			// it; the upcoming Lock increments lock to match.
+			stats[varName].deferUnlock++
+			return
+		}
 		mutexType := "mutex"
 		if isRWMutex {
 			mutexType = "rwmutex"
@@ -180,6 +187,10 @@ func (c *Checker) handleDeferUnlock(varName string, pos token.Pos, stats map[str
 // handleDeferRUnlock processes defer runlock calls
 func (c *Checker) handleDeferRUnlock(varName string, pos token.Pos, stats map[string]*Stats) {
 	if stats[varName].rlock == 0 {
+		if c.safeDeferBeforeLock[pos] {
+			stats[varName].deferRUnlock++
+			return
+		}
 		c.errorCollector.AddError(pos, category.DeferUnlockWithoutLock, "rwmutex '"+varName+"' has defer runlock but no corresponding rlock")
 		c.deferErrors.badDeferRUnlock[varName] = true
 	} else {

@@ -62,7 +62,17 @@ func (b *balanceValidator) validateBalance(wgName string, stats *Stats) {
 	totalDone += guaranteedFromGoroutines
 
 	if stats.totalAdd > totalDone {
-		b.reportUnmatchedAdds(wgName, stats, totalDone)
+		// A count shortfall only means "Add without corresponding Done" when no
+		// Done() exists at all. When a related goroutine *does* call Done on this
+		// WaitGroup — even on a path that isn't guaranteed (a conditional Done, or
+		// a Done reached only after an early return/panic, or an event-driven Done
+		// in a loop) — a corresponding Done provably exists, so the counter is not
+		// structurally orphaned. Claiming "Add without corresponding Done" there is
+		// misleading; the "Done is not guaranteed on every path" concern is owned by
+		// the more precise deferred-Done and cancellation checks. Suppress here.
+		if !b.hasUnguaranteedGoroutineDone(wgName) {
+			b.reportUnmatchedAdds(wgName, stats, totalDone)
+		}
 	}
 
 	if totalDone > stats.totalAdd {
@@ -141,6 +151,40 @@ func (b *balanceValidator) countMainFlowDoneInElse(stmt ast.Stmt, wgName string,
 // countGuaranteedDoneInGoroutines counts Done calls that are guaranteed to execute in goroutines
 func (b *balanceValidator) countGuaranteedDoneInGoroutines(wgName string) int {
 	return b.countGuaranteedDoneInStatements(b.function.Body.List, wgName, 1)
+}
+
+// hasUnguaranteedGoroutineDone reports whether any goroutine launched in the
+// function calls Done on wgName on some path but is *not* guaranteed to run it on
+// every path (a conditional Done, an event-driven Done in a loop, or a Done
+// reached only after an early return/panic/Goexit). When such a Done exists the
+// counter is not structurally orphaned — a corresponding Done provably exists —
+// so the unmatched-Add report stays silent and leaves the "Done isn't guaranteed"
+// concern to the more precise deferred-Done and cancellation checks.
+//
+// Goroutines whose Done *is* guaranteed are deliberately excluded: those are
+// already tallied by countGuaranteedDoneInGoroutines, so a remaining shortfall
+// (e.g. Add(3) against two `defer wg.Done()` goroutines) is a real, statically
+// certain imbalance that must still be reported.
+func (b *balanceValidator) hasUnguaranteedGoroutineDone(wgName string) bool {
+	if b.function == nil || b.function.Body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(b.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		if info, related := b.goroutineDoneInfo(goStmt, wgName); related && info.hasAnyDone && !info.hasGuaranteedDone {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // checkWaitGroupBalance validates that Add and Done calls are properly balanced

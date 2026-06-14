@@ -226,6 +226,32 @@ func GoodWaitInEarlyExitBranchDoesNotGateLaterAdd(batches [][]int, doneCh <-chan
 	}
 }
 
+// Like the case above, but with a statement BETWEEN the Wait and the return (a
+// cleanup/log call, as in loki's compactor.go). The branch still exits
+// unconditionally, so the Wait must not gate the Adds in the sibling case.
+func GoodWaitBeforeReturnWithTrailingStmtDoesNotGateAdd(doneCh <-chan struct{}, tick <-chan struct{}, running *bool) {
+	var wg sync.WaitGroup
+	for {
+		select {
+		case <-doneCh:
+			wg.Wait()
+			println("exiting")
+			return
+		case <-tick:
+			if !*running {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+				}()
+				*running = true
+			} else {
+				wg.Wait()
+				*running = false
+			}
+		}
+	}
+}
+
 // Edge case where Add is called after Wait, but in a different flow
 func EdgeCaseAddAfterWaitMainFlow() {
 	var wg sync.WaitGroup

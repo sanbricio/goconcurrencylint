@@ -251,6 +251,17 @@ func BadGoroutineUnlockHandoffThenParentUnlock() {
 	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
 }
 
+// A lock taken in a GOROUTINE (async) is not a synchronous callback argument,
+// so the parent's unlock is genuinely unmatched and stays flagged. Guards the
+// lockAcquiredInCallbackArgument suppression from over-reaching to goroutines.
+func BadLockInGoroutineThenParentUnlock() {
+	var mu sync.Mutex
+	go func() {
+		mu.Lock() // want "mutex 'mu' is locked but not unlocked in goroutine"
+	}()
+	mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+}
+
 func BadGoroutineLockOrderCycle() {
 	var muA, muB sync.Mutex
 	go func() {

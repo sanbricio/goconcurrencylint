@@ -74,13 +74,16 @@ func (w *workerDoneAnalyzer) containsDoneCall(stmt ast.Stmt, wgName string) bool
 	return found
 }
 
-// waitInEarlyExitBranch reports whether the Wait at waitPos is the last
-// meaningful statement of its branch: the next stmt in the enclosing list
-// is a return / break / goto / abort. Such a Wait belongs to a control-flow
-// branch that never reaches the surrounding code — e.g.
+// waitInEarlyExitBranch reports whether the Wait at waitPos sits in a branch
+// that unconditionally exits after it: everything following the Wait in the
+// enclosing list runs straight to a return / break / goto / abort, even across
+// intervening statements (e.g. a log call between the Wait and the return).
+// Such a Wait belongs to a control-flow branch that never reaches the
+// surrounding code, so it cannot gate later Adds — e.g.
 //
 //	case <-done:
 //	    wg.Wait()
+//	    level.Info(logger).Log("msg", "exiting")
 //	    return
 func (w *workerDoneAnalyzer) waitInEarlyExitBranch(waitPos token.Pos) bool {
 	found := false
@@ -93,7 +96,7 @@ func (w *workerDoneAnalyzer) waitInEarlyExitBranch(waitPos token.Pos) bool {
 			if !nodeContainsPos(stmt, waitPos) {
 				continue
 			}
-			if i+1 < len(stmts) && w.isTerminatingStatement(stmts[i+1]) {
+			if rest := stmts[i+1:]; len(rest) > 0 && w.blockAlwaysTerminates(&ast.BlockStmt{List: rest}) {
 				found = true
 				return false
 			}

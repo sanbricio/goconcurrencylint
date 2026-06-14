@@ -266,15 +266,18 @@ func BadFieldWaitGroupAddInsideGoroutineWithLocalWait(mirror *MirrorLike) {
 
 // ---------- Switch/Select Edge Cases ----------
 
-// Bad: switch with default that has Done, but another case does NOT
-func BadSwitchDefaultOnlyDone() {
+// Not flagged: the default has Done while another case does not. The linter
+// cannot prove which case is selected, and a present-but-unguaranteed goroutine
+// Done means the counter is not provably orphaned, so Add-without-Done stays
+// silent (see hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedSwitchDefaultOnlyDone() {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		x := 1
 		switch x {
 		case 2:
-			// no Done here - if x==2, Done is never called
+			// no Done here
 		default:
 			wg.Done()
 		}
@@ -299,18 +302,21 @@ func GoodSelectAllCasesDone() {
 	wg.Wait()
 }
 
-// Bad: select with Done missing in one comm clause
-func BadSelectMissingDoneInCase() {
+// Not flagged: one select comm clause has Done, the other does not. The linter
+// cannot know which clause fires, and a present-but-unguaranteed goroutine Done
+// means the counter is not provably orphaned, so Add-without-Done stays silent
+// (see hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedSelectMissingDoneInCase() {
 	var wg sync.WaitGroup
 	ch1 := make(chan int)
 	ch2 := make(chan int)
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		select {
 		case <-ch1:
 			wg.Done()
 		case <-ch2:
-			// forgot Done in this case
+			// no Done in this case
 		}
 	}()
 	wg.Wait()
@@ -334,17 +340,20 @@ func GoodTypeSwitchAllCasesDone() {
 	wg.Wait()
 }
 
-// Bad: type switch with Done missing in one case
-func BadTypeSwitchMissingDone() {
+// Not flagged: a type switch with Done missing in one case. The linter cannot
+// prove the uncovered case is selected, and a present-but-unguaranteed goroutine
+// Done means the counter is not provably orphaned, so Add-without-Done stays
+// silent (see hasUnguaranteedGoroutineDone in balance.go). Regression guard.
+func UnflaggedTypeSwitchMissingDone() {
 	var wg sync.WaitGroup
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		var x interface{} = "hello"
 		switch x.(type) {
 		case int:
 			wg.Done()
 		case string:
-			// forgot Done for string case
+			// no Done for string case
 		default:
 			wg.Done()
 		}

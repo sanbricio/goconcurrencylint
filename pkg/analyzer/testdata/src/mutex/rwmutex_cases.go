@@ -127,17 +127,18 @@ func GoodRWDeferRUnlock() {
 	defer mu.RUnlock()
 }
 
-// Defer runlock without prior rlock
-func BadRWDeferRUnlockWithoutRLock() {
+// Defer-before-rlock: the deferred RUnlock runs at return, after the adjacent
+// RLock, so the pair is balanced (mirrors GoodDeferUnlockBeforeAdjacentLock).
+func GoodRWDeferRUnlockBeforeAdjacentRLock() {
 	var mu sync.RWMutex
-	defer mu.RUnlock() // want "rwmutex 'mu' has defer runlock but no corresponding rlock"
+	defer mu.RUnlock()
 	mu.RLock()
 }
 
-// Defer unlock without prior lock
-func BadRWDeferUnlockWithoutLock() {
+// Defer-before-lock on a write lock: balanced for the same reason.
+func GoodRWDeferUnlockBeforeAdjacentLock() {
 	var mu sync.RWMutex
-	defer mu.Unlock() // want "rwmutex 'mu' has defer unlock but no corresponding lock"
+	defer mu.Unlock()
 	mu.Lock()
 }
 
@@ -468,4 +469,47 @@ func BadRWDoubleUnlock() {
 	mu.Lock()
 	mu.Unlock()
 	mu.Unlock() // want "rwmutex 'mu' is unlocked but not locked"
+}
+
+// --- Locks acquired inside synchronous callbacks ---------------------------
+
+type rwCallbackStream struct {
+	chunkMtx sync.RWMutex
+}
+
+type rwCallbackStreamMap struct{}
+
+// LoadOrStoreNew runs exactly one of its callbacks synchronously and returns
+// the stream with chunkMtx already held, for the caller to release.
+func (rwCallbackStreamMap) LoadOrStoreNew(key string, newFn func() (*rwCallbackStream, error), loadFn func(*rwCallbackStream) error) (*rwCallbackStream, bool, error) {
+	return nil, false, nil
+}
+
+// The write lock is taken inside a callback passed to LoadOrStoreNew and
+// released by the caller. The lock isn't visible to flow analysis, so the
+// unlock must NOT be reported as "unlocked but not locked" (loki
+// pkg/ingester/instance.go pattern). A goroutine lock, by contrast, still
+// fires — see BadLockInGoroutineThenParentUnlock.
+func GoodRWUnlockAfterLockInCallbackArgument(m rwCallbackStreamMap, keys []string) error {
+	var appendErr error
+	for _, key := range keys {
+		s, _, err := m.LoadOrStoreNew(key,
+			func() (*rwCallbackStream, error) {
+				s := &rwCallbackStream{}
+				s.chunkMtx.Lock()
+				return s, nil
+			},
+			func(s *rwCallbackStream) error {
+				s.chunkMtx.Lock()
+				return nil
+			},
+		)
+		if err != nil {
+			appendErr = err
+			continue
+		}
+		_ = s
+		s.chunkMtx.Unlock()
+	}
+	return appendErr
 }

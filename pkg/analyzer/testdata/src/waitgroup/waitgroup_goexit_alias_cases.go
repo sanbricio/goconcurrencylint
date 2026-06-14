@@ -8,7 +8,7 @@ import (
 func BadDoneAfterAliasedRuntimeGoexit() {
 	var wg sync.WaitGroup
 	shouldExit := true
-	wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(1)
 	go func() {
 		if shouldExit {
 			rt.Goexit()

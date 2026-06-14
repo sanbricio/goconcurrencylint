@@ -188,6 +188,68 @@ func f() {
 	}
 }
 
+// A goroutine whose Done exists but is not guaranteed on every path (a
+// conditional or event-driven Done) must not be reported as "Add without
+// corresponding Done": a corresponding Done provably exists, so the counter is
+// not structurally orphaned. The "not guaranteed on every path" concern belongs
+// to the deferred-Done / cancellation checks instead.
+func TestBalanceValidator_UnguaranteedGoroutineDoneSuppressesUnmatchedAdd(t *testing.T) {
+	balance, fn := newTestBalanceValidator(t, `package p
+func f() {
+	wg.Add(1)
+	go func() {
+		if cond {
+			wg.Done()
+		}
+	}()
+}`)
+	balance.goroutineDoneInfo = func(*ast.GoStmt, string) (doneCallInfo, bool) {
+		return doneCallInfo{hasAnyDone: true, hasGuaranteedDone: false}, true
+	}
+	stats := map[string]*Stats{
+		"wg": {
+			addCalls: []addCall{{pos: methodCallPos(fn, "wg", "Add", 0), value: 1, known: true}},
+			totalAdd: 1,
+		},
+	}
+
+	balance.checkWaitGroupBalance(stats)
+
+	if got := len(balanceReporter(balance).calls); got != 0 {
+		t.Fatalf("present-but-unguaranteed goroutine Done must suppress Add-without-Done, got %d diagnostics", got)
+	}
+}
+
+// A shortfall against goroutines whose Done *is* guaranteed (Add(2) with a single
+// guaranteed Done) is a statically certain imbalance and must still be reported,
+// even though a goroutine Done exists. This guards the suppression above from
+// swallowing real, provable imbalances.
+func TestBalanceValidator_GuaranteedGoroutineShortfallStillReports(t *testing.T) {
+	balance, fn := newTestBalanceValidator(t, `package p
+func f() {
+	wg.Add(2)
+	go func() {
+		wg.Done()
+	}()
+}`)
+	stats := map[string]*Stats{
+		"wg": {
+			addCalls: []addCall{{pos: methodCallPos(fn, "wg", "Add", 0), value: 2, known: true}},
+			totalAdd: 2,
+		},
+	}
+
+	balance.checkWaitGroupBalance(stats)
+
+	reporter := balanceReporter(balance)
+	if len(reporter.calls) != 1 {
+		t.Fatalf("expected 1 diagnostic for guaranteed-Done shortfall, got %d", len(reporter.calls))
+	}
+	if reporter.calls[0].cat != category.AddWithoutDone {
+		t.Fatalf("category = %q, want %q", reporter.calls[0].cat, category.AddWithoutDone)
+	}
+}
+
 func TestBalanceValidator_LiteralAddLoopMismatchReports(t *testing.T) {
 	balance, fn := newTestBalanceValidator(t, `package p
 func f() {

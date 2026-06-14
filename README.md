@@ -85,15 +85,15 @@ Because the tool is a standard `go/analysis` single-checker, it accepts the usua
 | ID | Primitive | Description |
 |---|---|---|
 | `lock-without-unlock` | `sync.Mutex`, `sync.RWMutex` | A `Lock()` / `RLock()` call has no matching `Unlock()` / `RUnlock()` on some execution path. |
-| `unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | An `Unlock()` / `RUnlock()` call is reached without a prior matching lock (including double-unlocks). |
-| `defer-unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Unlock()` / `defer mu.RUnlock()` is scheduled before the corresponding lock is acquired. |
+| `unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | An `Unlock()` / `RUnlock()` call is reached without a prior matching lock (including double-unlocks). A lock taken inside a synchronous callback argument counts as the matching lock. |
+| `defer-unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Unlock()` / `defer mu.RUnlock()` can run while the mutex is unlocked: there is no matching lock, or a `return` / `panic` can execute between the defer and the lock. A lock placed immediately after the defer is safe and not flagged. |
 | `unchecked-trylock` | `sync.Mutex`, `sync.RWMutex` | `TryLock()` / `TryRLock()` is called without checking the returned boolean. |
 | `defer-lock` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Lock()` / `defer mu.RLock()` is used where an unlock was almost certainly intended. |
 | `mutex-in-loop` | `sync.Mutex`, `sync.RWMutex` | A mutex is declared inside a loop body, creating a fresh lock per iteration. |
 | `rwmutex-api-mismatch` | `sync.RWMutex` | `Unlock()` is used for a read lock, or `RUnlock()` is used for a write lock. |
 | `goroutine-lock-deadlock` | `sync.Mutex`, `sync.RWMutex` | A goroutine is started while a lock is held and tries to take the same lock before the parent can release it. |
 | `panic-before-unlock` | `sync.Mutex`, `sync.RWMutex` | An index with a statically known out-of-range value and collection length can panic between `Lock()` and a non-deferred unlock. |
-| `add-without-done` | `sync.WaitGroup` | `wg.Add(n)` has no matching number of `Done()` calls on all paths — the counter may never reach zero. |
+| `add-without-done` | `sync.WaitGroup` | `wg.Add(n)` has no corresponding `Done()` — or fewer *guaranteed* `Done()`s than the count — so the counter can never reach zero. A conditional or event-driven goroutine `Done()` is not flagged here. |
 | `done-without-add` | `sync.WaitGroup` | `wg.Done()` is called more times than `wg.Add()` allows, which panics at runtime. |
 | `add-after-wait` | `sync.WaitGroup` | `wg.Add()` is called after `wg.Wait()` has returned with an empty counter — a classic reuse bug. |
 | `go-after-wait` | `sync.WaitGroup` | `wg.Go()` is called after `wg.Wait()` returned empty — same family as `add-after-wait`, specific to Go 1.25's `Go` method. |
@@ -167,10 +167,14 @@ func BadLockWithoutUnlock() {
     mu.Lock() // want "mutex 'mu' is locked but not unlocked"
 }
 
-// Defer scheduled before the lock is acquired.
-func BadDeferUnlockBeforeLock() {
+// Defer scheduled before the lock; an early return can run it while the
+// mutex is still unlocked. (An adjacent `defer mu.Unlock(); mu.Lock()` is safe.)
+func BadDeferUnlockBeforeLock(cond bool) {
     var mu sync.Mutex
     defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
+    if cond {
+        return
+    }
     mu.Lock()
 }
 

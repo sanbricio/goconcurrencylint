@@ -238,11 +238,29 @@ func BadRecoverInNestedConditionDoesNotGuardRUnlock(cond bool) {
 	}()
 }
 
-// Defer unlock without prior lock
-func BadDeferUnlockWithoutLock() {
+// Defer-before-lock: the deferred unlock runs at return, AFTER the adjacent
+// Lock, so the pair is balanced. Only a fragile ordering — a statement that can
+// return or panic between the defer and the lock (see BadDeferUnlockAfterPanic)
+// — is reported.
+func GoodDeferUnlockBeforeAdjacentLock() {
 	var mu sync.Mutex
-	defer mu.Unlock() // want "mutex 'mu' has defer unlock but no corresponding lock"
+	defer mu.Unlock()
 	mu.Lock()
+}
+
+// The closure-wrapped "withLock" helper idiom: a deferred-closure unlock
+// registered just before the lock it balances. Functionally identical to the
+// direct form above and must not be flagged.
+func GoodDeferClosureUnlockBeforeLock() {
+	var mu sync.Mutex
+	withLock := func(f func()) {
+		defer func() {
+			mu.Unlock()
+		}()
+		mu.Lock()
+		f()
+	}
+	withLock(func() {})
 }
 
 // Defer unlock after panic before lock

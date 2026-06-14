@@ -38,6 +38,13 @@ type Checker struct {
 	// composite literals), shared by reference across functions; read-only.
 	lifecycleScanCache *lifecycleScanCache
 
+	// safeDeferBeforeLock holds the positions of defer statements whose deferred
+	// unlock is immediately balanced by a matching lock in the same block (see
+	// detectSafeDeferBeforeLock). Computed once per analyzed function and shared
+	// with simulation forks so closure helpers analyzed via simulation get the
+	// same treatment.
+	safeDeferBeforeLock map[token.Pos]bool
+
 	*funcAnalysis
 }
 
@@ -122,6 +129,7 @@ func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.lifecycleScanCache, c.function)
 	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
 	c.flagGuardedFlags = c.detectFlagGuardedReleaseFlags(fn)
+	c.safeDeferBeforeLock = c.detectSafeDeferBeforeLock(fn)
 	c.stats = initialStats(c.mutexNames, c.rwMutexNames)
 	lockOrder := newLockOrderDetector(c.mutexNames, c.rwMutexNames, c.commentFilter, c.typesInfo, c.errorCollector)
 	lockOrder.check(fn.Body)
