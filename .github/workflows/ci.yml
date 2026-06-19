@@ -54,6 +54,9 @@ jobs:
           version: v2.11.4
           args: --config=.golangci.yml ./...
 
+      - name: Verify generated docs are up to date
+        run: go run ./scripts/gendocs -check
+
   build:
     name: Build
     runs-on: ubuntu-latest

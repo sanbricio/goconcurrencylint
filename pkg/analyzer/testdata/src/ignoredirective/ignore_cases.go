@@ -31,6 +31,23 @@ func PerRuleDirectiveSilencesMatchingRule() {
 	mu.Lock() // goconcurrencylint:ignore lock-without-unlock
 }
 
+// CodeDirectiveSilencesMatchingCheck: the canonical code form silences the
+// matching diagnostic, exactly like the legacy slug form does.
+func CodeDirectiveSilencesMatchingCheck() {
+	var mu sync.Mutex
+	mu.Lock() // goconcurrencylint:ignore GCL1001
+}
+
+// CodeAndSlugCanMix: a directive list may mix canonical codes and legacy
+// slugs. The second Lock() fires both lock-without-unlock (GCL1001) and
+// double-lock (GCL1011); naming one by code and the other by slug silences
+// both, while the first Lock() still reports.
+func CodeAndSlugCanMix() {
+	var mu sync.Mutex
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	mu.Lock() // goconcurrencylint:ignore GCL1001, double-lock
+}
+
 // PerRuleDirectiveWrongRuleStillReports: the directive lists only
 // wait-without-add but the diagnostic is lock-without-unlock, so the
 // diagnostic must still appear.

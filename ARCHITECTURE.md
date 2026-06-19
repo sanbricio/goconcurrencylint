@@ -178,7 +178,7 @@ come from?" friction.
 | [`internal/once`](pkg/analyzer/internal/once) | sync.Once checks (re-entrant Do, Do(nil)) |
 | [`internal/copycheck`](pkg/analyzer/internal/copycheck) | Copy-by-value detection |
 | [`internal/common`](pkg/analyzer/internal/common) | Shared AST/type helpers (`IsMutex`, `GetVarName`…) |
-| [`internal/common/category`](pkg/analyzer/internal/common/category) | Stable category IDs (one per check) |
+| [`internal/common/category`](pkg/analyzer/internal/common/category) | Check catalogue — single source of truth: code (`GCL1001`), legacy slug, primitive, summary, rationale, bad/good examples |
 | [`internal/common/commentfilter`](pkg/analyzer/internal/common/commentfilter) | Inline `// goconcurrencylint:ignore` directives |
 | [`internal/common/report`](pkg/analyzer/internal/common/report) | `Reporter` interface + `ErrorCollector` (dedup, sort, filter) |
 | [`pkg/analyzer/testdata/src`](pkg/analyzer/testdata/src) | `analysistest` golden fixtures |
@@ -200,11 +200,15 @@ come from?" friction.
 3. **Open that domain's `AnalyzeFunction`** — your ordered index of collaborators.
 4. **Each collaborator is one file** named after it; read it in isolation.
 5. **To find where a check is emitted:** grep for `AddError`. The `category`
-   passed is the stable ID from the README's *Checks* table (e.g.
-   `lock-without-unlock`), so the message in the table and the call site line up.
-6. **To add a new check:** add a constant in `internal/common/category`, emit it
-   via `ec.AddError` from the relevant engine/collaborator, and add a fixture under
-   `pkg/analyzer/testdata/src/...` with a `// want "…"` marker.
+   passed is a constant from `internal/common/category` whose name mirrors the
+   slug (`LockWithoutUnlock`) but whose value is the canonical code (`GCL1001`).
+   The umbrella prefixes each message with that code (`GCL1001: …`) on re-emit,
+   so CLI output, the catalogue and the call site all line up.
+6. **To add a new check:** add a constant and a `registry` entry (code, slug,
+   primitive, summary, why, bad/good examples) in `internal/common/category`, emit it via
+   `ec.AddError` from the relevant engine/collaborator, add a fixture under
+   `pkg/analyzer/testdata/src/...` with a `// want "…"` marker, and run
+   `go generate ./...` to refresh `docs/checks` and the README table.
 
 ## What pins behavior
 

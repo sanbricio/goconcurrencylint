@@ -8,7 +8,8 @@
 // pass.ResultOf.
 //
 //	Analyzer (umbrella, this package)
-//	│   re-emits the diagnostic slices below via pass.Report
+//	│   re-emits the diagnostic slices below via pass.Report,
+//	│   prefixing each message with its check code (e.g. "GCL1001: ...")
 //	│
 //	├── mutex.SubAnalyzer ──────┐
 //	├── waitgroup.SubAnalyzer ──┤── requires primitives.Analyzer ─┐
@@ -55,6 +56,13 @@ func run(pass *analysis.Pass) (any, error) {
 			continue
 		}
 		for _, d := range diags {
+			// Surface the check code in the message itself (e.g.
+			// "GCL1001: ...") so it is visible in plain CLI output, which
+			// otherwise prints only file:line:col + message. The Category
+			// field already carries the same code for tooling.
+			if d.Category != "" {
+				d.Message = d.Category + ": " + d.Message
+			}
 			pass.Report(d)
 		}
 	}

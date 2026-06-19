@@ -14,11 +14,12 @@ const ignoreDirective = "goconcurrencylint:ignore"
 
 // CommentFilter helps filter out code that is within comments and tracks
 // per-line `goconcurrencylint:ignore` directives. The directive can be
-// either bare (silences every category on the line) or carry a list of
-// category IDs separated by spaces or commas, e.g.:
+// either bare (silences every check on the line) or carry a list of check
+// IDs separated by spaces or commas. Each ID may be a canonical code
+// (GCL1001) or a legacy slug (lock-without-unlock), e.g.:
 //
-//	wg.Wait() // goconcurrencylint:ignore wait-without-add
-//	mu.Lock() // goconcurrencylint:ignore lock-without-unlock,defer-lock
+//	wg.Wait() // goconcurrencylint:ignore GCL2010
+//	mu.Lock() // goconcurrencylint:ignore GCL1001,defer-lock
 //	mu.Lock() // goconcurrencylint:ignore     <- silences every check
 type CommentFilter struct {
 	fileSet      *token.FileSet
@@ -145,7 +146,8 @@ func (cf *CommentFilter) HasIgnoreDirective(pos token.Pos) bool {
 
 // IsCategoryIgnored reports whether cat is silenced at the given line.
 // A bare directive on that line silences every category. An empty category
-// only matches a bare directive (it never matches a per-rule list).
+// only matches a bare directive (it never matches a per-rule list). cat may
+// be a canonical code or a legacy slug; both resolve to the same check.
 func (cf *CommentFilter) IsCategoryIgnored(line int, cat category.Category) bool {
 	entry, ok := cf.ignoreByLine[line]
 	if !ok {
@@ -157,7 +159,13 @@ func (cf *CommentFilter) IsCategoryIgnored(line int, cat category.Category) bool
 	if cat == "" {
 		return false
 	}
-	_, ok = entry.categories[string(cat)]
+	// Directive categories are stored canonicalised; normalise the query so a
+	// slug passed here still matches a code stored from the directive.
+	key := string(cat)
+	if code, found := category.Canonical(key); found {
+		key = string(code)
+	}
+	_, ok = entry.categories[key]
 	return ok
 }
 
@@ -223,12 +231,13 @@ func parseIgnoreDirective(textLine string) (categories []string, found bool, all
 }
 
 // parseCategories extracts known check IDs from the tail after the
-// directive. Tokens are read until the first one that does not match a
-// registered category — anything beyond that is treated as a human-readable
-// note (so `// goconcurrencylint:ignore lock-without-unlock because legacy`
-// silences only `lock-without-unlock`, while
-// `// goconcurrencylint:ignore explained later` is treated as a bare
-// directive that silences every check on the line).
+// directive, accepting either canonical codes (GCL1001) or legacy slugs
+// (lock-without-unlock) and normalising each to its canonical code. Tokens are
+// read until the first one that does not match a registered check — anything
+// beyond that is treated as a human-readable note (so
+// `// goconcurrencylint:ignore lock-without-unlock because legacy` silences
+// only that check, while `// goconcurrencylint:ignore explained later` is
+// treated as a bare directive that silences every check on the line).
 //
 // Recognised separators are spaces, tabs, commas and semicolons. The block
 // comment terminator "*/" ends parsing.
@@ -251,10 +260,11 @@ func parseCategories(tail string) []string {
 
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
-		if !category.IsKnown(f) {
+		code, ok := category.Canonical(f)
+		if !ok {
 			break
 		}
-		out = append(out, f)
+		out = append(out, string(code))
 	}
 	return out
 }

@@ -73,65 +73,69 @@ goconcurrencylint ./...
 Example diagnostics:
 
 ```text
-mutex.go:12:2: mutex 'mu' is locked but not unlocked
-waitgroup.go:23:3: waitgroup 'wg' has Add without corresponding Done
-waitgroup.go:41:2: waitgroup 'wg' Go called after Wait
+mutex.go:12:2: GCL1001: mutex 'mu' is locked but not unlocked
+waitgroup.go:23:3: GCL2001: waitgroup 'wg' has Add without corresponding Done
+waitgroup.go:41:2: GCL2004: waitgroup 'wg' Go called after Wait
 ```
+
+Every diagnostic is prefixed with a stable code (`GCL1001`). Run `goconcurrencylint explain GCL1001` for a full description of any check, or browse the [check catalogue](docs/checks/README.md).
 
 Because the tool is a standard `go/analysis` single-checker, it accepts the usual package patterns (`./...`, `./pkg/...`, individual import paths) and standard analyzer flags.
 
 ## Checks
 
-| ID | Primitive | Description |
-|---|---|---|
-| `lock-without-unlock` | `sync.Mutex`, `sync.RWMutex` | A `Lock()` / `RLock()` call has no matching `Unlock()` / `RUnlock()` on some execution path. |
-| `unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | An `Unlock()` / `RUnlock()` call is reached without a prior matching lock (including double-unlocks). A lock taken inside a synchronous callback argument counts as the matching lock. |
-| `defer-unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Unlock()` / `defer mu.RUnlock()` can run while the mutex is unlocked: there is no matching lock, or a `return` / `panic` can execute between the defer and the lock. A lock placed immediately after the defer is safe and not flagged. |
-| `unchecked-trylock` | `sync.Mutex`, `sync.RWMutex` | `TryLock()` / `TryRLock()` is called without checking the returned boolean. |
-| `defer-lock` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Lock()` / `defer mu.RLock()` is used where an unlock was almost certainly intended. |
-| `mutex-in-loop` | `sync.Mutex`, `sync.RWMutex` | A mutex is declared inside a loop body, creating a fresh lock per iteration. |
-| `rwmutex-api-mismatch` | `sync.RWMutex` | `Unlock()` is used for a read lock, or `RUnlock()` is used for a write lock. |
-| `goroutine-lock-deadlock` | `sync.Mutex`, `sync.RWMutex` | A goroutine is started while a lock is held and tries to take the same lock before the parent can release it. |
-| `panic-before-unlock` | `sync.Mutex`, `sync.RWMutex` | An index with a statically known out-of-range value and collection length can panic between `Lock()` and a non-deferred unlock. |
-| `add-without-done` | `sync.WaitGroup` | `wg.Add(n)` has no corresponding `Done()` — or fewer *guaranteed* `Done()`s than the count — so the counter can never reach zero. A conditional or event-driven goroutine `Done()` is not flagged here. |
-| `done-without-add` | `sync.WaitGroup` | `wg.Done()` is called more times than `wg.Add()` allows, which panics at runtime. |
-| `add-after-wait` | `sync.WaitGroup` | `wg.Add()` is called after `wg.Wait()` has returned with an empty counter — a classic reuse bug. |
-| `go-after-wait` | `sync.WaitGroup` | `wg.Go()` is called after `wg.Wait()` returned empty — same family as `add-after-wait`, specific to Go 1.25's `Go` method. |
-| `add-inside-goroutine` | `sync.WaitGroup` | `wg.Add()` is called from inside a worker goroutine, racing with `Wait()`. |
-| `done-not-deferred` | `sync.WaitGroup` | A worker calls `Done()` after an explicit `panic` or `runtime.Goexit` path instead of deferring it. |
-| `add-loop-count-mismatch` | `sync.WaitGroup` | A literal `Add(n)` count does not match a statically countable loop of worker goroutines. |
-| `add-zero` | `sync.WaitGroup` | `wg.Add(0)` is a no-op and usually means the intended count was lost. |
-| `wait-without-add` | `sync.WaitGroup` | A local `WaitGroup` is waited on without any `Add()` in the same lifecycle. |
-| `multiple-done-worker` | `sync.WaitGroup` | The same worker branch can call `Done()` more than once. |
-| `nested-waitgroup-deadlock` | `sync.WaitGroup` | A worker for one `WaitGroup` waits on another whose release is blocked behind the outer `Wait()`. |
-| `done-outside-goroutine` | `sync.WaitGroup` | `Done()` runs on the parent goroutine instead of the worker, so a panic in the parent skips it. |
-| `wait-deadlock` | `sync.WaitGroup` | `Wait()` is reached while the same goroutine still owes a `Done()`. |
-| `add-negative` | `sync.WaitGroup` | `wg.Add(n)` is called with a negative literal — panics at runtime. |
-| `go-panic` | `sync.WaitGroup` | A function passed to `wg.Go()` may panic and bring the program down. |
-| `defer-unlock-in-loop` | `sync.Mutex`, `sync.RWMutex` | `defer mu.Unlock()` lives inside a loop body, so the unlock only runs at function return. |
-| `double-lock` | `sync.Mutex`, `sync.RWMutex` | A second `Lock()` is taken while the first is still held (or a write `Lock()` while a read lock is held). |
-| `lock-order-cycle` | `sync.Mutex`, `sync.RWMutex` | Two functions acquire the same pair of mutexes in opposite orders — classic deadlock pattern. |
-| `once-do-deadlock` | `sync.Once` | `once.Do(f)` where `f` calls `Do` on the same `Once` again — `sync.Once.Do` is not reentrant, so this deadlocks. |
-| `once-do-nil` | `sync.Once` | `once.Do(nil)` panics when the function is invoked. |
-| `sync-primitive-copy` | all | A `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup` or `sync.Once` (or a struct embedding one) is copied by value. |
+Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message and carried as the [`analysis.Diagnostic.Category`](https://pkg.go.dev/golang.org/x/tools/go/analysis#Diagnostic), so `golangci-lint` and IDE integrations can filter or label by check. The legacy kebab-case slug is still accepted in ignore directives. Per-check pages live under [`docs/checks/`](docs/checks/README.md), or run `goconcurrencylint explain <code>`.
 
-All checks above also fire on package-scoped primitives declared in any file of the same package — there is no separate ID for that case; the diagnostic carries the same category as the in-function variant.
+<!-- BEGIN GENERATED CHECKS TABLE -->
+| Code | Slug | Primitive | Description |
+|------|------|-----------|-------------|
+| [`GCL1001`](docs/checks/GCL1001.md) | `lock-without-unlock` | `sync.Mutex`, `sync.RWMutex` | A Lock()/RLock() call has no matching Unlock()/RUnlock() on some execution path. |
+| [`GCL1002`](docs/checks/GCL1002.md) | `unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | An Unlock()/RUnlock() call is reached without a prior matching lock (including double-unlocks). |
+| [`GCL1003`](docs/checks/GCL1003.md) | `defer-unlock-without-lock` | `sync.Mutex`, `sync.RWMutex` | A deferred Unlock()/RUnlock() can run while the mutex is unlocked. |
+| [`GCL1004`](docs/checks/GCL1004.md) | `unchecked-trylock` | `sync.Mutex`, `sync.RWMutex` | TryLock()/TryRLock() is called without checking the returned boolean. |
+| [`GCL1005`](docs/checks/GCL1005.md) | `defer-lock` | `sync.Mutex`, `sync.RWMutex` | defer mu.Lock()/RLock() is used where an unlock was almost certainly intended. |
+| [`GCL1006`](docs/checks/GCL1006.md) | `mutex-in-loop` | `sync.Mutex`, `sync.RWMutex` | A mutex is declared inside a loop body, creating a fresh lock per iteration. |
+| [`GCL1007`](docs/checks/GCL1007.md) | `defer-unlock-in-loop` | `sync.Mutex`, `sync.RWMutex` | defer mu.Unlock() lives inside a loop body, so the unlock only runs at function return. |
+| [`GCL1008`](docs/checks/GCL1008.md) | `rwmutex-api-mismatch` | `sync.RWMutex` | Unlock() is used for a read lock, or RUnlock() is used for a write lock. |
+| [`GCL1009`](docs/checks/GCL1009.md) | `goroutine-lock-deadlock` | `sync.Mutex`, `sync.RWMutex` | A goroutine started while a lock is held tries to take the same lock before the parent releases it. |
+| [`GCL1010`](docs/checks/GCL1010.md) | `panic-before-unlock` | `sync.Mutex`, `sync.RWMutex` | A statically-known out-of-range index can panic between Lock() and a non-deferred unlock. |
+| [`GCL1011`](docs/checks/GCL1011.md) | `double-lock` | `sync.Mutex`, `sync.RWMutex` | A second Lock() is taken while the first is still held. |
+| [`GCL1012`](docs/checks/GCL1012.md) | `lock-order-cycle` | `sync.Mutex`, `sync.RWMutex` | Two functions acquire the same pair of mutexes in opposite orders — a classic deadlock pattern. |
+| [`GCL2001`](docs/checks/GCL2001.md) | `add-without-done` | `sync.WaitGroup` | wg.Add(n) has fewer guaranteed Done()s than its count, so the counter can never reach zero. |
+| [`GCL2002`](docs/checks/GCL2002.md) | `done-without-add` | `sync.WaitGroup` | wg.Done() is called more times than wg.Add() allows, which panics at runtime. |
+| [`GCL2003`](docs/checks/GCL2003.md) | `add-after-wait` | `sync.WaitGroup` | wg.Add() is called after wg.Wait() returned with an empty counter — a classic reuse bug. |
+| [`GCL2004`](docs/checks/GCL2004.md) | `go-after-wait` | `sync.WaitGroup` | wg.Go() is called after wg.Wait() returned empty — the Go 1.25 variant of add-after-wait. |
+| [`GCL2005`](docs/checks/GCL2005.md) | `add-inside-goroutine` | `sync.WaitGroup` | wg.Add() is called from inside a worker goroutine, racing with Wait(). |
+| [`GCL2006`](docs/checks/GCL2006.md) | `done-not-deferred` | `sync.WaitGroup` | A worker calls Done() after an explicit panic or runtime.Goexit path instead of deferring it. |
+| [`GCL2007`](docs/checks/GCL2007.md) | `add-loop-count-mismatch` | `sync.WaitGroup` | A literal Add(n) count does not match a statically countable loop of worker goroutines. |
+| [`GCL2008`](docs/checks/GCL2008.md) | `add-zero` | `sync.WaitGroup` | wg.Add(0) is a no-op and usually means the intended count was lost. |
+| [`GCL2009`](docs/checks/GCL2009.md) | `add-negative` | `sync.WaitGroup` | wg.Add(n) is called with a negative literal, which panics at runtime. |
+| [`GCL2010`](docs/checks/GCL2010.md) | `wait-without-add` | `sync.WaitGroup` | A local WaitGroup is waited on without any Add() in the same lifecycle. |
+| [`GCL2011`](docs/checks/GCL2011.md) | `wait-deadlock` | `sync.WaitGroup` | Wait() is reached while the same goroutine still owes a Done(). |
+| [`GCL2012`](docs/checks/GCL2012.md) | `multiple-done-worker` | `sync.WaitGroup` | The same worker branch can call Done() more than once. |
+| [`GCL2013`](docs/checks/GCL2013.md) | `nested-waitgroup-deadlock` | `sync.WaitGroup` | A worker for one WaitGroup waits on another whose release is blocked behind the outer Wait(). |
+| [`GCL2014`](docs/checks/GCL2014.md) | `done-outside-goroutine` | `sync.WaitGroup` | Done() runs on the parent goroutine instead of the worker, so a panic in the parent skips it. |
+| [`GCL2015`](docs/checks/GCL2015.md) | `go-panic` | `sync.WaitGroup` | A function passed to wg.Go() may panic and bring the program down. |
+| [`GCL3001`](docs/checks/GCL3001.md) | `once-do-deadlock` | `sync.Once` | once.Do(f) where f calls Do on the same Once again — Once.Do is not reentrant, so this deadlocks. |
+| [`GCL3002`](docs/checks/GCL3002.md) | `once-do-nil` | `sync.Once` | once.Do(nil) panics when the function is invoked. |
+| [`GCL9001`](docs/checks/GCL9001.md) | `sync-primitive-copy` | `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`, `sync.Once` | A sync primitive (or a struct embedding one) is copied by value. |
+<!-- END GENERATED CHECKS TABLE -->
 
-Each diagnostic is emitted with a stable [`analysis.Diagnostic.Category`](https://pkg.go.dev/golang.org/x/tools/go/analysis#Diagnostic) equal to the ID in the table above, so `golangci-lint` and IDE integrations can filter or label by check.
+All checks above also fire on package-scoped primitives declared in any file of the same package — there is no separate code for that case; the diagnostic carries the same category as the in-function variant.
 
 ### Suppressing diagnostics
 
-Place `// goconcurrencylint:ignore` on the same line as the offending call:
+Place `// goconcurrencylint:ignore` on the same line as the offending call. Each id may be a canonical code (`GCL1001`) or the legacy slug (`lock-without-unlock`); the two forms are interchangeable and can be mixed:
 
 ```go
-wg.Wait() // goconcurrencylint:ignore wait-without-add
-mu.Lock() // goconcurrencylint:ignore lock-without-unlock, defer-lock
+wg.Wait() // goconcurrencylint:ignore GCL2010
+mu.Lock() // goconcurrencylint:ignore GCL1001, defer-lock
 mu.Lock() // goconcurrencylint:ignore  legacy code, see issue #42
 ```
 
-- A list of one or more category IDs (separated by spaces, commas or semicolons) silences only those checks on the line.
+- A list of one or more check ids (separated by spaces, commas or semicolons) silences only those checks on the line.
 - A bare `// goconcurrencylint:ignore`, or a directive followed only by free text, silences every check on the line.
-- Tokens after the first one that does not match a known category are treated as a human-readable note, so `// goconcurrencylint:ignore lock-without-unlock because foo` only silences `lock-without-unlock`.
+- Tokens after the first one that does not match a known check are treated as a human-readable note, so `// goconcurrencylint:ignore GCL1001 because foo` only silences `GCL1001`.
 
 ## Examples
 
@@ -232,8 +236,10 @@ goconcurrencylint/
 │   │   ├── mutex/               # Mutex / RWMutex analyzer
 │   │   ├── waitgroup/           # WaitGroup analyzer
 │   │   ├── copycheck/           # Copy-by-value analyzer
-│   │   └── common/              # Shared helpers, category IDs, reporting
+│   │   └── common/              # Shared helpers, check catalogue, reporting
 │   └── testdata/src/            # analysistest fixtures
+├── docs/checks/                 # Per-check reference pages + index (generated)
+├── scripts/gendocs/             # Check-docs generator (go generate ./...)
 ├── assets/                      # Logo and branding
 ├── ARCHITECTURE.md              # Internal design & data flow
 └── .github/workflows/           # CI, release asset build, and integration pipelines
