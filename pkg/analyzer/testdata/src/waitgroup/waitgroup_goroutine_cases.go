@@ -276,12 +276,32 @@ func BadPanicWithoutRecover() {
 	wg.Wait()
 }
 
-// Non-deferred Done after a possible panic is not guaranteed to run.
-func BadDoneAfterConditionalPanic() {
+// A non-deferred Done after an UNRECOVERED panic is not flagged: the panic
+// propagates and crashes the whole process, so the skipped Done is moot and
+// deferring it would change nothing. Real code hits this in temporal,
+// prometheus and kubernetes worker goroutines.
+func GoodDoneAfterUnrecoveredConditionalPanic() {
 	var wg sync.WaitGroup
 	shouldPanic := true
 	wg.Add(1)
 	go func() {
+		if shouldPanic {
+			panic("error")
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// A recovered panic unwinds to the deferred recover and skips the non-deferred
+// Done below, so the goroutine survives and Wait blocks forever. Here deferring
+// Done actually matters, so the check must still fire.
+func BadDoneAfterRecoveredPanic() {
+	var wg sync.WaitGroup
+	shouldPanic := true
+	wg.Add(1)
+	go func() {
+		defer func() { _ = recover() }()
 		if shouldPanic {
 			panic("error")
 		}

@@ -106,7 +106,7 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 | [`GCL2003`](docs/checks/GCL2003.md) | `add-after-wait` | `sync.WaitGroup` | wg.Add() is called after wg.Wait() returned with an empty counter — a classic reuse bug. |
 | [`GCL2004`](docs/checks/GCL2004.md) | `go-after-wait` | `sync.WaitGroup` | wg.Go() is called after wg.Wait() returned empty — the Go 1.25 variant of add-after-wait. |
 | [`GCL2005`](docs/checks/GCL2005.md) | `add-inside-goroutine` | `sync.WaitGroup` | wg.Add() is called from inside a worker goroutine, racing with Wait(). |
-| [`GCL2006`](docs/checks/GCL2006.md) | `done-not-deferred` | `sync.WaitGroup` | A worker calls Done() after an explicit panic or runtime.Goexit path instead of deferring it. |
+| [`GCL2006`](docs/checks/GCL2006.md) | `done-not-deferred` | `sync.WaitGroup` | A worker calls Done() on a path a runtime.Goexit or recovered panic can skip, instead of deferring it. |
 | [`GCL2007`](docs/checks/GCL2007.md) | `add-loop-count-mismatch` | `sync.WaitGroup` | A literal Add(n) count does not match a statically countable loop of worker goroutines. |
 | [`GCL2008`](docs/checks/GCL2008.md) | `add-zero` | `sync.WaitGroup` | wg.Add(0) is a no-op and usually means the intended count was lost. |
 | [`GCL2009`](docs/checks/GCL2009.md) | `add-negative` | `sync.WaitGroup` | wg.Add(n) is called with a negative literal, which panics at runtime. |
@@ -118,8 +118,7 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 | [`GCL2015`](docs/checks/GCL2015.md) | `go-panic` | `sync.WaitGroup` | A function passed to wg.Go() may panic and bring the program down. |
 | [`GCL3001`](docs/checks/GCL3001.md) | `once-do-deadlock` | `sync.Once` | once.Do(f) where f calls Do on the same Once again — Once.Do is not reentrant, so this deadlocks. |
 | [`GCL3002`](docs/checks/GCL3002.md) | `once-do-nil` | `sync.Once` | once.Do(nil) panics when the function is invoked. |
-| [`GCL4001`](docs/checks/GCL4001.md) | `cond-wait-not-in-loop` | `sync.Cond` | cond.Wait() is called outside a for loop, so a stale or spurious wakeup resumes without re-checking the condition. |
-| [`GCL4002`](docs/checks/GCL4002.md) | `cond-new-nil-locker` | `sync.Cond` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
+| [`GCL4001`](docs/checks/GCL4001.md) | `cond-new-nil-locker` | `sync.Cond` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
 | [`GCL9001`](docs/checks/GCL9001.md) | `sync-primitive-copy` | `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`, `sync.Once` | A sync primitive (or a struct embedding one) is copied by value. |
 <!-- END GENERATED CHECKS TABLE -->
 

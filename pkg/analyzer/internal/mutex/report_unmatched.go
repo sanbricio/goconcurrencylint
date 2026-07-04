@@ -127,7 +127,8 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 	if lockPositions := trailingPositions(stats.lockPos, remainingLockCount(stats.lock, stats.deferUnlock)); len(lockPositions) > 0 {
 		suppress := branchType == "" &&
 			(c.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods) ||
-				c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods))
+				c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods) ||
+				c.lifecycle.returnsClosureReleasingLock(mutexName, WriteLockPattern.UnlockMethods))
 		if !suppress {
 			for _, pos := range lockPositions {
 				c.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
@@ -150,7 +151,8 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 		if rlockPositions := trailingPositions(stats.rlockPos, remainingLockCount(stats.rlock, stats.deferRUnlock)); len(rlockPositions) > 0 {
 			suppress := branchType == "" &&
 				(c.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods) ||
-					c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods))
+					c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods) ||
+					c.lifecycle.returnsClosureReleasingLock(mutexName, ReadLockPattern.UnlockMethods))
 			if !suppress {
 				for _, pos := range rlockPositions {
 					c.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)

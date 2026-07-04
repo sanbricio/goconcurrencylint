@@ -28,7 +28,7 @@ Every diagnostic `goconcurrencylint` can emit, with its stable code. The code is
 | [GCL2003](GCL2003.md) | `add-after-wait` | wg.Add() is called after wg.Wait() returned with an empty counter — a classic reuse bug. |
 | [GCL2004](GCL2004.md) | `go-after-wait` | wg.Go() is called after wg.Wait() returned empty — the Go 1.25 variant of add-after-wait. |
 | [GCL2005](GCL2005.md) | `add-inside-goroutine` | wg.Add() is called from inside a worker goroutine, racing with Wait(). |
-| [GCL2006](GCL2006.md) | `done-not-deferred` | A worker calls Done() after an explicit panic or runtime.Goexit path instead of deferring it. |
+| [GCL2006](GCL2006.md) | `done-not-deferred` | A worker calls Done() on a path a runtime.Goexit or recovered panic can skip, instead of deferring it. |
 | [GCL2007](GCL2007.md) | `add-loop-count-mismatch` | A literal Add(n) count does not match a statically countable loop of worker goroutines. |
 | [GCL2008](GCL2008.md) | `add-zero` | wg.Add(0) is a no-op and usually means the intended count was lost. |
 | [GCL2009](GCL2009.md) | `add-negative` | wg.Add(n) is called with a negative literal, which panics at runtime. |
@@ -50,8 +50,7 @@ Every diagnostic `goconcurrencylint` can emit, with its stable code. The code is
 
 | Code | Slug | Description |
 |------|------|-------------|
-| [GCL4001](GCL4001.md) | `cond-wait-not-in-loop` | cond.Wait() is called outside a for loop, so a stale or spurious wakeup resumes without re-checking the condition. |
-| [GCL4002](GCL4002.md) | `cond-new-nil-locker` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
+| [GCL4001](GCL4001.md) | `cond-new-nil-locker` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
 
 ## Cross-cutting
 

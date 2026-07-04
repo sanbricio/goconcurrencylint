@@ -173,6 +173,12 @@ func (c *Checker) handleDeferUnlock(varName string, pos token.Pos, stats map[str
 			stats[varName].deferUnlock++
 			return
 		}
+		if c.crossGoroutineDeferHandoff[pos] {
+			// The parent locked this mutex before launching the goroutine; the
+			// deferred unlock releases the parent's lock on its behalf.
+			stats[varName].deferUnlock++
+			return
+		}
 		mutexType := "mutex"
 		if isRWMutex {
 			mutexType = "rwmutex"
@@ -188,6 +194,12 @@ func (c *Checker) handleDeferUnlock(varName string, pos token.Pos, stats map[str
 func (c *Checker) handleDeferRUnlock(varName string, pos token.Pos, stats map[string]*Stats) {
 	if stats[varName].rlock == 0 {
 		if c.safeDeferBeforeLock[pos] {
+			stats[varName].deferRUnlock++
+			return
+		}
+		if c.crossGoroutineDeferHandoff[pos] {
+			// The parent read-locked this rwmutex before launching the
+			// goroutine; the deferred runlock releases it on the parent's behalf.
 			stats[varName].deferRUnlock++
 			return
 		}

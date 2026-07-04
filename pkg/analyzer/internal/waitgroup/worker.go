@@ -19,6 +19,13 @@ type workerDoneAnalyzer struct {
 	commentFilter  *commentfilter.CommentFilter
 	typesInfo      *types.Info
 	errorCollector report.Reporter
+
+	// workerCanRecover is set per worker goroutine before its body is scanned
+	// for a non-deferred Done. It records whether that goroutine installs a
+	// deferred recover: only then does an explicit panic strand a non-deferred
+	// Done (the goroutine survives the panic and skips it). Without a recover an
+	// unrecovered panic crashes the whole process, so the missed Done is moot.
+	workerCanRecover bool
 }
 
 func newWorkerDoneAnalyzer(function *ast.FuncDecl, waitGroupNames map[string]bool, commentFilter *commentfilter.CommentFilter, typesInfo *types.Info, errorCollector report.Reporter) *workerDoneAnalyzer {

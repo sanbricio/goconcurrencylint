@@ -255,6 +255,80 @@ func (l *lifecycleResolver) returnsFuncFor(mutexName string, methodNames []strin
 	return false
 }
 
+// returnsClosureReleasingLock reports whether the function hands the release of
+// mutexName to its caller through a returned closure. Two shapes are covered:
+// the closure is returned directly (return func() { mu.Unlock() }) or it is a
+// field value of a returned composite literal — the guard/RAII pattern
+// (return Guard{release: func() { mu.Unlock() }}). In both cases the acquiring
+// function is not expected to unlock before returning, so the lock is not a
+// leak. The closure must call the matching unlock on the same mutex; a closure
+// that merely mentions it does not qualify.
+func (l *lifecycleResolver) returnsClosureReleasingLock(mutexName string, unlockMethods []string) bool {
+	if l.function == nil || l.function.Body == nil {
+		return false
+	}
+
+	// Closures stored in a returned composite literal (guard/handle pattern).
+	for _, lit := range l.returnedCompositeLiterals(l.function) {
+		for _, elt := range lit.Elts {
+			value := elt
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				value = kv.Value
+			}
+			if fnLit, ok := value.(*ast.FuncLit); ok &&
+				functionBodyContainsFieldCall(fnLit.Body, mutexName, unlockMethods) {
+				return true
+			}
+		}
+	}
+
+	// Closures returned directly: return func() { mu.Unlock() }.
+	for _, fnLit := range l.returnedFuncLits(l.function) {
+		if functionBodyContainsFieldCall(fnLit.Body, mutexName, unlockMethods) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// returnedFuncLits returns the function literals fn hands back to its caller,
+// either returned directly or via a local variable that is later returned.
+func (l *lifecycleResolver) returnedFuncLits(fn *ast.FuncDecl) []*ast.FuncLit {
+	if fn == nil || fn.Body == nil {
+		return nil
+	}
+
+	localValues := make(map[string]ast.Expr)
+	var returned []*ast.FuncLit
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
+					localValues[ident.Name] = node.Rhs[i]
+				}
+			}
+		case *ast.ReturnStmt:
+			for _, result := range node.Results {
+				if fnLit, ok := result.(*ast.FuncLit); ok {
+					returned = append(returned, fnLit)
+					continue
+				}
+				if ident, ok := result.(*ast.Ident); ok {
+					if fnLit, ok := localValues[ident.Name].(*ast.FuncLit); ok {
+						returned = append(returned, fnLit)
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	return returned
+}
+
 func (l *lifecycleResolver) isReturnedFuncReleaseFor(mutexName string, acquireMethods []string) bool {
 	if l.function == nil || l.function.Name == nil || l.function.Body == nil {
 		return false

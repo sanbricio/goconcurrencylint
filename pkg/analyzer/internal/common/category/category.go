@@ -56,8 +56,7 @@ const (
 	OnceDoNil      Category = "GCL3002"
 
 	// sync.Cond checks (GCL4xxx).
-	CondWaitNotInLoop Category = "GCL4001"
-	CondNewNilLocker  Category = "GCL4002"
+	CondNewNilLocker Category = "GCL4001"
 
 	// Cross-cutting checks (GCL9xxx).
 	SyncPrimitiveCopy Category = "GCL9001"
@@ -336,20 +335,20 @@ for _, t := range tasks {
 }
 wg.Wait()`},
 	{DoneNotDeferred, "done-not-deferred", primWG,
-		"A worker calls Done() after an explicit panic or runtime.Goexit path instead of deferring it.",
-		"On the panic/Goexit path the Done() is skipped, so the counter never reaches zero and Wait() blocks.",
+		"A worker calls Done() on a path a runtime.Goexit or recovered panic can skip, instead of deferring it.",
+		"runtime.Goexit (or a panic the goroutine recovers) ends the worker's flow while the process keeps running, so a non-deferred Done() is skipped, the counter never reaches zero and Wait() blocks forever. An unrecovered panic is not flagged: it crashes the whole process, so the missed Done() is moot.",
 		`
 go func() {
 	if failed {
-		panic("boom") // skips the Done() below
+		runtime.Goexit() // ends the goroutine, skipping the Done() below
 	}
 	wg.Done()
 }()`,
 		`
 go func() {
-	defer wg.Done() // runs even if the goroutine panics
+	defer wg.Done() // runs even on runtime.Goexit or a recovered panic
 	if failed {
-		panic("boom")
+		runtime.Goexit()
 	}
 }()`},
 	{AddLoopCountMismatch, "add-loop-count-mismatch", primWG,
@@ -511,21 +510,6 @@ once.Do(func() {
 	initialize()
 })`},
 
-	{CondWaitNotInLoop, "cond-wait-not-in-loop", primCond,
-		"cond.Wait() is called outside a for loop, so a stale or spurious wakeup resumes without re-checking the condition.",
-		"Wait can return before the condition actually holds — a spurious wakeup, or another goroutine winning the lock first — so code after a non-looped Wait runs with the condition still false.",
-		`
-	c.L.Lock()
-	if !ready { // a plain if: Wait may resume with ready still false
-		c.Wait()
-	}
-	c.L.Unlock()`,
-		`
-	c.L.Lock()
-	for !ready { // re-check the condition on every wakeup
-		c.Wait()
-	}
-	c.L.Unlock()`},
 	{CondNewNilLocker, "cond-new-nil-locker", primCond,
 		"sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime.",
 		"Cond.Wait unlocks and relocks the Locker; with a nil Locker that call is a nil dereference and panics the first time the Cond is used.",
