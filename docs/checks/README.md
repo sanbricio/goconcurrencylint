@@ -46,6 +46,13 @@ Every diagnostic `goconcurrencylint` can emit, with its stable code. The code is
 | [GCL3001](GCL3001.md) | `once-do-deadlock` | once.Do(f) where f calls Do on the same Once again — Once.Do is not reentrant, so this deadlocks. |
 | [GCL3002](GCL3002.md) | `once-do-nil` | once.Do(nil) panics when the function is invoked. |
 
+## sync.Cond
+
+| Code | Slug | Description |
+|------|------|-------------|
+| [GCL4001](GCL4001.md) | `cond-wait-not-in-loop` | cond.Wait() is called outside a for loop, so a stale or spurious wakeup resumes without re-checking the condition. |
+| [GCL4002](GCL4002.md) | `cond-new-nil-locker` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
+
 ## Cross-cutting
 
 | Code | Slug | Description |

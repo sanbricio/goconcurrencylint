@@ -1835,3 +1835,29 @@ func BadLockSwitchArmKeepsLock(x int) {
 		mu.Unlock()
 	}
 }
+
+// Per-iteration mutex used by workers launched with WaitGroup.Go and joined by
+// wg.Wait(); a fresh mutex per iteration is correct, so it must NOT be flagged
+// (thanos pkg/compact/compact.go).
+func GoodMutexInLoopJoinedByWaitGroupGo(jobs chan int) {
+	for {
+		var (
+			wg   sync.WaitGroup
+			mtx  sync.Mutex
+			done = true
+		)
+		for i := 0; i < 4; i++ {
+			wg.Go(func() {
+				for range jobs {
+					mtx.Lock()
+					done = false
+					mtx.Unlock()
+				}
+			})
+		}
+		wg.Wait()
+		if done {
+			break
+		}
+	}
+}

@@ -118,6 +118,8 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 | [`GCL2015`](docs/checks/GCL2015.md) | `go-panic` | `sync.WaitGroup` | A function passed to wg.Go() may panic and bring the program down. |
 | [`GCL3001`](docs/checks/GCL3001.md) | `once-do-deadlock` | `sync.Once` | once.Do(f) where f calls Do on the same Once again — Once.Do is not reentrant, so this deadlocks. |
 | [`GCL3002`](docs/checks/GCL3002.md) | `once-do-nil` | `sync.Once` | once.Do(nil) panics when the function is invoked. |
+| [`GCL4001`](docs/checks/GCL4001.md) | `cond-wait-not-in-loop` | `sync.Cond` | cond.Wait() is called outside a for loop, so a stale or spurious wakeup resumes without re-checking the condition. |
+| [`GCL4002`](docs/checks/GCL4002.md) | `cond-new-nil-locker` | `sync.Cond` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
 | [`GCL9001`](docs/checks/GCL9001.md) | `sync-primitive-copy` | `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`, `sync.Once` | A sync primitive (or a struct embedding one) is copied by value. |
 <!-- END GENERATED CHECKS TABLE -->
 

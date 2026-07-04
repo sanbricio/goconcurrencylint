@@ -55,6 +55,10 @@ const (
 	OnceDoDeadlock Category = "GCL3001"
 	OnceDoNil      Category = "GCL3002"
 
+	// sync.Cond checks (GCL4xxx).
+	CondWaitNotInLoop Category = "GCL4001"
+	CondNewNilLocker  Category = "GCL4002"
+
 	// Cross-cutting checks (GCL9xxx).
 	SyncPrimitiveCopy Category = "GCL9001"
 )
@@ -65,6 +69,7 @@ const (
 	primRW    = "sync.RWMutex"
 	primWG    = "sync.WaitGroup"
 	primOnce  = "sync.Once"
+	primCond  = "sync.Cond"
 	primAll   = "sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once"
 )
 
@@ -505,6 +510,30 @@ var once sync.Once
 once.Do(func() {
 	initialize()
 })`},
+
+	{CondWaitNotInLoop, "cond-wait-not-in-loop", primCond,
+		"cond.Wait() is called outside a for loop, so a stale or spurious wakeup resumes without re-checking the condition.",
+		"Wait can return before the condition actually holds — a spurious wakeup, or another goroutine winning the lock first — so code after a non-looped Wait runs with the condition still false.",
+		`
+	c.L.Lock()
+	if !ready { // a plain if: Wait may resume with ready still false
+		c.Wait()
+	}
+	c.L.Unlock()`,
+		`
+	c.L.Lock()
+	for !ready { // re-check the condition on every wakeup
+		c.Wait()
+	}
+	c.L.Unlock()`},
+	{CondNewNilLocker, "cond-new-nil-locker", primCond,
+		"sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime.",
+		"Cond.Wait unlocks and relocks the Locker; with a nil Locker that call is a nil dereference and panics the first time the Cond is used.",
+		`
+	c := sync.NewCond(nil) // nil Locker: c.Wait panics at runtime`,
+		`
+	var mu sync.Mutex
+	c := sync.NewCond(&mu) // pass a real Locker`},
 
 	{SyncPrimitiveCopy, "sync-primitive-copy", primAll,
 		"A sync primitive (or a struct embedding one) is copied by value.",
