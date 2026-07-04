@@ -41,6 +41,7 @@ var groups = []group{
 	{'1', "sync.Mutex / sync.RWMutex"},
 	{'2', "sync.WaitGroup"},
 	{'3', "sync.Once"},
+	{'4', "sync.Cond"},
 	{'9', "Cross-cutting"},
 }
 

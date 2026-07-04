@@ -73,6 +73,37 @@ func GoodConstCountMatchesMultipleForLoopGoroutines() {
 	wg.Wait()
 }
 
+// GoodReuseWaitGroupAcrossWaitPhases reuses one WaitGroup across two
+// Add/launch/Wait phases separated by a Wait(). The loop-count check (GCL2007)
+// must stop counting worker goroutines at the intermediate wg.Wait(): the
+// second phase is a new lifecycle, so its goroutines must not be summed against
+// the first phase's Add. Regression for a false positive in kubernetes
+// pkg/controller/job/tracking_utils_test.go, which reported
+// "Add count 3 does not match 9 goroutines launched".
+func GoodReuseWaitGroupAcrossWaitPhases(extra int) {
+	items := []int{1, 2, 3}
+
+	var wg sync.WaitGroup
+	wg.Add(len(items))
+	for range items {
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+
+	for range items {
+		wg.Add(extra)
+		go func() {
+			defer wg.Done()
+		}()
+		go func() {
+			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
 func GoodRangeLoopAddWithDeferredGoroutineDone(shardsByKeyspace map[string][]string) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -245,12 +276,32 @@ func BadPanicWithoutRecover() {
 	wg.Wait()
 }
 
-// Non-deferred Done after a possible panic is not guaranteed to run.
-func BadDoneAfterConditionalPanic() {
+// A non-deferred Done after an UNRECOVERED panic is not flagged: the panic
+// propagates and crashes the whole process, so the skipped Done is moot and
+// deferring it would change nothing. Real code hits this in temporal,
+// prometheus and kubernetes worker goroutines.
+func GoodDoneAfterUnrecoveredConditionalPanic() {
 	var wg sync.WaitGroup
 	shouldPanic := true
 	wg.Add(1)
 	go func() {
+		if shouldPanic {
+			panic("error")
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+// A recovered panic unwinds to the deferred recover and skips the non-deferred
+// Done below, so the goroutine survives and Wait blocks forever. Here deferring
+// Done actually matters, so the check must still fire.
+func BadDoneAfterRecoveredPanic() {
+	var wg sync.WaitGroup
+	shouldPanic := true
+	wg.Add(1)
+	go func() {
+		defer func() { _ = recover() }()
 		if shouldPanic {
 			panic("error")
 		}
@@ -964,5 +1015,19 @@ func UnflaggedDoneInConditionedLoop(n int) {
 			return
 		}
 	}()
+	wg.Wait()
+}
+
+// Add takes a non-constant variable the linter can't resolve to a constant, so
+// it must NOT claim a count mismatch (thanos expandedpostingscache/cache_test.go).
+func GoodAddNonConstVarMatchesGoroutines() {
+	concurrency := 100
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for range 100 {
+		go func() {
+			defer wg.Done()
+		}()
+	}
 	wg.Wait()
 }

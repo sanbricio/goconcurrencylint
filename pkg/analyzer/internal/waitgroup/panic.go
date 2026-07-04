@@ -18,6 +18,9 @@ func (w *workerDoneAnalyzer) checkDoneNotDeferredInWorker() {
 		if !ok || fnLit.Body == nil {
 			return true
 		}
+		// An explicit panic only strands a non-deferred Done when this
+		// goroutine can recover from it; record that once for the whole body.
+		w.workerCanRecover = w.goroutineHasDeferredRecover(fnLit.Body)
 		for wgName := range w.waitGroupNames {
 			w.checkDoneNotDeferredInBlock(fnLit.Body.List, wgName, false)
 		}
@@ -122,7 +125,7 @@ func (w *workerDoneAnalyzer) exprMayAbortWorker(expr ast.Expr, wgName string) bo
 		if w.isWaitGroupHousekeepingCall(call, wgName) {
 			return true
 		}
-		if w.callAbortsWorker(call) {
+		if w.callMakesDoneRisky(call) {
 			found = true
 			return false
 		}
@@ -153,7 +156,7 @@ func (w *workerDoneAnalyzer) statementMayAbortWorker(stmt ast.Stmt, wgName strin
 		if w.isWaitGroupHousekeepingCall(call, wgName) {
 			return true
 		}
-		if w.callAbortsWorker(call) {
+		if w.callMakesDoneRisky(call) {
 			found = true
 			return false
 		}
@@ -165,27 +168,102 @@ func (w *workerDoneAnalyzer) statementMayAbortWorker(stmt ast.Stmt, wgName strin
 	return found
 }
 
+// callAbortsWorker reports whether call unconditionally leaves the worker's
+// current control flow — an explicit panic or runtime.Goexit. It answers a
+// reachability question ("is the code after this reached?"), so a panic counts
+// whether or not it is later recovered. Do not gate this on recovery; the
+// GCL2006 risk decision uses callMakesDoneRisky instead.
 func (w *workerDoneAnalyzer) callAbortsWorker(call *ast.CallExpr) bool {
 	if call == nil {
 		return false
 	}
-
 	if ident, ok := call.Fun.(*ast.Ident); ok {
 		return w.isBuiltinPanic(ident)
 	}
+	return w.isRuntimeGoexit(call)
+}
 
+// callMakesDoneRisky reports whether call can skip a later non-deferred Done in
+// a way that actually strands Wait. runtime.Goexit always qualifies: it ends
+// only the goroutine, so the process survives and Wait blocks forever. An
+// explicit panic qualifies only when the goroutine installs a deferred recover
+// — otherwise the panic crashes the whole process and the missed Done is moot,
+// so recommending a deferred Done there is noise (staticcheck/go vet agree).
+func (w *workerDoneAnalyzer) callMakesDoneRisky(call *ast.CallExpr) bool {
+	if call == nil {
+		return false
+	}
+	if ident, ok := call.Fun.(*ast.Ident); ok {
+		return w.workerCanRecover && w.isBuiltinPanic(ident)
+	}
+	return w.isRuntimeGoexit(call)
+}
+
+// isRuntimeGoexit reports whether call is runtime.Goexit(). With type info it
+// matches on the resolved package; without it, it falls back to the textual
+// "runtime" qualifier so an unaliased import is still recognised.
+func (w *workerDoneAnalyzer) isRuntimeGoexit(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Goexit" {
 		return false
 	}
-
 	if w.typesInfo != nil {
 		if obj := w.typesInfo.ObjectOf(sel.Sel); obj != nil && obj.Pkg() != nil {
 			return obj.Pkg().Path() == "runtime"
 		}
 	}
-
 	return common.GetVarName(sel.X) == "runtime"
+}
+
+// goroutineHasDeferredRecover reports whether body installs a deferred recover
+// at the goroutine's own function scope. It descends into nested blocks (the
+// defer may sit inside an if/for) but not into nested function literals other
+// than a deferred call's own literal, since a recover in a different function
+// does not protect this goroutine.
+func (w *workerDoneAnalyzer) goroutineHasDeferredRecover(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false // a nested closure/goroutine has its own defers
+		}
+		deferStmt, ok := n.(*ast.DeferStmt)
+		if !ok {
+			return true
+		}
+		if w.deferCallContainsRecover(deferStmt) {
+			found = true
+		}
+		return false // the deferred call's own body is scanned separately
+	})
+	return found
+}
+
+// deferCallContainsRecover reports whether the deferred call (including the
+// body of a deferred function literal) contains a recover() call.
+func (w *workerDoneAnalyzer) deferCallContainsRecover(deferStmt *ast.DeferStmt) bool {
+	if deferStmt == nil || deferStmt.Call == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(deferStmt.Call, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "recover" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func (w *workerDoneAnalyzer) isBuiltinPanic(ident *ast.Ident) bool {

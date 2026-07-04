@@ -513,3 +513,21 @@ func GoodRWUnlockAfterLockInCallbackArgument(m rwCallbackStreamMap, keys []strin
 	}
 	return appendErr
 }
+
+type rwLazyReader struct {
+	readerMx sync.RWMutex
+	loaded   bool
+}
+
+// Temporary lock upgrade: release the caller-held read lock, take the write
+// lock, restore the read lock in a defer. The RUnlock must NOT be flagged
+// (thanos pkg/block/indexheader/lazy_binary_reader.go load()).
+func (r *rwLazyReader) GoodRWReadLockUpgrade() {
+	r.readerMx.RUnlock()
+	r.readerMx.Lock()
+	defer func() {
+		r.readerMx.Unlock()
+		r.readerMx.RLock()
+	}()
+	r.loaded = true
+}

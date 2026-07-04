@@ -57,6 +57,14 @@ func IsOnce(typ types.Type) bool {
 	return MatchesPkgAndName(typ, "sync", "Once")
 }
 
+// IsCond returns true if the given type is sync.Cond or *sync.Cond. In
+// practice a Cond is almost always used through the *sync.Cond returned by
+// sync.NewCond, so the pointer form is the common one.
+func IsCond(typ types.Type) bool {
+	typ = DerefOnce(typ)
+	return MatchesPkgAndName(typ, "sync", "Cond")
+}
+
 // MatchesPkgAndName reports whether typ is a named type declared in pkg
 // whose name matches any of names.
 //

@@ -126,26 +126,47 @@ func blockContainsWaitCall(block *ast.BlockStmt) bool {
 	return found
 }
 
-// goroutineCapturesVar reports whether block launches a goroutine whose call
-// references varName.
+// goroutineCapturesVar reports whether block launches a goroutine — via `go` or
+// X.Go(...) (WaitGroup.Go, errgroup) — whose call references varName.
 func goroutineCapturesVar(block *ast.BlockStmt, varName string) bool {
 	found := false
 	ast.Inspect(block, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		goStmt, ok := n.(*ast.GoStmt)
-		if !ok {
-			return true
-		}
-		ast.Inspect(goStmt.Call, func(inner ast.Node) bool {
-			if ident, ok := inner.(*ast.Ident); ok && ident.Name == varName {
+		switch node := n.(type) {
+		case *ast.GoStmt:
+			if exprReferencesVar(node.Call, varName) {
 				found = true
-				return false
 			}
-			return true
-		})
+		case *ast.CallExpr:
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Go" {
+				for _, arg := range node.Args {
+					if exprReferencesVar(arg, varName) {
+						found = true
+						break
+					}
+				}
+			}
+		}
 		return !found
+	})
+	return found
+}
+
+// exprReferencesVar reports whether node's subtree contains an identifier named
+// varName.
+func exprReferencesVar(node ast.Node, varName string) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if ident, ok := n.(*ast.Ident); ok && ident.Name == varName {
+			found = true
+			return false
+		}
+		return true
 	})
 	return found
 }

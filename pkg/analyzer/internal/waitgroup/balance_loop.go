@@ -143,14 +143,19 @@ func (b *balanceValidator) checkLiteralAddLoopGoroutineMismatch(stats map[string
 	for wgName, st := range stats {
 		var positiveAdds []addCall
 		for _, add := range st.addCalls {
-			if add.value > 0 && !b.isInGoroutine(add.pos) {
+			// Non-constant Add values fall back to 1; counting them would
+			// wrongly flag wg.Add(concurrency) against the launched goroutines.
+			if add.known && add.value > 0 && !b.isInGoroutine(add.pos) {
 				positiveAdds = append(positiveAdds, add)
 			}
 		}
 		if len(positiveAdds) != 1 {
 			continue
 		}
-		launched := b.countLoopWorkerGoroutinesAfter(positiveAdds[0].pos, wgName)
+		// A Wait() closes the Add…Wait lifecycle: goroutines launched after it
+		// belong to a separate cycle and must not be counted against this Add.
+		boundary := b.nextWaitAfter(st, positiveAdds[0].pos)
+		launched := b.countLoopWorkerGoroutinesBetween(positiveAdds[0].pos, boundary, wgName)
 		if launched <= 1 || launched == positiveAdds[0].value {
 			continue
 		}
@@ -159,12 +164,25 @@ func (b *balanceValidator) checkLiteralAddLoopGoroutineMismatch(stats map[string
 	}
 }
 
-func (b *balanceValidator) countLoopWorkerGoroutinesAfter(after token.Pos, wgName string) int {
+// nextWaitAfter returns the position of the earliest Wait() on this WaitGroup
+// that occurs after `after`, or token.NoPos if there is none. A Wait() ends the
+// current Add…Wait lifecycle, so the loop-count check must not look past it.
+func (b *balanceValidator) nextWaitAfter(st *Stats, after token.Pos) token.Pos {
+	next := token.NoPos
+	for _, w := range st.waitCalls {
+		if w > after && (next == token.NoPos || w < next) {
+			next = w
+		}
+	}
+	return next
+}
+
+func (b *balanceValidator) countLoopWorkerGoroutinesBetween(after, boundary token.Pos, wgName string) int {
 	total := 0
 	ast.Inspect(b.function.Body, func(n ast.Node) bool {
 		switch loop := n.(type) {
 		case *ast.ForStmt:
-			if loop.Pos() <= after {
+			if !b.loopInWindow(loop.Pos(), after, boundary) {
 				return true
 			}
 			iterations := b.estimateForIterations(loop)
@@ -173,7 +191,7 @@ func (b *balanceValidator) countLoopWorkerGoroutinesAfter(after token.Pos, wgNam
 			}
 			total += iterations * b.countWorkerGoroutines(loop.Body, wgName)
 		case *ast.RangeStmt:
-			if loop.Pos() <= after {
+			if !b.loopInWindow(loop.Pos(), after, boundary) {
 				return true
 			}
 			iterations := b.estimateRangeIterationsForMismatch(loop)
@@ -185,6 +203,16 @@ func (b *balanceValidator) countLoopWorkerGoroutinesAfter(after token.Pos, wgNam
 		return true
 	})
 	return total
+}
+
+// loopInWindow reports whether a loop starting at pos lies strictly after the
+// Add (`after`) and before the lifecycle-closing Wait (`boundary`). A NoPos
+// boundary means there is no trailing Wait, so the window is open-ended.
+func (b *balanceValidator) loopInWindow(pos, after, boundary token.Pos) bool {
+	if pos <= after {
+		return false
+	}
+	return boundary == token.NoPos || pos < boundary
 }
 
 func (b *balanceValidator) estimateRangeIterationsForMismatch(rangeStmt *ast.RangeStmt) int {

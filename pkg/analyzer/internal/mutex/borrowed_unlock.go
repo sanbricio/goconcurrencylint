@@ -54,6 +54,19 @@ func (c *Checker) lockAcquiredInCallbackArgument(mutexName string, lockMethods [
 	return found
 }
 
+// isReadLockUpgrade reports a temporary read→write upgrade: the function
+// RUnlocks the caller-held read lock, takes the write Lock, then re-acquires the
+// read lock (often in a defer) before returning. There the borrowed RUnlock is
+// balanced, so it must not be flagged. A plain RUnlock with no write Lock and no
+// re-acquire still fires.
+func (c *Checker) isReadLockUpgrade(mutexName string) bool {
+	if c.function == nil || c.function.Body == nil {
+		return false
+	}
+	return functionBodyContainsFieldCall(c.function.Body, mutexName, WriteLockPattern.LockMethods) &&
+		functionBodyContainsFieldCall(c.function.Body, mutexName, ReadLockPattern.LockMethods)
+}
+
 // closureLocksMutex reports whether body contains a `mutexName.<lockMethod>()`
 // call for one of the supplied lock methods.
 func closureLocksMutex(body *ast.BlockStmt, mutexName string, lockMethods []string) bool {

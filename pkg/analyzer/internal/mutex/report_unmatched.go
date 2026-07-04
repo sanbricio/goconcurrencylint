@@ -122,44 +122,54 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 		rlockMessage = "rwmutex '" + mutexName + "' is rlocked but not runlocked in " + branchType
 	}
 
-	suppressFunctionLevelLock := branchType == "" &&
-		(c.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods) ||
-			c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods))
-	for _, pos := range trailingPositions(stats.lockPos, remainingLockCount(stats.lock, stats.deferUnlock)) {
-		if suppressFunctionLevelLock {
-			continue
+	// Suppression checks scan the whole package, so only run them when there is
+	// an unmatched lock to report; the balanced common case skips them.
+	if lockPositions := trailingPositions(stats.lockPos, remainingLockCount(stats.lock, stats.deferUnlock)); len(lockPositions) > 0 {
+		suppress := branchType == "" &&
+			(c.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods) ||
+				c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods) ||
+				c.lifecycle.returnsClosureReleasingLock(mutexName, WriteLockPattern.UnlockMethods))
+		if !suppress {
+			for _, pos := range lockPositions {
+				c.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
+			}
 		}
-		c.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
 	}
 
-	suppressFunctionLevelUnlock := branchType == "" &&
-		(c.unlockDiagnosticSuppressed(mutexName, WriteLockPattern.LockMethods) ||
-			c.lockAcquiredInCallbackArgument(mutexName, WriteLockPattern.LockMethods))
-	for _, pos := range stats.borrowedUnlockPos {
-		if suppressFunctionLevelUnlock {
-			continue
+	if len(stats.borrowedUnlockPos) > 0 {
+		suppress := branchType == "" &&
+			(c.unlockDiagnosticSuppressed(mutexName, WriteLockPattern.LockMethods) ||
+				c.lockAcquiredInCallbackArgument(mutexName, WriteLockPattern.LockMethods))
+		if !suppress {
+			for _, pos := range stats.borrowedUnlockPos {
+				c.errorCollector.AddError(pos, category.UnlockWithoutLock, mutexType+" '"+mutexName+"' is unlocked but not locked")
+			}
 		}
-		c.errorCollector.AddError(pos, category.UnlockWithoutLock, mutexType+" '"+mutexName+"' is unlocked but not locked")
 	}
 
 	if isRWMutex {
-		suppressFunctionLevelRLock := branchType == "" &&
-			(c.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods) ||
-				c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods))
-		for _, pos := range trailingPositions(stats.rlockPos, remainingLockCount(stats.rlock, stats.deferRUnlock)) {
-			if suppressFunctionLevelRLock {
-				continue
+		if rlockPositions := trailingPositions(stats.rlockPos, remainingLockCount(stats.rlock, stats.deferRUnlock)); len(rlockPositions) > 0 {
+			suppress := branchType == "" &&
+				(c.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods) ||
+					c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods) ||
+					c.lifecycle.returnsClosureReleasingLock(mutexName, ReadLockPattern.UnlockMethods))
+			if !suppress {
+				for _, pos := range rlockPositions {
+					c.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
+				}
 			}
-			c.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)
 		}
-		suppressFunctionLevelRUnlock := branchType == "" &&
-			(c.unlockDiagnosticSuppressed(mutexName, ReadLockPattern.LockMethods) ||
-				c.lockAcquiredInCallbackArgument(mutexName, ReadLockPattern.LockMethods))
-		for _, pos := range stats.borrowedRUnlockPos {
-			if suppressFunctionLevelRUnlock {
-				continue
+
+		if len(stats.borrowedRUnlockPos) > 0 {
+			suppress := branchType == "" &&
+				(c.unlockDiagnosticSuppressed(mutexName, ReadLockPattern.LockMethods) ||
+					c.lockAcquiredInCallbackArgument(mutexName, ReadLockPattern.LockMethods) ||
+					c.isReadLockUpgrade(mutexName))
+			if !suppress {
+				for _, pos := range stats.borrowedRUnlockPos {
+					c.errorCollector.AddError(pos, category.UnlockWithoutLock, "rwmutex '"+mutexName+"' is runlocked but not rlocked")
+				}
 			}
-			c.errorCollector.AddError(pos, category.UnlockWithoutLock, "rwmutex '"+mutexName+"' is runlocked but not rlocked")
 		}
 	}
 }

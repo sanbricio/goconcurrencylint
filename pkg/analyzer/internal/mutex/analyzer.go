@@ -45,6 +45,14 @@ type Checker struct {
 	// same treatment.
 	safeDeferBeforeLock map[token.Pos]bool
 
+	// crossGoroutineDeferHandoff holds the positions of `defer mu.Unlock()`
+	// statements inside a launched goroutine whose parent already holds mu when
+	// it starts the goroutine. A sync.Mutex may be unlocked by a different
+	// goroutine than the one that locked it, so the deferred unlock releases the
+	// parent's lock rather than being an unmatched unlock. Computed once per
+	// analyzed function (see detectCrossGoroutineDeferHandoff).
+	crossGoroutineDeferHandoff map[token.Pos]bool
+
 	*funcAnalysis
 }
 
@@ -130,6 +138,7 @@ func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
 	c.flagGuardedFlags = c.detectFlagGuardedReleaseFlags(fn)
 	c.safeDeferBeforeLock = c.detectSafeDeferBeforeLock(fn)
+	c.crossGoroutineDeferHandoff = c.detectCrossGoroutineDeferHandoff(fn)
 	c.stats = initialStats(c.mutexNames, c.rwMutexNames)
 	lockOrder := newLockOrderDetector(c.mutexNames, c.rwMutexNames, c.commentFilter, c.typesInfo, c.errorCollector)
 	lockOrder.check(fn.Body)
