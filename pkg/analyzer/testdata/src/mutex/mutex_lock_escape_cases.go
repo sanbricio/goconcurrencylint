@@ -38,6 +38,20 @@ func (c *closureLocker) LockFunc() func() {
 	}
 }
 
+// Good: the bound unlock method is returned directly, so the caller owns the
+// release. Mirrors minio cmd/local-locker.go getMutex() (`return l.mutex.Unlock`).
+func (c *closureLocker) LockReturningUnlockMethod() func() {
+	c.mu.Lock()
+	return c.mu.Unlock
+}
+
+// Good: the bound unlock method handed back through a local variable.
+func (c *closureLocker) LockReturningUnlockViaLocal() func() {
+	c.mu.Lock()
+	unlock := c.mu.Unlock
+	return unlock
+}
+
 // Bad: the closure that unlocks is never returned or called, so the lock still
 // leaks and must be flagged.
 func (c *closureLocker) BadLockClosureNotReturned() {

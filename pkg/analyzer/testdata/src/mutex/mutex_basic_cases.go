@@ -171,6 +171,18 @@ func BadNegatedTryLockFalsePathUnlock() {
 	mu.Unlock()
 }
 
+// Negated TryLock with a blocking fallback: when TryLock fails the branch
+// block-acquires, so the mutex is held on both the TryLock-success path and the
+// fallback path when the deferred Unlock runs. Mirrors minio
+// internal/grid/muxclient.go close(). Must stay CLEAN.
+func GoodNegatedTryLockBlockingFallback() {
+	var mu sync.Mutex
+	if !mu.TryLock() {
+		mu.Lock()
+	}
+	defer mu.Unlock()
+}
+
 // TryLock used as a plain statement ignores whether the lock was acquired.
 func BadTryLockIgnoredReturn() {
 	var mu sync.Mutex

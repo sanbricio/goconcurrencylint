@@ -18,10 +18,20 @@ type inGoroutineChecker func(token.Pos) bool
 type mainFlowChecker func(token.Pos) bool
 type builtinPanicChecker func(*ast.Ident) bool
 
+// wgCallSite is a Wait/Done call recorded with the WaitGroup object its
+// receiver resolves to. The object lets the same-goroutine deadlock check pair
+// a Wait with a Done only when both name the same WaitGroup, so a shadowing
+// inner `var wg` is not conflated with an outer `wg` of the same name. obj is
+// nil when the receiver cannot be resolved to a variable (e.g. a field access).
+type wgCallSite struct {
+	pos token.Pos
+	obj types.Object
+}
+
 type waitDonePositions struct {
-	waits      []token.Pos
-	dones      []token.Pos
-	deferDones []token.Pos
+	waits      []wgCallSite
+	dones      []wgCallSite
+	deferDones []wgCallSite
 }
 
 // goroutineInspector groups diagnostics that reason about WaitGroup behavior

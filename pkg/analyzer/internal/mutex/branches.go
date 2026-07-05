@@ -209,7 +209,61 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 		copyStatsMap(stats, elseBase)
 		return
 	}
+
+	// No explicit else: the implicit else path carries elseBase, which differs
+	// from the incoming stats only when the condition itself acquires a lock —
+	// an inline TryLock, e.g. `if !mu.TryLock() { mu.Lock() }`. When the then
+	// branch re-acquires so that both the TryLock-success path and the fallback
+	// Lock() path hold the mutex, the two states converge and there is no
+	// imbalance to report; propagate the held state so a later defer Unlock
+	// matches. Gated on a TryLock condition so no other `if` shape changes
+	// behaviour, and reached only for a non-terminating then branch so a then
+	// that returns while holding the lock still leaves stats on the else path.
+	if c.conditionAcquiresLock(stmt.Cond) && c.canMergeBranchStates(thenStats, elseBase) {
+		copyStatsMap(stats, thenStats)
+		return
+	}
+
 	c.reportUnmatchedLocksInBranch(stats, thenStats, "if")
+}
+
+// tryLockConditionTarget returns the tracked mutex a bare TryLock/TryRLock
+// condition acquires on its success branch, along with the call node. ok is
+// false when cond is not such a call. A leading `!` is the caller's concern:
+// negation swaps the branches, it does not change which lock the call acquires.
+func (c *Checker) tryLockConditionTarget(cond ast.Expr) (call *ast.CallExpr, varName, method string, ok bool) {
+	call, isCall := cond.(*ast.CallExpr)
+	if !isCall {
+		return nil, "", "", false
+	}
+	sel, isSel := call.Fun.(*ast.SelectorExpr)
+	if !isSel {
+		return nil, "", "", false
+	}
+	name := common.GetVarName(sel.X)
+	switch sel.Sel.Name {
+	case "TryLock":
+		if c.mutexNames[name] || c.rwMutexNames[name] {
+			return call, name, "TryLock", true
+		}
+	case "TryRLock":
+		if c.rwMutexNames[name] {
+			return call, name, "TryRLock", true
+		}
+	}
+	return nil, "", "", false
+}
+
+// conditionAcquiresLock reports whether cond is a TryLock/TryRLock call (or its
+// negation) on a tracked mutex — a condition whose evaluation leaves the lock
+// held on the success branch, so the implicit else path is not the incoming
+// state.
+func (c *Checker) conditionAcquiresLock(cond ast.Expr) bool {
+	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		return c.conditionAcquiresLock(unary.X)
+	}
+	_, _, _, ok := c.tryLockConditionTarget(cond)
+	return ok
 }
 
 func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
@@ -225,28 +279,18 @@ func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string
 		return thenStats, elseStats
 	}
 
-	call, ok := cond.(*ast.CallExpr)
+	call, varName, method, ok := c.tryLockConditionTarget(cond)
 	if !ok {
 		return thenStats, elseStats
 	}
 
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return thenStats, elseStats
-	}
-
-	varName := common.GetVarName(sel.X)
-	switch sel.Sel.Name {
+	switch method {
 	case "TryLock":
-		if c.mutexNames[varName] || c.rwMutexNames[varName] {
-			thenStats[varName].lock++
-			thenStats[varName].lockPos = append(thenStats[varName].lockPos, call.Pos())
-		}
+		thenStats[varName].lock++
+		thenStats[varName].lockPos = append(thenStats[varName].lockPos, call.Pos())
 	case "TryRLock":
-		if c.rwMutexNames[varName] {
-			thenStats[varName].rlock++
-			thenStats[varName].rlockPos = append(thenStats[varName].rlockPos, call.Pos())
-		}
+		thenStats[varName].rlock++
+		thenStats[varName].rlockPos = append(thenStats[varName].rlockPos, call.Pos())
 	}
 
 	return thenStats, elseStats

@@ -22,7 +22,7 @@ func (c *Checker) findDeferDoneCalls(stats map[string]*Stats) {
 		if call, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok {
 			if call.Sel.Name == "Done" {
 				wgName := common.GetVarName(call.X)
-				if c.waitGroupNames[wgName] {
+				if c.waitGroupNames[wgName] && c.isWaitGroupReceiver(call.X) {
 					stats[wgName].deferDoneCalls = append(stats[wgName].deferDoneCalls, deferStmt.Call.Pos())
 				}
 			}
@@ -47,7 +47,7 @@ func (c *Checker) findDoneInFunctionLiteral(body *ast.BlockStmt, stats map[strin
 
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" {
 				wgName := common.GetVarName(sel.X)
-				if c.waitGroupNames[wgName] {
+				if c.waitGroupNames[wgName] && c.isWaitGroupReceiver(sel.X) {
 					stats[wgName].deferDoneCalls = append(stats[wgName].deferDoneCalls, call.Pos())
 				}
 			}
@@ -216,6 +216,9 @@ func (c *Checker) handleExpressionStatement(stmt *ast.ExprStmt, stats map[string
 	if !c.waitGroupNames[wgName] {
 		return
 	}
+	if !c.isWaitGroupReceiver(sel.X) {
+		return
+	}
 
 	switch sel.Sel.Name {
 	case "Add":
@@ -227,6 +230,24 @@ func (c *Checker) handleExpressionStatement(stmt *ast.ExprStmt, stats map[string
 	case "Wait":
 		c.handleWaitCall(call, wgName, stats)
 	}
+}
+
+// isWaitGroupReceiver confirms that selector receiver x statically has type
+// sync.WaitGroup (or *sync.WaitGroup). waitGroupNames is keyed by bare variable
+// name, so two identically-named variables of different types in the same
+// function — e.g. a real sync.WaitGroup and a custom type that also exposes
+// Add/Done/Wait — would otherwise be conflated and the custom type's calls
+// miscounted. When the type cannot be resolved we fall back to the name-based
+// decision to avoid regressing inputs without full type information.
+func (c *Checker) isWaitGroupReceiver(x ast.Expr) bool {
+	if c.typesInfo == nil {
+		return true
+	}
+	typ := c.typesInfo.TypeOf(x)
+	if typ == nil {
+		return true
+	}
+	return common.IsWaitGroup(typ)
 }
 
 func (c *Checker) handleImmediatelyInvokedFunction(stmt *ast.ExprStmt, forStack []*ast.ForStmt, stats map[string]*Stats, alreadyReported map[token.Pos]bool) bool {
