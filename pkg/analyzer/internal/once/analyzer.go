@@ -411,3 +411,72 @@ func (c *Checker) isDoCallOn(call *ast.CallExpr, target string) bool {
 	}
 	return common.GetVarName(sel.X) == target
 }
+
+// onceConstructors are the sync package memoizing constructors (Go 1.21+).
+// Each wraps its function argument in a sync.Once and returns a function that
+// invokes it, so passing a nil literal panics when the returned function runs.
+var onceConstructors = map[string]struct{}{
+	"OnceFunc":   {},
+	"OnceValue":  {},
+	"OnceValues": {},
+}
+
+// ConstructorSelector extracts the callee selector from a call to a sync.Once
+// constructor, peeling the type-argument index of the generic OnceValue and
+// OnceValues instantiations (e.g. sync.OnceValue[int](nil)). It returns nil for
+// any other call shape.
+func ConstructorSelector(fun ast.Expr) *ast.SelectorExpr {
+	switch f := fun.(type) {
+	case *ast.SelectorExpr:
+		return f
+	case *ast.IndexExpr:
+		if sel, ok := f.X.(*ast.SelectorExpr); ok {
+			return sel
+		}
+	case *ast.IndexListExpr:
+		if sel, ok := f.X.(*ast.SelectorExpr); ok {
+			return sel
+		}
+	}
+	return nil
+}
+
+// IsOnceConstructorName reports whether name is one of OnceFunc, OnceValue or
+// OnceValues. It is the cheap selector-name reject used before any type lookup.
+func IsOnceConstructorName(name string) bool {
+	_, ok := onceConstructors[name]
+	return ok
+}
+
+// ConstructorChecker reports sync.OnceFunc/OnceValue/OnceValues(nil) (GCL3003)
+// for one pass. It satisfies callscan.Checker so the sub-analyzer can drive it
+// through the shared call-scan skeleton.
+type ConstructorChecker struct {
+	errorCollector report.Reporter
+	typesInfo      *types.Info
+}
+
+// NewConstructorChecker creates the OnceFunc/OnceValue/OnceValues(nil) checker.
+func NewConstructorChecker(errorCollector report.Reporter, typesInfo *types.Info) *ConstructorChecker {
+	return &ConstructorChecker{errorCollector: errorCollector, typesInfo: typesInfo}
+}
+
+// Check flags a nil argument to a sync.Once constructor. sel is the callee
+// selector already extracted by ConstructorSelector and matched to a known
+// constructor name by IsOnceConstructorName; the object lookup here confirms
+// the callee is really from package sync and not a same-named helper. Only a
+// literal nil is flagged: a nil-typed variable is not statically known to be
+// nil.
+func (c *ConstructorChecker) Check(call *ast.CallExpr, sel *ast.SelectorExpr) {
+	if len(call.Args) != 1 {
+		return
+	}
+	fn, ok := c.typesInfo.ObjectOf(sel.Sel).(*types.Func)
+	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "sync" {
+		return
+	}
+	if ident, ok := common.UnwrapParenExpr(call.Args[0]).(*ast.Ident); ok && ident.Name == "nil" {
+		c.errorCollector.AddError(call.Pos(), category.OnceConstructorNil,
+			"sync."+sel.Sel.Name+" called with nil function (panics when the returned function runs)")
+	}
+}

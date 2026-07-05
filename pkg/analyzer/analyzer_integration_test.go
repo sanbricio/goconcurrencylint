@@ -14,6 +14,8 @@ func TestAnalyzerFixtures(t *testing.T) {
 		{name: "waitgroup", packages: []string{"waitgroup"}},
 		{name: "once", packages: []string{"once"}},
 		{name: "cond", packages: []string{"cond"}},
+		{name: "pool", packages: []string{"pool"}},
+		{name: "synccopy", packages: []string{"synccopy"}},
 		{name: "packagelevel", packages: []string{"packagelevel"}},
 		{name: "ignoredirective", packages: []string{"ignoredirective"}},
 		{name: "generated", packages: []string{"generated"}},

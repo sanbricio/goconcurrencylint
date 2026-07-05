@@ -42,6 +42,7 @@ var groups = []group{
 	{'2', "sync.WaitGroup"},
 	{'3', "sync.Once"},
 	{'4', "sync.Cond"},
+	{'5', "sync.Pool"},
 	{'9', "Cross-cutting"},
 }
 

@@ -1,6 +1,8 @@
-// Package copycheck detects copy-by-value of sync.Mutex, sync.RWMutex
-// and sync.WaitGroup. It is an independent sub-analyzer that reports
-// diagnostics directly through analysis.Pass.Report.
+// Package copycheck detects copy-by-value of the sync primitives that must
+// not be copied after first use: sync.Mutex, sync.RWMutex, sync.WaitGroup,
+// sync.Once, sync.Cond, sync.Pool and sync.Map (directly or via a containing
+// struct). It is an independent sub-analyzer that reports diagnostics directly
+// through analysis.Pass.Report.
 package copycheck
 
 import (
@@ -19,14 +21,15 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 )
 
-// Analyzer reports any copy of a sync.Mutex, sync.RWMutex or
-// sync.WaitGroup value (directly or via a containing struct). It does
-// not call pass.Report itself: it returns the prepared diagnostic slice
-// as ResultType so the umbrella analyzer can re-emit them. This is the
-// pattern that makes the dependency graph visible to analysistest.
+// Analyzer reports any copy of a sync.Mutex, sync.RWMutex, sync.WaitGroup,
+// sync.Once, sync.Cond, sync.Pool or sync.Map value (directly or via a
+// containing struct). It does not call pass.Report itself: it returns the
+// prepared diagnostic slice as ResultType so the umbrella analyzer can re-emit
+// them. This is the pattern that makes the dependency graph visible to
+// analysistest.
 var Analyzer = &analysis.Analyzer{
 	Name:       "goconcurrencylint_copy",
-	Doc:        "Detects copy-by-value of sync.Mutex, sync.RWMutex and sync.WaitGroup.",
+	Doc:        "Detects copy-by-value of sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once, sync.Cond, sync.Pool and sync.Map.",
 	Run:        run,
 	Requires:   []*analysis.Analyzer{inspect.Analyzer, filesetup.Analyzer},
 	ResultType: reflect.TypeFor[[]analysis.Diagnostic](),
@@ -181,7 +184,8 @@ func valueKind(typ types.Type) string {
 
 func directValueKind(typ types.Type) string {
 	typ = types.Unalias(typ)
-	if match, ok := common.MatchPkgAndName(typ, "sync", "Mutex", "RWMutex", "WaitGroup", "Once"); ok {
+	if match, ok := common.MatchPkgAndName(typ, "sync",
+		"Mutex", "RWMutex", "WaitGroup", "Once", "Cond", "Pool", "Map"); ok {
 		switch match {
 		case "Mutex":
 			return "mutex"
@@ -191,6 +195,14 @@ func directValueKind(typ types.Type) string {
 			return "waitgroup"
 		case "Once":
 			return "once"
+		case "Cond":
+			return "cond"
+		case "Pool":
+			return "pool"
+		// Map keeps its qualified name: a bare "map" would read as the
+		// builtin type instead of sync.Map.
+		case "Map":
+			return "sync.Map"
 		}
 	}
 	return ""

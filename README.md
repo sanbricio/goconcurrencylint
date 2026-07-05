@@ -101,6 +101,7 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 | [`GCL1010`](docs/checks/GCL1010.md) | `panic-before-unlock` | `sync.Mutex`, `sync.RWMutex` | A statically-known out-of-range index can panic between Lock() and a non-deferred unlock. |
 | [`GCL1011`](docs/checks/GCL1011.md) | `double-lock` | `sync.Mutex`, `sync.RWMutex` | A second Lock() is taken while the first is still held. |
 | [`GCL1012`](docs/checks/GCL1012.md) | `lock-order-cycle` | `sync.Mutex`, `sync.RWMutex` | Two functions acquire the same pair of mutexes in opposite orders — a classic deadlock pattern. |
+| [`GCL1013`](docs/checks/GCL1013.md) | `rwmutex-recursive-lock` | `sync.RWMutex` | A goroutine re-acquires an RWMutex it already holds in a conflicting mode (read then write, or write then read), which self-deadlocks. |
 | [`GCL2001`](docs/checks/GCL2001.md) | `add-without-done` | `sync.WaitGroup` | wg.Add(n) has fewer guaranteed Done()s than its count, so the counter can never reach zero. |
 | [`GCL2002`](docs/checks/GCL2002.md) | `done-without-add` | `sync.WaitGroup` | wg.Done() is called more times than wg.Add() allows, which panics at runtime. |
 | [`GCL2003`](docs/checks/GCL2003.md) | `add-after-wait` | `sync.WaitGroup` | wg.Add() is called after wg.Wait() returned with an empty counter — a classic reuse bug. |
@@ -118,8 +119,10 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 | [`GCL2015`](docs/checks/GCL2015.md) | `go-panic` | `sync.WaitGroup` | A function passed to wg.Go() may panic and bring the program down. |
 | [`GCL3001`](docs/checks/GCL3001.md) | `once-do-deadlock` | `sync.Once` | once.Do(f) where f calls Do on the same Once again — Once.Do is not reentrant, so this deadlocks. |
 | [`GCL3002`](docs/checks/GCL3002.md) | `once-do-nil` | `sync.Once` | once.Do(nil) panics when the function is invoked. |
+| [`GCL3003`](docs/checks/GCL3003.md) | `once-constructor-nil` | `sync.Once` | sync.OnceFunc/OnceValue/OnceValues is called with a nil function, which panics when the memoized function first runs. |
 | [`GCL4001`](docs/checks/GCL4001.md) | `cond-new-nil-locker` | `sync.Cond` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
-| [`GCL9001`](docs/checks/GCL9001.md) | `sync-primitive-copy` | `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`, `sync.Once` | A sync primitive (or a struct embedding one) is copied by value. |
+| [`GCL5001`](docs/checks/GCL5001.md) | `pool-non-pointer-value` | `sync.Pool` | A non-pointer value is placed in a sync.Pool (a Put argument or a New return), so every call boxes it into an interface and heap-allocates — defeating the pool. |
+| [`GCL9001`](docs/checks/GCL9001.md) | `sync-primitive-copy` | `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`, `sync.Once`, `sync.Cond`, `sync.Pool`, `sync.Map` | A sync primitive (or a struct embedding one) is copied by value. |
 <!-- END GENERATED CHECKS TABLE -->
 
 All checks above also fire on package-scoped primitives declared in any file of the same package — there is no separate code for that case; the diagnostic carries the same category as the in-function variant.
