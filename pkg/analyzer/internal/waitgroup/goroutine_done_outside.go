@@ -181,12 +181,74 @@ func (g *goroutineInspector) checkAddInsideGoroutine(fn *ast.FuncDecl) {
 			if !hasMainFlowWait(wgName) {
 				return true
 			}
+			// Skip the "Add before you spawn" handoff (see addHandedOffToWorker).
+			if g.addHandedOffToWorker(fnLit.Body, wgName) {
+				return true
+			}
 			g.reporter.AddError(call.Pos(), category.AddInsideGoroutine, "waitgroup '"+wgName+"' Add called inside goroutine, may race with Wait")
 			return true
 		})
 
 		return true
 	})
+}
+
+// addHandedOffToWorker reports whether body spawns a worker goroutine that owns
+// the Done for wgName. In that case an Add in body is the "Add before you spawn"
+// handoff to that worker, not the racy shape where a goroutine adds on its own
+// behalf; only the latter can race a main-flow Wait, so it must not be flagged.
+func (g *goroutineInspector) addHandedOffToWorker(body *ast.BlockStmt, wgName string) bool {
+	if body == nil {
+		return false
+	}
+	handoff := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if handoff {
+			return false
+		}
+		goStmt, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit)
+		if !ok || fnLit.Body == nil {
+			return true
+		}
+		if g.workerBodyInvokesDone(fnLit.Body, wgName) {
+			handoff = true
+			return false
+		}
+		return true
+	})
+	return handoff
+}
+
+// workerBodyInvokesDone reports whether body calls Done on wgName, either
+// directly or through a defer.
+func (g *goroutineInspector) workerBodyInvokesDone(body *ast.BlockStmt, wgName string) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch s := n.(type) {
+		case *ast.DeferStmt:
+			if g.deferInvokesDone != nil && g.deferInvokesDone(s, wgName) {
+				found = true
+				return false
+			}
+		case *ast.CallExpr:
+			if g.callInvokesDone != nil && g.callInvokesDone(s, wgName) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func (g *goroutineInspector) addDelta(call *ast.CallExpr, wgName string) (int, bool) {
