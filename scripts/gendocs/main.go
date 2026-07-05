@@ -43,6 +43,7 @@ var groups = []group{
 	{'3', "sync.Once"},
 	{'4', "sync.Cond"},
 	{'5', "sync.Pool"},
+	{'6', "Channels"},
 	{'9', "Cross-cutting"},
 }
 

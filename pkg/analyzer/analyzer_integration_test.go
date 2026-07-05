@@ -15,6 +15,7 @@ func TestAnalyzerFixtures(t *testing.T) {
 		{name: "once", packages: []string{"once"}},
 		{name: "cond", packages: []string{"cond"}},
 		{name: "pool", packages: []string{"pool"}},
+		{name: "channel", packages: []string{"channel"}},
 		{name: "synccopy", packages: []string{"synccopy"}},
 		{name: "packagelevel", packages: []string{"packagelevel"}},
 		{name: "ignoredirective", packages: []string{"ignoredirective"}},

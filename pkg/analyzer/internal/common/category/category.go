@@ -8,6 +8,7 @@
 //	GCL3xxx  sync.Once
 //	GCL4xxx  sync.Cond
 //	GCL5xxx  sync.Pool
+//	GCL6xxx  channels (close/send/receive)
 //	GCL9xxx  cross-cutting (applies to several primitives)
 //
 // Every check also keeps a legacy kebab-case slug (e.g. lock-without-unlock).
@@ -65,6 +66,12 @@ const (
 	// sync.Pool checks (GCL5xxx).
 	PoolNonPointerValue Category = "GCL5001"
 
+	// Channel checks (GCL6xxx).
+	CloseOfNilChannel    Category = "GCL6001"
+	CloseOfClosedChannel Category = "GCL6002"
+	SendOnClosedChannel  Category = "GCL6003"
+	NilChannelOperation  Category = "GCL6004"
+
 	// Cross-cutting checks (GCL9xxx).
 	SyncPrimitiveCopy Category = "GCL9001"
 )
@@ -77,6 +84,7 @@ const (
 	primOnce  = "sync.Once"
 	primCond  = "sync.Cond"
 	primPool  = "sync.Pool"
+	primChan  = "channel"
 	primAll   = "sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once, sync.Cond, sync.Pool, sync.Map"
 )
 
@@ -565,6 +573,49 @@ pool.Put(buf) // []byte is not pointer-shaped: this allocates on every Put`,
 var pool sync.Pool
 buf := make([]byte, 1024)
 pool.Put(&buf) // store a pointer so nothing is boxed`},
+
+	{CloseOfNilChannel, "close-of-nil-channel", primChan,
+		"close() is called on a channel that is nil on every path reaching the call, which panics at runtime.",
+		"Closing a nil channel panics with \"close of nil channel\"; the variable was declared but never assigned a channel from make.",
+		`
+var ch chan int
+close(ch) // ch is nil: panics with "close of nil channel"`,
+		`
+ch := make(chan int)
+close(ch)`},
+
+	{CloseOfClosedChannel, "close-of-closed-channel", primChan,
+		"close() is called on a channel that is already closed on every path reaching the call, which panics at runtime.",
+		"Closing an already-closed channel panics with \"close of closed channel\"; a channel must be closed exactly once.",
+		`
+ch := make(chan int)
+close(ch)
+close(ch) // already closed: panics with "close of closed channel"`,
+		`
+ch := make(chan int)
+close(ch)`},
+
+	{SendOnClosedChannel, "send-on-closed-channel", primChan,
+		"A value is sent on a channel that is already closed on every path reaching the send, which panics at runtime.",
+		"Sending on a closed channel panics with \"send on closed channel\"; closing signals that no more values will ever be sent.",
+		`
+ch := make(chan int, 1)
+close(ch)
+ch <- 1 // channel already closed: panics with "send on closed channel"`,
+		`
+ch := make(chan int, 1)
+ch <- 1
+close(ch)`},
+
+	{NilChannelOperation, "nil-channel-op", primChan,
+		"A send or receive is performed on a channel that is nil on every path reaching the operation, which blocks the goroutine forever.",
+		"Send and receive on a nil channel block forever; the variable was declared but never assigned a channel from make. A nil channel inside a select is a legitimate way to disable a case and is not flagged.",
+		`
+var ch chan int
+ch <- 1 // ch is nil: this goroutine blocks forever`,
+		`
+ch := make(chan int, 1)
+ch <- 1`},
 
 	{SyncPrimitiveCopy, "sync-primitive-copy", primAll,
 		"A sync primitive (or a struct embedding one) is copied by value.",
