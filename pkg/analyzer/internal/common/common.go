@@ -65,6 +65,14 @@ func IsCond(typ types.Type) bool {
 	return MatchesPkgAndName(typ, "sync", "Cond")
 }
 
+// IsPool returns true if the given type is sync.Pool or *sync.Pool. Pool
+// methods have pointer receivers, so a value is auto-addressed at the call
+// site; both the value and pointer forms appear in practice.
+func IsPool(typ types.Type) bool {
+	typ = DerefOnce(typ)
+	return MatchesPkgAndName(typ, "sync", "Pool")
+}
+
 // MatchesPkgAndName reports whether typ is a named type declared in pkg
 // whose name matches any of names.
 //

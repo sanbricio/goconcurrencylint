@@ -18,6 +18,7 @@ Every diagnostic `goconcurrencylint` can emit, with its stable code. The code is
 | [GCL1010](GCL1010.md) | `panic-before-unlock` | A statically-known out-of-range index can panic between Lock() and a non-deferred unlock. |
 | [GCL1011](GCL1011.md) | `double-lock` | A second Lock() is taken while the first is still held. |
 | [GCL1012](GCL1012.md) | `lock-order-cycle` | Two functions acquire the same pair of mutexes in opposite orders — a classic deadlock pattern. |
+| [GCL1013](GCL1013.md) | `rwmutex-recursive-lock` | A goroutine re-acquires an RWMutex it already holds in a conflicting mode (read then write, or write then read), which self-deadlocks. |
 
 ## sync.WaitGroup
 
@@ -45,12 +46,19 @@ Every diagnostic `goconcurrencylint` can emit, with its stable code. The code is
 |------|------|-------------|
 | [GCL3001](GCL3001.md) | `once-do-deadlock` | once.Do(f) where f calls Do on the same Once again — Once.Do is not reentrant, so this deadlocks. |
 | [GCL3002](GCL3002.md) | `once-do-nil` | once.Do(nil) panics when the function is invoked. |
+| [GCL3003](GCL3003.md) | `once-constructor-nil` | sync.OnceFunc/OnceValue/OnceValues is called with a nil function, which panics when the memoized function first runs. |
 
 ## sync.Cond
 
 | Code | Slug | Description |
 |------|------|-------------|
 | [GCL4001](GCL4001.md) | `cond-new-nil-locker` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
+
+## sync.Pool
+
+| Code | Slug | Description |
+|------|------|-------------|
+| [GCL5001](GCL5001.md) | `pool-non-pointer-value` | A non-pointer value is placed in a sync.Pool (a Put argument or a New return), so every call boxes it into an interface and heap-allocates — defeating the pool. |
 
 ## Cross-cutting
 

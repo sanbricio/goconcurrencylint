@@ -32,12 +32,11 @@ func NewChecker(errorCollector report.Reporter, typesInfo *types.Info) *Checker 
 	}
 }
 
-// CheckCall flags sync.NewCond(nil) (GCL4001). Only the literal nil is flagged;
-// the object lookup confirms the callee is really sync.NewCond and not a
-// same-named helper.
-func (c *Checker) CheckCall(call *ast.CallExpr) {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "NewCond" || len(call.Args) != 1 {
+// Check flags sync.NewCond(nil) (GCL4001). sel is the callee selector already
+// matched to the name "NewCond" by the call-scan skeleton; the object lookup
+// here confirms the callee is really sync.NewCond and not a same-named helper.
+func (c *Checker) Check(call *ast.CallExpr, sel *ast.SelectorExpr) {
+	if len(call.Args) != 1 {
 		return
 	}
 	fn, ok := c.typesInfo.ObjectOf(sel.Sel).(*types.Func)

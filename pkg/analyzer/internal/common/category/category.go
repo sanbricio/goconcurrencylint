@@ -6,6 +6,8 @@
 //	GCL1xxx  sync.Mutex / sync.RWMutex
 //	GCL2xxx  sync.WaitGroup
 //	GCL3xxx  sync.Once
+//	GCL4xxx  sync.Cond
+//	GCL5xxx  sync.Pool
 //	GCL9xxx  cross-cutting (applies to several primitives)
 //
 // Every check also keeps a legacy kebab-case slug (e.g. lock-without-unlock).
@@ -33,6 +35,7 @@ const (
 	PanicBeforeUnlock      Category = "GCL1010"
 	DoubleLock             Category = "GCL1011"
 	LockOrderCycle         Category = "GCL1012"
+	RWMutexRecursiveLock   Category = "GCL1013"
 
 	// WaitGroup checks (GCL2xxx).
 	AddWithoutDone          Category = "GCL2001"
@@ -52,11 +55,15 @@ const (
 	GoPanic                 Category = "GCL2015"
 
 	// sync.Once checks (GCL3xxx).
-	OnceDoDeadlock Category = "GCL3001"
-	OnceDoNil      Category = "GCL3002"
+	OnceDoDeadlock     Category = "GCL3001"
+	OnceDoNil          Category = "GCL3002"
+	OnceConstructorNil Category = "GCL3003"
 
 	// sync.Cond checks (GCL4xxx).
 	CondNewNilLocker Category = "GCL4001"
+
+	// sync.Pool checks (GCL5xxx).
+	PoolNonPointerValue Category = "GCL5001"
 
 	// Cross-cutting checks (GCL9xxx).
 	SyncPrimitiveCopy Category = "GCL9001"
@@ -69,7 +76,8 @@ const (
 	primWG    = "sync.WaitGroup"
 	primOnce  = "sync.Once"
 	primCond  = "sync.Cond"
-	primAll   = "sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once"
+	primPool  = "sync.Pool"
+	primAll   = "sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once, sync.Cond, sync.Pool, sync.Map"
 )
 
 // Check is the full, stable metadata for one diagnostic. The registry below
@@ -262,6 +270,22 @@ func g() { b.Lock(); a.Lock(); a.Unlock(); b.Unlock() } // opposite order`,
 // both functions take a before b
 func f() { a.Lock(); b.Lock(); b.Unlock(); a.Unlock() }
 func g() { a.Lock(); b.Lock(); a.Unlock(); b.Unlock() }`},
+	{RWMutexRecursiveLock, "rwmutex-recursive-lock", primRW,
+		"A goroutine re-acquires an RWMutex it already holds in a conflicting mode (read then write, or write then read), which self-deadlocks.",
+		"Go's sync.RWMutex is neither recursive nor upgradable: Lock waits for the goroutine's own read lock to be released, and RLock waits for its own write lock — so the goroutine blocks on itself forever.",
+		`
+var mu sync.RWMutex
+mu.RLock()
+mu.Lock() // upgrading the read lock to a write lock on the same goroutine deadlocks
+mu.Unlock()
+mu.RUnlock()`,
+		`
+var mu sync.RWMutex
+mu.RLock()
+_ = read()
+mu.RUnlock()
+mu.Lock() // take the write lock only after releasing the read lock
+mu.Unlock()`},
 
 	{AddWithoutDone, "add-without-done", primWG,
 		"wg.Add(n) has fewer guaranteed Done()s than its count, so the counter can never reach zero.",
@@ -509,6 +533,17 @@ var once sync.Once
 once.Do(func() {
 	initialize()
 })`},
+	{OnceConstructorNil, "once-constructor-nil", primOnce,
+		"sync.OnceFunc/OnceValue/OnceValues is called with a nil function, which panics when the memoized function first runs.",
+		"Each constructor wraps f in a Once and returns a function that invokes f; a nil f is a nil function call that panics the first time the returned function runs.",
+		`
+handle := sync.OnceFunc(nil) // calling handle later panics on the nil function
+handle()`,
+		`
+handle := sync.OnceFunc(func() {
+	initialize()
+})
+handle()`},
 
 	{CondNewNilLocker, "cond-new-nil-locker", primCond,
 		"sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime.",
@@ -518,6 +553,18 @@ once.Do(func() {
 		`
 	var mu sync.Mutex
 	c := sync.NewCond(&mu) // pass a real Locker`},
+
+	{PoolNonPointerValue, "pool-non-pointer-value", primPool,
+		"A non-pointer value is placed in a sync.Pool (a Put argument or a New return), so every call boxes it into an interface and heap-allocates — defeating the pool.",
+		"A value that is not pointer-shaped cannot live in the pool's internal interface without a heap allocation, so pooling it allocates on every Put or New miss instead of reusing memory; storing a pointer avoids the boxing.",
+		`
+var pool sync.Pool
+buf := make([]byte, 1024)
+pool.Put(buf) // []byte is not pointer-shaped: this allocates on every Put`,
+		`
+var pool sync.Pool
+buf := make([]byte, 1024)
+pool.Put(&buf) // store a pointer so nothing is boxed`},
 
 	{SyncPrimitiveCopy, "sync-primitive-copy", primAll,
 		"A sync primitive (or a struct embedding one) is copied by value.",

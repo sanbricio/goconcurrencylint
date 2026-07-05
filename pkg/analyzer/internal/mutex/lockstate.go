@@ -137,7 +137,10 @@ func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, s
 	switch methodName {
 	case "Lock":
 		if stats[varName].rlock > 0 {
-			c.errorCollector.AddError(pos, category.DoubleLock, "rwmutex '"+varName+"' attempts write Lock while read lock is held")
+			// Read-to-write upgrade on the same goroutine: Lock blocks waiting
+			// for this goroutine's own read lock to be released. Guaranteed
+			// self-deadlock (RWMutex is not upgradable).
+			c.errorCollector.AddError(pos, category.RWMutexRecursiveLock, "rwmutex '"+varName+"' attempts write Lock while read lock is held")
 		}
 		if stats[varName].borrowedLock > 0 {
 			stats[varName].borrowedLock--
@@ -178,6 +181,13 @@ func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, s
 			stats[varName].removeFirstLockPos()
 		}
 	case "RLock", "TryRLock":
+		// Write-to-read on the same goroutine: a blocking RLock waits for this
+		// goroutine's own write lock to be released. Guaranteed self-deadlock.
+		// TryRLock is excluded: it returns false instead of blocking, so it does
+		// not deadlock.
+		if methodName == "RLock" && stats[varName].lock > 0 {
+			c.errorCollector.AddError(pos, category.RWMutexRecursiveLock, "rwmutex '"+varName+"' attempts read RLock while write lock is held")
+		}
 		if stats[varName].borrowedRLock > 0 {
 			stats[varName].borrowedRLock--
 			stats[varName].removeFirstBorrowedRUnlockPos()

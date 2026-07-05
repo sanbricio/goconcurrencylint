@@ -56,6 +56,57 @@ func BadRWMutexPromotionWithDeferredRUnlock() {
 	mu.Unlock()
 }
 
+// Acquiring a read lock while already holding the write lock deadlocks in the
+// same goroutine: the blocking RLock waits for the goroutine's own Unlock.
+func BadRWMutexWriteThenRead() {
+	var mu sync.RWMutex
+	mu.Lock()
+	mu.RLock() // want "rwmutex 'mu' attempts read RLock while write lock is held"
+	mu.RUnlock()
+	mu.Unlock()
+}
+
+// A deferred Unlock still leaves the write lock held when RLock is reached.
+func BadRWMutexWriteThenReadWithDeferredUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	defer mu.Unlock()
+	mu.RLock() // want "rwmutex 'mu' attempts read RLock while write lock is held"
+	mu.RUnlock()
+}
+
+// The read lock is fine once the write lock has been released first.
+func GoodRWMutexWriteThenReadAfterUnlock() {
+	var mu sync.RWMutex
+	mu.Lock()
+	mu.Unlock()
+	mu.RLock()
+	mu.RUnlock()
+}
+
+// The read lock is still held inside the branch, so the promotion deadlocks.
+func BadRWMutexPromotionInBranch(cond bool) {
+	var mu sync.RWMutex
+	mu.RLock()
+	if cond {
+		mu.Lock() // want "rwmutex 'mu' attempts write Lock while read lock is held"
+		mu.Unlock()
+	}
+	mu.RUnlock()
+}
+
+// The read lock is released before the branch, so the later write lock is safe
+// on every path and must not be flagged.
+func GoodRWMutexReleaseBeforeBranch(cond bool) {
+	var mu sync.RWMutex
+	mu.RLock()
+	mu.RUnlock()
+	if cond {
+		mu.Lock()
+		mu.Unlock()
+	}
+}
+
 // RLock without RUnlock
 func BadRLockWithoutRUnlock() {
 	var mu sync.RWMutex
@@ -272,11 +323,12 @@ func BadRWImbalancedRLockRUnlock() {
 	mu.RUnlock()
 }
 
-// Imbalanced: lock and rlock, only unlock
+// Imbalanced: lock and rlock, only unlock. The RLock while the write lock is
+// held is itself a self-deadlock (GCL1013), and the read lock is never released.
 func BadRWImbalancedMixed() {
 	var mu sync.RWMutex
 	mu.Lock()
-	mu.RLock() // want "rwmutex 'mu' is rlocked but not runlocked"
+	mu.RLock() // want "rwmutex 'mu' attempts read RLock while write lock is held" "rwmutex 'mu' is rlocked but not runlocked"
 	mu.Unlock()
 }
 
