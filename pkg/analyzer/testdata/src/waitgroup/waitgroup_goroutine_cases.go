@@ -211,6 +211,23 @@ func BadAddInsideNestedGoroutine() {
 	wg.Wait()
 }
 
+// GoodProducerFanOutAddBeforeSpawn mirrors a producer goroutine that adds on
+// behalf of each worker it spawns and hands the Done to that worker ("Add
+// before you spawn"). Not the racy self-adding shape, so the Add must not be
+// flagged.
+func GoodProducerFanOutAddBeforeSpawn(n int) {
+	var wg sync.WaitGroup
+	go func() {
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+			}()
+		}
+	}()
+	wg.Wait()
+}
+
 func GoodSwitchWithDefault() {
 	var wg sync.WaitGroup
 	wg.Add(1)
