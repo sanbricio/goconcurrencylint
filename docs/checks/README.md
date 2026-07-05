@@ -60,6 +60,15 @@ Every diagnostic `goconcurrencylint` can emit, with its stable code. The code is
 |------|------|-------------|
 | [GCL5001](GCL5001.md) | `pool-non-pointer-value` | A non-pointer value is placed in a sync.Pool (a Put argument or a New return), so every call boxes it into an interface and heap-allocates — defeating the pool. |
 
+## Channels
+
+| Code | Slug | Description |
+|------|------|-------------|
+| [GCL6001](GCL6001.md) | `close-of-nil-channel` | close() is called on a channel that is nil on every path reaching the call, which panics at runtime. |
+| [GCL6002](GCL6002.md) | `close-of-closed-channel` | close() is called on a channel that is already closed on every path reaching the call, which panics at runtime. |
+| [GCL6003](GCL6003.md) | `send-on-closed-channel` | A value is sent on a channel that is already closed on every path reaching the send, which panics at runtime. |
+| [GCL6004](GCL6004.md) | `nil-channel-op` | A send or receive is performed on a channel that is nil on every path reaching the operation, which blocks the goroutine forever. |
+
 ## Cross-cutting
 
 | Code | Slug | Description |

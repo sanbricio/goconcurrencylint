@@ -122,6 +122,10 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 | [`GCL3003`](docs/checks/GCL3003.md) | `once-constructor-nil` | `sync.Once` | sync.OnceFunc/OnceValue/OnceValues is called with a nil function, which panics when the memoized function first runs. |
 | [`GCL4001`](docs/checks/GCL4001.md) | `cond-new-nil-locker` | `sync.Cond` | sync.NewCond(nil) builds a Cond whose Locker is nil, so the first Wait panics at runtime. |
 | [`GCL5001`](docs/checks/GCL5001.md) | `pool-non-pointer-value` | `sync.Pool` | A non-pointer value is placed in a sync.Pool (a Put argument or a New return), so every call boxes it into an interface and heap-allocates — defeating the pool. |
+| [`GCL6001`](docs/checks/GCL6001.md) | `close-of-nil-channel` | `channel` | close() is called on a channel that is nil on every path reaching the call, which panics at runtime. |
+| [`GCL6002`](docs/checks/GCL6002.md) | `close-of-closed-channel` | `channel` | close() is called on a channel that is already closed on every path reaching the call, which panics at runtime. |
+| [`GCL6003`](docs/checks/GCL6003.md) | `send-on-closed-channel` | `channel` | A value is sent on a channel that is already closed on every path reaching the send, which panics at runtime. |
+| [`GCL6004`](docs/checks/GCL6004.md) | `nil-channel-op` | `channel` | A send or receive is performed on a channel that is nil on every path reaching the operation, which blocks the goroutine forever. |
 | [`GCL9001`](docs/checks/GCL9001.md) | `sync-primitive-copy` | `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`, `sync.Once`, `sync.Cond`, `sync.Pool`, `sync.Map` | A sync primitive (or a struct embedding one) is copied by value. |
 <!-- END GENERATED CHECKS TABLE -->
 

@@ -16,6 +16,7 @@
 //	├── once.SubAnalyzer ───────┤── requires filesetup.Analyzer   │
 //	├── cond.SubAnalyzer ───────┤                                 │
 //	├── pool.SubAnalyzer ───────┤                                 │
+//	├── channel.SubAnalyzer ────┤                                 │
 //	└── copycheck.Analyzer ─────┘                                 └── requires inspect.Analyzer
 //
 // "A requires B" means B runs first and exposes its Result through
@@ -27,6 +28,7 @@ package analyzer
 
 import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/cond"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/channel"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/copycheck"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/mutex"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/once"
@@ -37,7 +39,7 @@ import (
 
 var Analyzer = &analysis.Analyzer{
 	Name: "goconcurrencylint",
-	Doc:  "Detects misuse of sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once, sync.Cond and sync.Pool, plus copy-by-value of sync primitives.",
+	Doc:  "Detects misuse of sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once, sync.Cond, sync.Pool and channels, plus copy-by-value of sync primitives.",
 	Run:  run,
 	Requires: []*analysis.Analyzer{
 		mutex.SubAnalyzer,
@@ -45,6 +47,7 @@ var Analyzer = &analysis.Analyzer{
 		once.SubAnalyzer,
 		cond.SubAnalyzer,
 		pool.SubAnalyzer,
+		channel.SubAnalyzer,
 		copycheck.Analyzer,
 	},
 }
@@ -56,6 +59,7 @@ func run(pass *analysis.Pass) (any, error) {
 		once.SubAnalyzer,
 		cond.SubAnalyzer,
 		pool.SubAnalyzer,
+		channel.SubAnalyzer,
 		copycheck.Analyzer,
 	}
 	for _, sub := range subs {

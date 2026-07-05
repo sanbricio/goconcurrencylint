@@ -73,6 +73,19 @@ func IsPool(typ types.Type) bool {
 	return MatchesPkgAndName(typ, "sync", "Pool")
 }
 
+// IsChannel returns true if the given type is a channel type (chan T,
+// chan<- T or <-chan T), after resolving aliases and a single pointer
+// indirection. Channels are not a sync type, but the channel checks reason
+// about their state the same way the mutex checks reason about lock state.
+func IsChannel(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	typ = types.Unalias(DerefOnceAndUnalias(typ))
+	_, ok := typ.Underlying().(*types.Chan)
+	return ok
+}
+
 // MatchesPkgAndName reports whether typ is a named type declared in pkg
 // whose name matches any of names.
 //

@@ -17,7 +17,7 @@ import (
 // prefix.
 func TestDiagnosticMessageCarriesCode(t *testing.T) {
 	results := analysistest.Run(t, analysistest.TestData(), Analyzer,
-		"mutex", "waitgroup", "once", "cond", "pool", "synccopy", "packagelevel", "ignoredirective", "generated")
+		"mutex", "waitgroup", "once", "cond", "pool", "channel", "synccopy", "packagelevel", "ignoredirective", "generated")
 
 	total := 0
 	for _, res := range results {
