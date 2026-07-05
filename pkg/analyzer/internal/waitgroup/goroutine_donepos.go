@@ -2,7 +2,7 @@ package waitgroup
 
 import (
 	"go/ast"
-	"go/token"
+	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
@@ -26,9 +26,9 @@ func (g *goroutineInspector) checkWaitAndDoneInSameGoroutine(fn *ast.FuncDecl) {
 
 		for wgName := range g.waitGroupNames {
 			positions := g.collectWaitDonePositions(fnLit.Body, wgName)
-			for _, waitPos := range positions.waits {
-				if waitDependsOnDoneInSameGoroutine(waitPos, positions) {
-					g.reporter.AddError(waitPos, category.WaitDeadlock, "waitgroup '"+wgName+"' Wait will deadlock: same goroutine has pending Done")
+			for _, wait := range positions.waits {
+				if waitDependsOnDoneInSameGoroutine(wait, positions) {
+					g.reporter.AddError(wait.pos, category.WaitDeadlock, "waitgroup '"+wgName+"' Wait will deadlock: same goroutine has pending Done")
 				}
 			}
 		}
@@ -37,13 +37,30 @@ func (g *goroutineInspector) checkWaitAndDoneInSameGoroutine(fn *ast.FuncDecl) {
 	})
 }
 
-func waitDependsOnDoneInSameGoroutine(waitPos token.Pos, positions waitDonePositions) bool {
-	for _, donePos := range positions.dones {
-		if donePos > waitPos {
+func waitDependsOnDoneInSameGoroutine(wait wgCallSite, positions waitDonePositions) bool {
+	for _, done := range positions.dones {
+		if done.pos > wait.pos && sameWaitGroupObject(wait.obj, done.obj) {
 			return true
 		}
 	}
-	return len(positions.deferDones) > 0
+	for _, deferDone := range positions.deferDones {
+		if sameWaitGroupObject(wait.obj, deferDone.obj) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameWaitGroupObject reports whether two receiver objects denote the same
+// WaitGroup. A nil object (an unresolved receiver, e.g. a field access) falls
+// back to "same" so we keep the prior name-based behaviour rather than dropping
+// a real deadlock; two resolved objects must be identical to match, which is
+// what tells a shadowing inner `var wg` apart from an outer one.
+func sameWaitGroupObject(a, b types.Object) bool {
+	if a == nil || b == nil {
+		return true
+	}
+	return a == b
 }
 
 func (g *goroutineInspector) collectWaitDonePositions(block *ast.BlockStmt, wgName string) waitDonePositions {
@@ -65,7 +82,7 @@ func (g *goroutineInspector) collectWaitDonePositions(block *ast.BlockStmt, wgNa
 			if g.shouldSkipCall(e) {
 				return
 			}
-			recordWaitDoneCall(e, wgName, &positions)
+			g.recordWaitDoneCall(e, wgName, &positions)
 			if fnLit, ok := e.Fun.(*ast.FuncLit); ok && fnLit.Body != nil {
 				visitStmts(fnLit.Body.List)
 			}
@@ -92,7 +109,7 @@ func (g *goroutineInspector) collectWaitDonePositions(block *ast.BlockStmt, wgNa
 				return
 			}
 			if g.deferInvokesDone != nil && g.deferInvokesDone(s, wgName) {
-				positions.deferDones = append(positions.deferDones, s.Call.Pos())
+				positions.deferDones = append(positions.deferDones, wgCallSite{pos: s.Call.Pos(), obj: g.deferDoneObject(s, wgName)})
 			}
 		case *ast.AssignStmt:
 			for _, expr := range s.Rhs {
@@ -182,7 +199,7 @@ func visitMainFlowElse(stmt ast.Stmt, visitStmt func(ast.Stmt), visitStmts func(
 	}
 }
 
-func recordWaitDoneCall(call *ast.CallExpr, wgName string, positions *waitDonePositions) {
+func (g *goroutineInspector) recordWaitDoneCall(call *ast.CallExpr, wgName string, positions *waitDonePositions) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || common.GetVarName(sel.X) != wgName {
 		return
@@ -190,8 +207,30 @@ func recordWaitDoneCall(call *ast.CallExpr, wgName string, positions *waitDonePo
 
 	switch sel.Sel.Name {
 	case "Wait":
-		positions.waits = append(positions.waits, call.Pos())
+		positions.waits = append(positions.waits, wgCallSite{pos: call.Pos(), obj: g.wgObject(sel.X)})
 	case "Done":
-		positions.dones = append(positions.dones, call.Pos())
+		positions.dones = append(positions.dones, wgCallSite{pos: call.Pos(), obj: g.wgObject(sel.X)})
 	}
+}
+
+// wgObject resolves the WaitGroup variable a receiver expression refers to.
+// Only plain identifiers are resolved; field accesses and other shapes return
+// nil so the caller falls back to name-based matching.
+func (g *goroutineInspector) wgObject(expr ast.Expr) types.Object {
+	if g.typesInfo == nil {
+		return nil
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		return g.typesInfo.ObjectOf(ident)
+	}
+	return nil
+}
+
+// deferDoneObject resolves the WaitGroup object of a `defer wg.Done()`. Wrapped
+// forms (a deferred closure) resolve to nil and fall back to name matching.
+func (g *goroutineInspector) deferDoneObject(deferStmt *ast.DeferStmt, wgName string) types.Object {
+	if sel, ok := deferStmt.Call.Fun.(*ast.SelectorExpr); ok && common.GetVarName(sel.X) == wgName {
+		return g.wgObject(sel.X)
+	}
+	return nil
 }

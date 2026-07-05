@@ -441,13 +441,21 @@ func functionBodyUsesWaitGroupName(body *ast.BlockStmt, wgName string) bool {
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		if common.GetVarName(sel.X) == wgName && (sel.Sel.Name == "Add" || sel.Sel.Name == "Done" || sel.Sel.Name == "Wait" || sel.Sel.Name == "Go") {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok &&
+			common.GetVarName(sel.X) == wgName &&
+			(sel.Sel.Name == "Add" || sel.Sel.Name == "Done" || sel.Sel.Name == "Wait" || sel.Sel.Name == "Go") {
 			found = true
 			return false
+		}
+		// The waitgroup may be delegated to a helper — `helper(wg)` or
+		// `helper(&wg)` — that performs the Done on the caller's behalf. Treat
+		// passing the waitgroup as an argument as a use so the interprocedural
+		// resolution keeps following it into the helper.
+		for _, arg := range call.Args {
+			if isWaitGroupArgument(arg, wgName) {
+				found = true
+				return false
+			}
 		}
 		return true
 	})

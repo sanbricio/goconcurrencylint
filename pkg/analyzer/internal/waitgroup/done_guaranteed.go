@@ -13,14 +13,19 @@ type doneCallInfo struct {
 	hasGuaranteedDone bool
 }
 
-// goroutineRelatedToWaitGroup checks if a goroutine is related to a WaitGroup
-func goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
+// goroutineRelatedToWaitGroup checks if a goroutine references the WaitGroup
+// named wgName. The reference must resolve to an actual sync.WaitGroup: a
+// same-named variable of a different type (e.g. a custom Add/Done/Decr
+// look-alike, as in tailscale's syncs.WaitGroupChan) must not make the
+// goroutine "related", otherwise its missing Done() would be blamed on an
+// unrelated real WaitGroup's Add().
+func (c *Checker) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
 		found := false
 		ast.Inspect(fnLit.Body, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					if common.GetVarName(sel.X) == wgName {
+					if common.GetVarName(sel.X) == wgName && c.isWaitGroupReceiver(sel.X) {
 						found = true
 						return false
 					}
@@ -35,7 +40,7 @@ func goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string) bool {
 
 func (c *Checker) goroutineDoneInfo(goStmt *ast.GoStmt, wgName string) (doneCallInfo, bool) {
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
-		if !goroutineRelatedToWaitGroup(goStmt, wgName) {
+		if !c.goroutineRelatedToWaitGroup(goStmt, wgName) {
 			return doneCallInfo{}, false
 		}
 		return c.analyzeDoneCallsWithVisited(fnLit.Body, wgName, make(map[token.Pos]bool)), true
@@ -64,6 +69,19 @@ func (c *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName strin
 			if c.worker.isSimpleDeferDone(s, wgName) || c.worker.isCallbackDeferDone(s, wgName) || c.worker.isDeferPanicRecoveryPattern(s, wgName) || c.worker.isDeferFuncWithDone(s, wgName) {
 				info.hasAnyDone = true
 				if !mightExitEarly {
+					info.hasGuaranteedDone = true
+					return info
+				}
+			}
+
+			// A deferred helper may Done on our behalf, e.g.
+			// `defer e.handleWorkerPanic(ctx, &e.workerWg)` whose body calls
+			// wg.Done(). Follow it with the same interprocedural resolution used
+			// for plain calls below; a deferred guaranteed Done runs on every
+			// exit path, exactly like a direct `defer wg.Done()`.
+			if helperInfo, related := c.analyzeRelatedCall(s.Call, wgName, visited); related {
+				info.hasAnyDone = info.hasAnyDone || helperInfo.hasAnyDone
+				if helperInfo.hasGuaranteedDone && !mightExitEarly {
 					info.hasGuaranteedDone = true
 					return info
 				}
