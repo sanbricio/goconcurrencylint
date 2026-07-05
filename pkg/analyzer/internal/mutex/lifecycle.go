@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
@@ -256,13 +257,16 @@ func (l *lifecycleResolver) returnsFuncFor(mutexName string, methodNames []strin
 }
 
 // returnsClosureReleasingLock reports whether the function hands the release of
-// mutexName to its caller through a returned closure. Two shapes are covered:
-// the closure is returned directly (return func() { mu.Unlock() }) or it is a
-// field value of a returned composite literal — the guard/RAII pattern
-// (return Guard{release: func() { mu.Unlock() }}). In both cases the acquiring
-// function is not expected to unlock before returning, so the lock is not a
-// leak. The closure must call the matching unlock on the same mutex; a closure
-// that merely mentions it does not qualify.
+// mutexName to its caller instead of unlocking before it returns, so the lock is
+// not a leak. Three shapes are covered:
+//   - a closure returned directly: return func() { mu.Unlock() }
+//   - a closure in a returned composite literal — the guard/RAII pattern:
+//     return Guard{release: func() { mu.Unlock() }}
+//   - the bound unlock method returned directly: return mu.Unlock
+//
+// Handing back the bound method delegates release exactly like returning a
+// closure that calls it. The returned value must release the same mutex; a
+// value that merely mentions it does not qualify.
 func (l *lifecycleResolver) returnsClosureReleasingLock(mutexName string, unlockMethods []string) bool {
 	if l.function == nil || l.function.Body == nil {
 		return false
@@ -289,7 +293,58 @@ func (l *lifecycleResolver) returnsClosureReleasingLock(mutexName string, unlock
 		}
 	}
 
+	// The bound unlock method returned directly: return mu.Unlock.
+	if l.returnsUnlockMethodValue(l.function, mutexName, unlockMethods) {
+		return true
+	}
+
 	return false
+}
+
+// returnsUnlockMethodValue reports whether fn hands back the bound unlock method
+// of mutexName (return mu.Unlock), either returned directly or through a local
+// variable that is later returned (u := mu.Unlock; return u).
+func (l *lifecycleResolver) returnsUnlockMethodValue(fn *ast.FuncDecl, mutexName string, unlockMethods []string) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+
+	isUnlockValue := func(expr ast.Expr) bool {
+		sel, ok := expr.(*ast.SelectorExpr)
+		if !ok || common.GetVarName(sel.X) != mutexName {
+			return false
+		}
+		return slices.Contains(unlockMethods, sel.Sel.Name)
+	}
+
+	localValues := make(map[string]ast.Expr)
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
+					localValues[ident.Name] = node.Rhs[i]
+				}
+			}
+		case *ast.ReturnStmt:
+			for _, result := range node.Results {
+				if isUnlockValue(result) {
+					found = true
+					return false
+				}
+				if ident, ok := result.(*ast.Ident); ok && isUnlockValue(localValues[ident.Name]) {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // returnedFuncLits returns the function literals fn hands back to its caller,
