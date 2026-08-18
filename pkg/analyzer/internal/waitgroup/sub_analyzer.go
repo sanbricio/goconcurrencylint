@@ -24,10 +24,19 @@ var SubAnalyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (any, error) {
+	// counters is built on first use and shared by every function in the pass,
+	// so the package-wide index is not rebuilt per function. driver.Run visits
+	// functions sequentially, so the lazy init needs no synchronization.
+	var counters *packageCounterIndex
 	return driver.Run(pass, driver.Config[*Checker]{
 		Guard: primitives.HasWaitGroups,
 		NewChecker: func(fr *primitives.FunctionResult, ec report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Checker {
-			return NewChecker(fr, ec, cf, pass)
+			if counters == nil {
+				counters = newPackageCounterIndex(pass.Files)
+			}
+			checker := NewChecker(fr, ec, cf, pass)
+			checker.packageCounters = counters
+			return checker
 		},
 	})
 }

@@ -83,8 +83,21 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 	}
 
 	if group := mutexMethodGroup(w.function.Name.Name); group != nil {
-		return slices.Contains(group, methodName) &&
-			w.siblingMethodContainsFieldCall(suffix, oppositeMethods, oppositeMethods)
+		if slices.Contains(group, methodName) {
+			return w.siblingMethodContainsFieldCall(suffix, oppositeMethods, oppositeMethods)
+		}
+		// A method named Lock/Unlock may implement the sync.Locker contract
+		// over the READ half of an inner RWMutex — the sync.RWMutex.RLocker()
+		// shape (Lock → RLock, Unlock → RUnlock), e.g. a test store exposing
+		// `func (s *S) Lock() { s.mu.RLock() }` / `func (s *S) Unlock() {
+		// s.mu.RUnlock() }`. The sibling is still found by the contract name
+		// (Lock ↔ Unlock) while its body must perform the opposite of the
+		// inner read op. A read-locking Lock with no read-releasing Unlock
+		// sibling is still reported.
+		if w.isReadLockerAdapterOp(methodName) {
+			return w.siblingMethodContainsFieldCall(suffix, oppositeMutexMethods(w.function.Name.Name), oppositeMethods)
+		}
+		return false
 	}
 
 	if !methodNameLooksLikeWrapper(w.function.Name.Name, methodName) {
@@ -160,6 +173,21 @@ func (w *wrapperResolver) isOneWayWriteBarrier(varName, methodName string) bool 
 	}
 	if receiverType := w.typeNameForBaseVar(baseVar); receiverType != "" {
 		return w.anyMethodOnTypeContainsFieldSuffix(receiverType, w.function.Name.Name, fieldSuffix, siblingMethods, siblingHints)
+	}
+	return false
+}
+
+// isReadLockerAdapterOp reports whether the inner mutex call is the read-side
+// implementation of a write-named Locker method: a Lock/TryLock-named method
+// acquiring via RLock/TryRLock, or an Unlock-named method releasing via
+// RUnlock.
+func (w *wrapperResolver) isReadLockerAdapterOp(methodName string) bool {
+	fnName := w.function.Name.Name
+	if slices.Contains(WriteLockPattern.LockMethods, fnName) {
+		return slices.Contains(ReadLockPattern.LockMethods, methodName)
+	}
+	if slices.Contains(WriteLockPattern.UnlockMethods, fnName) {
+		return slices.Contains(ReadLockPattern.UnlockMethods, methodName)
 	}
 	return false
 }

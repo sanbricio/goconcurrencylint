@@ -85,3 +85,93 @@ func GoodGoroutineDeferUnlockReleasesParentTryLock() bool {
 	}()
 	return true
 }
+
+// ========== release delegated to a sync.Once ==========
+
+type onceLocker struct {
+	mu      sync.Mutex
+	waiters []chan struct{}
+}
+
+// Good: the deferred Once releases the lock on every return path, and the
+// early call inside the body only moves that same release earlier.
+func (o *onceLocker) LockReleasedByDeferredOnce(ok bool) chan struct{} {
+	o.mu.Lock()
+	unlock := sync.Once{}
+	defer unlock.Do(o.mu.Unlock)
+
+	if !ok {
+		return nil
+	}
+
+	waiter := make(chan struct{})
+	o.waiters = append(o.waiters, waiter)
+
+	unlock.Do(o.mu.Unlock)
+	return waiter
+}
+
+// Good: the Once fires the release inline, without a deferred counterpart.
+func (o *onceLocker) LockReleasedByInlineOnce() {
+	o.mu.Lock()
+	unlock := sync.Once{}
+	o.waiters = nil
+	unlock.Do(o.mu.Unlock)
+}
+
+// Bad: the Once runs unrelated cleanup, so nothing releases the lock.
+func (o *onceLocker) BadLockWithOnceNotReleasing() {
+	o.mu.Lock() // want "mutex 'o.mu' is locked but not unlocked"
+	done := sync.Once{}
+	defer done.Do(func() {
+		o.waiters = nil
+	})
+}
+
+// ========== lock parked in a Locker variable ==========
+
+type quotaChecker struct {
+	quotaLock sync.RWMutex
+	engines   int
+}
+
+// Good: the lock is taken only once the check decides it is needed, recorded in
+// a Locker variable, and released by the deferred closure that tests it. The
+// alias is the guard, so acquisition and release stay paired.
+func (q *quotaChecker) GoodLockParkedInLockerVariable() {
+	go func() {
+		var locker sync.Locker
+		defer func() {
+			if locker != nil {
+				locker.Unlock()
+			}
+		}()
+
+		for {
+			if q.engines == 0 {
+				return
+			}
+			if locker == nil {
+				q.quotaLock.Lock()
+				locker = &q.quotaLock
+			}
+			q.engines--
+		}
+	}()
+}
+
+// Bad: the lock is taken but never recorded in the alias, so the deferred
+// release never fires for it and the lock leaks.
+func (q *quotaChecker) BadLockNeverRecordedInLocker() {
+	var locker sync.Locker
+	defer func() { // want "rwmutex 'q.quotaLock' has defer unlock but no corresponding lock"
+		if locker != nil {
+			locker.Unlock()
+		}
+	}()
+
+	if q.engines > 0 {
+		q.quotaLock.Lock() // want "rwmutex 'q.quotaLock' is locked but not unlocked in if"
+	}
+	locker = &q.quotaLock
+}

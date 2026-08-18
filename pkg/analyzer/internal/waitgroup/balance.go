@@ -21,6 +21,7 @@ type balanceValidatorConfig struct {
 	reporter                     report.Reporter
 	typesInfo                    *types.Info
 	escape                       *escapeAnalyzer
+	countedInOtherFunction       func(string, bool) bool
 	isInGoroutine                inGoroutineChecker
 	isNodeInGoroutine            func(ast.Node) bool
 	callInvokesDone              doneCallChecker
@@ -39,6 +40,9 @@ type balanceValidatorConfig struct {
 // with releases (Done/defer Done) and waits in the current function.
 type balanceValidator struct {
 	balanceValidatorConfig
+
+	// handoff is built on first use, per analyzed function.
+	handoff *handoffIndex
 }
 
 func newBalanceValidator(config balanceValidatorConfig) *balanceValidator {
@@ -62,15 +66,11 @@ func (b *balanceValidator) validateBalance(wgName string, stats *Stats) {
 	totalDone += guaranteedFromGoroutines
 
 	if stats.totalAdd > totalDone {
-		// A count shortfall only means "Add without corresponding Done" when no
-		// Done() exists at all. When a related goroutine *does* call Done on this
-		// WaitGroup — even on a path that isn't guaranteed (a conditional Done, or
-		// a Done reached only after an early return/panic, or an event-driven Done
-		// in a loop) — a corresponding Done provably exists, so the counter is not
-		// structurally orphaned. Claiming "Add without corresponding Done" there is
-		// misleading; the "Done is not guaranteed on every path" concern is owned by
-		// the more precise deferred-Done and cancellation checks. Suppress here.
-		if !b.hasUnguaranteedGoroutineDone(wgName) {
+		// A shortfall only means "Add without corresponding Done" when no Done
+		// exists at all, and when the counters could price every Done: a loop of
+		// unknown count is priced at one iteration, so totalDone is a lower bound
+		// and a shortfall against it is speculative.
+		if !b.hasUnguaranteedGoroutineDone(wgName) && !b.hasDoneInUnknownCountLoop(wgName) {
 			b.reportUnmatchedAdds(wgName, stats, totalDone)
 		}
 	}
@@ -153,18 +153,12 @@ func (b *balanceValidator) countGuaranteedDoneInGoroutines(wgName string) int {
 	return b.countGuaranteedDoneInStatements(b.function.Body.List, wgName, 1)
 }
 
-// hasUnguaranteedGoroutineDone reports whether any goroutine launched in the
-// function calls Done on wgName on some path but is *not* guaranteed to run it on
-// every path (a conditional Done, an event-driven Done in a loop, or a Done
-// reached only after an early return/panic/Goexit). When such a Done exists the
-// counter is not structurally orphaned — a corresponding Done provably exists —
-// so the unmatched-Add report stays silent and leaves the "Done isn't guaranteed"
-// concern to the more precise deferred-Done and cancellation checks.
-//
-// Goroutines whose Done *is* guaranteed are deliberately excluded: those are
-// already tallied by countGuaranteedDoneInGoroutines, so a remaining shortfall
-// (e.g. Add(3) against two `defer wg.Done()` goroutines) is a real, statically
-// certain imbalance that must still be reported.
+// hasUnguaranteedGoroutineDone reports whether a goroutine calls Done on some
+// path without being guaranteed to on every path. Such a Done proves the
+// counter is not orphaned, so the unmatched-Add report stays silent and leaves
+// the "not guaranteed" concern to the deferred-Done and cancellation checks.
+// Guaranteed Dones are excluded: countGuaranteedDoneInGoroutines already tallies
+// them, so a shortfall against those is a real imbalance.
 func (b *balanceValidator) hasUnguaranteedGoroutineDone(wgName string) bool {
 	if b.function == nil || b.function.Body == nil {
 		return false
@@ -187,6 +181,48 @@ func (b *balanceValidator) hasUnguaranteedGoroutineDone(wgName string) bool {
 	return found
 }
 
+// hasDoneInUnknownCountLoop reports whether a for/range loop whose iteration
+// count could not be determined statically contributes Done calls (in main
+// flow or via spawned goroutines) for wgName. The balance counters price such
+// a loop at exactly one iteration, so any Add-vs-Done shortfall computed from
+// them is a guess, not a proven imbalance.
+func (b *balanceValidator) hasDoneInUnknownCountLoop(wgName string) bool {
+	if b.function == nil || b.function.Body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(b.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		var body *ast.BlockStmt
+		switch loop := n.(type) {
+		case *ast.ForStmt:
+			if _, ok := b.estimateForIterationsKnown(loop); ok {
+				return true
+			}
+			body = loop.Body
+		case *ast.RangeStmt:
+			if _, ok := b.estimateRangeIterationsKnown(loop); ok {
+				return true
+			}
+			body = loop.Body
+		default:
+			return true
+		}
+		if body == nil {
+			return true
+		}
+		if b.countMainFlowDoneInStatements(body.List, wgName, 1) > 0 ||
+			b.countGuaranteedDoneInStatements(body.List, wgName, 1) > 0 {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // checkWaitGroupBalance validates that Add and Done calls are properly balanced
 func (b *balanceValidator) checkWaitGroupBalance(stats map[string]*Stats) {
 	for wgName, st := range stats {
@@ -196,10 +232,17 @@ func (b *balanceValidator) checkWaitGroupBalance(stats map[string]*Stats) {
 		if b.isLikelyExternalLifecycleWaitGroup(wgName, st) {
 			continue
 		}
+		// A WaitGroup shared with another function has half of its lifecycle
+		// out of view: the callee that received it may hold the Add for the
+		// Done seen here, or the Done for the Add seen here. Either way the
+		// local totals are not a balance, so both directions are skipped.
 		if b.escape != nil && b.escape.isWaitGroupPassedToOtherFunctions(wgName) {
-			if len(st.addCalls) > 0 {
+			if len(st.addCalls) > 0 || st.doneCount > 0 || len(st.deferDoneCalls) > 0 {
 				continue
 			}
+		}
+		if b.countedInOtherFunction != nil && b.countedInOtherFunction(wgName, len(st.addCalls) > 0) {
+			continue
 		}
 		b.validateBalance(wgName, st)
 	}
@@ -324,6 +367,10 @@ func (b *balanceValidator) reportUnmatchedAdds(wgName string, stats *Stats, tota
 		if remainingDone >= addCall.value {
 			remainingDone -= addCall.value
 		} else if !addCall.known && b.addCoveredByVariableDoneLoop(addCall.pos, wgName) {
+			continue
+		} else if b.addIsHandedOffThroughChannel(wgName, addCall.pos) {
+			// This Add belongs to work handed to a channel; its Done lives with
+			// the receiver. Other Adds in the same function are still judged.
 			continue
 		} else {
 			b.reporter.AddError(addCall.pos, category.AddWithoutDone, "waitgroup '"+wgName+"' has Add without corresponding Done")

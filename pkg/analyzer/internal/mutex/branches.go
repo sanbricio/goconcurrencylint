@@ -10,7 +10,7 @@ import (
 
 // analyzeRangeStatement handles range statements
 func (c *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
-	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt.Body)
+	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt, stmt.Body)
 	c.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
 	rangeStats := c.analyzeBlock(stmt.Body, stats)
 	copyStatsMap(stats, rangeStats)
@@ -224,6 +224,14 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 		return
 	}
 
+	// Released by another `if` on the same condition: carry the state forward
+	// so that release lands on it (see siblingIfWithSameCondition).
+	if c.releasedByLaterSiblingWithSameCondition(stmt, stats, thenStats) ||
+		c.acquiredByEarlierSiblingWithSameCondition(stmt, stats, thenStats) {
+		copyStatsMap(stats, thenStats)
+		return
+	}
+
 	c.reportUnmatchedLocksInBranch(stats, thenStats, "if")
 }
 
@@ -397,7 +405,68 @@ func (c *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats) 
 	}
 
 	// `go someMethod()` runs the method asynchronously in another goroutine;
-	// its Lock/Unlock effects belong to that goroutine, not the caller's state.
+	// its Lock/Unlock effects belong to that goroutine, except when the method
+	// name declares the release contract (grpc's `go x.fooAndUnlock()`): there
+	// the parent handed ownership over and is not leaking.
+	c.applyGoroutineMethodReleaseHandoff(stmt.Call, stats)
+}
+
+// applyGoroutineMethodReleaseHandoff credits `go x.method()` with releasing a
+// held mutex rooted at x, provided the method name announces the handoff
+// (contains "Unlock") and its body performs the unlock. The name gate is what
+// keeps a generic `go h.releaseHelper()` reported as a leak.
+func (c *Checker) applyGoroutineMethodReleaseHandoff(call *ast.CallExpr, stats map[string]*Stats) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || c.typesInfo == nil {
+		return
+	}
+	if !methodNameMatchesAnyHint(sel.Sel.Name, []string{"Unlock"}) {
+		return
+	}
+
+	baseVar := common.GetVarName(sel.X)
+	if baseVar == "" || baseVar == "?" {
+		return
+	}
+
+	receiverType := common.BaseTypeNameFromType(c.typesInfo.TypeOf(sel.X))
+	if receiverType == "" {
+		return
+	}
+	callee := c.receiverMethods[receiverType][sel.Sel.Name]
+	if callee == nil || callee.Body == nil || callee == c.function {
+		return
+	}
+	calleeReceiver := common.ReceiverName(callee)
+	if calleeReceiver == "" {
+		return
+	}
+
+	handoff := func(names map[string]bool) {
+		for mutexName := range names {
+			st := stats[mutexName]
+			if st == nil {
+				continue
+			}
+			relativePath, ok := relativeMutexPath(mutexName, baseVar)
+			if !ok {
+				continue
+			}
+			target := calleeReceiver + "." + relativePath
+
+			if st.lock > 0 && c.lifecycle.methodReleasesTarget(callee, target, WriteLockPattern.UnlockMethods, nil) {
+				st.lock--
+				st.removeFirstLockPos()
+			}
+			if st.rlock > 0 && c.lifecycle.methodReleasesTarget(callee, target, ReadLockPattern.UnlockMethods, nil) {
+				st.rlock--
+				st.removeFirstRLockPos()
+			}
+		}
+	}
+
+	handoff(c.mutexNames)
+	handoff(c.rwMutexNames)
 }
 
 // analyzeForStatement handles for loop statements
@@ -406,7 +475,7 @@ func (c *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stats
 		return
 	}
 
-	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt.Body)
+	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt, stmt.Body)
 	c.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
 	forStats := c.analyzeBlock(stmt.Body, stats)
 	c.loopCarry.applyLoopExitLocks(stmt, stats, forStats)

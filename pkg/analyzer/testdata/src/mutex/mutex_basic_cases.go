@@ -250,6 +250,31 @@ func BadRecoverInNestedConditionDoesNotGuardRUnlock(cond bool) {
 	}()
 }
 
+// A lock released on every normal return, with the function's fall-through exit
+// being an assertion-style panic, is not a leak: the panic never returns to the
+// caller, so no path leaves the mutex held for live code. Mirrors syncthing's
+// smallIndex.ID (internal/db/olddb/smallindex.go).
+func GoodLockReleasedBeforeTerminalPanic(m map[string]int, k string) int {
+	var mu sync.Mutex
+	mu.Lock()
+	if v, ok := m[k]; ok {
+		mu.Unlock()
+		return v
+	}
+	panic("missing key")
+}
+
+// The abort suppression inspects only the trailing statement. A panic buried in
+// a branch does not exempt a lock that leaks on the normal fall-through path, so
+// this genuine leak is still reported.
+func BadLockLeakPanicNotTail(ok bool) {
+	var mu sync.Mutex
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	if !ok {
+		panic("bad")
+	}
+}
+
 // Defer-before-lock: the deferred unlock runs at return, AFTER the adjacent
 // Lock, so the pair is balanced. Only a fragile ordering — a statement that can
 // return or panic between the defer and the lock (see BadDeferUnlockAfterPanic)

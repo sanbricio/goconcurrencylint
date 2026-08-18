@@ -131,6 +131,38 @@ func GoodRangeLoopAddWithDeferredGoroutineDone(shardsByKeyspace map[string][]str
 	wg.Wait()
 }
 
+func GoodAddBeforeGoroutineWithDeferredCleanupDone(tokens chan struct{}) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer func() {
+			<-tokens
+			wg.Done()
+		}()
+		doSomething()
+	}()
+	wg.Wait()
+}
+
+func GoodLoopBranchAddWithDeferredCleanupDone(tokens chan struct{}, small bool) {
+	var wg sync.WaitGroup
+	for {
+		if small {
+			wg.Add(1)
+			go func() {
+				defer func() {
+					<-tokens
+					wg.Done()
+				}()
+				doSomething()
+			}()
+			continue
+		}
+		wg.Wait()
+		return
+	}
+}
+
 func GoodAddLenThenLaunchRangeWorkers(trace []int) {
 	var wg sync.WaitGroup
 
@@ -666,14 +698,49 @@ func GoodAddCountMatchesDynamicRangeWorkers() {
 	wg.Wait()
 }
 
-func BadUnknownDynamicRangeMayNotCoverAdd(items []int) {
+// An Add whose count must match a loop over a statically unknown collection is
+// NOT reported: the balance counters price the loop at one iteration, so the
+// apparent shortfall is a guess about len(items), not a proven imbalance. Real
+// code pairs `wg.Add(n)` with a data structure the caller guarantees has n
+// elements (grpc's timeoutCache_test builds exactly itemCount values); flagging
+// "may not cover" here was a false-positive class. An Add with no Done anywhere
+// is still reported (see BadAddWithoutDone cases).
+func GoodUnknownDynamicRangeAssumedToCoverAdd(items []int) {
 	var wg sync.WaitGroup
-	wg.Add(2) // want "waitgroup 'wg' has Add without corresponding Done"
+	wg.Add(2)
 	for _, item := range items {
 		item := item
 		go func() {
 			defer wg.Done()
 			_ = item
+		}()
+	}
+	wg.Wait()
+}
+
+// A countdown loop is as exactly countable as a count-up one: five workers,
+// five Dones, Add(5) — balanced (grpc TestBlockingPick spawns its goroutines
+// with `for i := goroutineCount; i > 0; i--`).
+func GoodCountdownLoopWorkersMatchAdd() {
+	const workers = 5
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := workers; i > 0; i-- {
+		go func() {
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+// The exact countdown count also exposes real shortfalls: three Adds against
+// two countdown-spawned workers can never be Waited out.
+func BadCountdownLoopWorkersBelowAdd() {
+	var wg sync.WaitGroup
+	wg.Add(3) // want "waitgroup 'wg' has Add without corresponding Done" "waitgroup 'wg' Add count 3 does not match 2 goroutines launched"
+	for i := 2; i > 0; i-- {
+		go func() {
+			wg.Done()
 		}()
 	}
 	wg.Wait()
@@ -1044,6 +1111,46 @@ func GoodAddNonConstVarMatchesGoroutines() {
 	for range 100 {
 		go func() {
 			defer wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+// A collection grown inside a loop whose iteration count is unknown has an
+// unknown length afterwards: the `make(..., 0, cap)` length is stale the
+// moment the appends run. Pricing the later range at zero iterations dropped
+// every Done in its body and reported the Add as unpaired (tidb's
+// TestConnectionWillNotLeak builds its connection slice exactly this way).
+func GoodRangeOverSliceGrownInUnknownCountLoop(limit int) {
+	conns := make([]int, 0, 100)
+	for len(conns) < limit {
+		conns = append(conns, len(conns))
+	}
+
+	var wg sync.WaitGroup
+	for _, conn := range conns {
+		wg.Add(1)
+		go func() {
+			_ = conn
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+// Same unknown-length collection, but nothing in the loop body ever calls
+// Done: the Add is still unpaired and must be reported.
+func BadRangeOverSliceGrownInUnknownCountLoopWithoutDone(limit int) {
+	conns := make([]int, 0, 100)
+	for len(conns) < limit {
+		conns = append(conns, len(conns))
+	}
+
+	var wg sync.WaitGroup
+	for _, conn := range conns {
+		wg.Add(1) // want "waitgroup 'wg' has Add without corresponding Done"
+		go func() {
+			_ = conn
 		}()
 	}
 	wg.Wait()

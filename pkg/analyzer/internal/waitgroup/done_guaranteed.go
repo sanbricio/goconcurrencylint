@@ -38,15 +38,31 @@ func (c *Checker) goroutineRelatedToWaitGroup(goStmt *ast.GoStmt, wgName string)
 	return false
 }
 
+// goroutineDoneInfo is the top-level entry used by the balance analyzers, which
+// start a fresh interprocedural walk per goroutine. Recursive callers that are
+// already mid-walk must use goroutineDoneInfoWithVisited so the cycle guard
+// survives the goroutine boundary.
 func (c *Checker) goroutineDoneInfo(goStmt *ast.GoStmt, wgName string) (doneCallInfo, bool) {
+	return c.goroutineDoneInfoWithVisited(goStmt, wgName, make(map[token.Pos]bool))
+}
+
+// goroutineDoneInfoWithVisited analyzes a goroutine's Done behaviour while
+// threading the caller's visited set through the goroutine boundary. Creating a
+// fresh visited map here (as the old code did) reset cycle detection on every
+// `go` statement, so mutually recursive functions reached across goroutines —
+// A spawns a goroutine that calls B, B spawns one that calls A — recursed until
+// the stack overflowed (observed on minio). The visited set already tracks the
+// live call path (analyzeRelatedCall removes each function on unwind), so
+// sharing it only makes the walk more conservative, never less correct.
+func (c *Checker) goroutineDoneInfoWithVisited(goStmt *ast.GoStmt, wgName string, visited map[token.Pos]bool) (doneCallInfo, bool) {
 	if fnLit, ok := goStmt.Call.Fun.(*ast.FuncLit); ok {
 		if !c.goroutineRelatedToWaitGroup(goStmt, wgName) {
 			return doneCallInfo{}, false
 		}
-		return c.analyzeDoneCallsWithVisited(fnLit.Body, wgName, make(map[token.Pos]bool)), true
+		return c.analyzeDoneCallsWithVisited(fnLit.Body, wgName, visited), true
 	}
 
-	return c.analyzeRelatedCall(goStmt.Call, wgName, make(map[token.Pos]bool))
+	return c.analyzeRelatedCall(goStmt.Call, wgName, visited)
 }
 
 func (c *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName string, visited map[token.Pos]bool) doneCallInfo {
@@ -185,7 +201,7 @@ func (c *Checker) analyzeDoneCallsWithVisited(block *ast.BlockStmt, wgName strin
 			}
 
 		case *ast.GoStmt:
-			goInfo, related := c.goroutineDoneInfo(s, wgName)
+			goInfo, related := c.goroutineDoneInfoWithVisited(s, wgName, visited)
 			if related {
 				info.hasAnyDone = info.hasAnyDone || goInfo.hasAnyDone
 				if goInfo.hasGuaranteedDone && !mightExitEarly {

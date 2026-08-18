@@ -115,7 +115,15 @@ func (lc *loopCarryAnalyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.S
 		case *ast.LabeledStmt:
 			lc.reportDeferredUnlocksInLoopStatements([]ast.Stmt{s.Stmt}, maps.Clone(locked), maps.Clone(rlocked))
 		case *ast.IfStmt:
-			lc.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
+			// `if !flag { mu.Lock(); defer mu.Unlock(); flag = true }` is a
+			// self-disabling branch: setting the flag it tests means the body —
+			// and its deferred unlock — executes at most once no matter how many
+			// times the loop iterates (grpc interop's hasORCALock idiom). One
+			// deferred unlock held to function exit is the ordinary defer
+			// pattern, not per-iteration accumulation.
+			if !ifBranchDisablesItself(s) {
+				lc.reportDeferredUnlocksInLoopStatements(s.Body.List, maps.Clone(locked), maps.Clone(rlocked))
+			}
 			if s.Else != nil {
 				lc.reportDeferredUnlocksInLoopElse(s.Else, maps.Clone(locked), maps.Clone(rlocked))
 			}
@@ -143,6 +151,35 @@ func (lc *loopCarryAnalyzer) reportDeferredUnlocksInLoopStatements(stmts []ast.S
 			}
 		}
 	}
+}
+
+// ifBranchDisablesItself reports whether the statement is `if !flag { ...;
+// flag = true; ... }` — a branch guarded by a boolean it sets, so its body runs
+// at most once across all loop iterations.
+func ifBranchDisablesItself(s *ast.IfStmt) bool {
+	unary, ok := s.Cond.(*ast.UnaryExpr)
+	if !ok || unary.Op != token.NOT {
+		return false
+	}
+	flagExpr := exprString(unary.X)
+	if flagExpr == "" || s.Body == nil {
+		return false
+	}
+
+	for _, stmt := range s.Body.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || assign.Tok != token.ASSIGN {
+			continue
+		}
+		rhs, ok := assign.Rhs[0].(*ast.Ident)
+		if !ok || rhs.Name != "true" {
+			continue
+		}
+		if exprString(assign.Lhs[0]) == flagExpr {
+			return true
+		}
+	}
+	return false
 }
 
 func (lc *loopCarryAnalyzer) reportDeferredUnlocksInLoopElse(stmt ast.Stmt, locked, rlocked map[string]bool) {

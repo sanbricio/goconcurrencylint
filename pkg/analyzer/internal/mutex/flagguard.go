@@ -44,6 +44,15 @@ func (c *Checker) detectFlagGuardedReleaseFlags(fn *ast.FuncDecl) map[string]str
 
 	consider(c.mutexNames)
 	consider(c.rwMutexNames)
+
+	// A lock parked in an alias variable guards its own deferred release: the
+	// alias plays the part the boolean plays above.
+	for target, alias := range c.aliasGuardedReleaseFlags(fn) {
+		if result == nil {
+			result = make(map[string]string)
+		}
+		result[target] = alias
+	}
 	return result
 }
 
@@ -225,90 +234,10 @@ func flagFromGuardedDefer(deferStmt *ast.DeferStmt, mutexName, unlockMethod stri
 // `flag = true` in the same statement list. Function literals, deferred calls and
 // goroutines run in a different frame and are not traversed.
 func everyLockPairsWithSetFlag(body *ast.BlockStmt, mutexName, lockMethod, flag string) bool {
-	foundLock := false
-	paired := true
-
-	var visit func(stmts []ast.Stmt)
-	var visitCallbackExprs func(ast.Expr)
-	visit = func(stmts []ast.Stmt) {
-		for i, stmt := range stmts {
-			if isMutexMethodCallStmt(stmt, mutexName, lockMethod) {
-				foundLock = true
-				if i+1 >= len(stmts) || !isAssignTrue(stmts[i+1], flag) {
-					paired = false
-				}
-				continue
-			}
-
-			switch s := stmt.(type) {
-			case *ast.BlockStmt:
-				visit(s.List)
-			case *ast.AssignStmt:
-				for _, rhs := range s.Rhs {
-					visitCallbackExprs(rhs)
-				}
-			case *ast.ExprStmt:
-				visitCallbackExprs(s.X)
-			case *ast.ReturnStmt:
-				for _, result := range s.Results {
-					visitCallbackExprs(result)
-				}
-			case *ast.IfStmt:
-				if s.Init != nil {
-					visit([]ast.Stmt{s.Init})
-				}
-				if s.Body != nil {
-					visit(s.Body.List)
-				}
-				if s.Else != nil {
-					visit([]ast.Stmt{s.Else})
-				}
-			case *ast.ForStmt:
-				if s.Body != nil {
-					visit(s.Body.List)
-				}
-			case *ast.RangeStmt:
-				if s.Body != nil {
-					visit(s.Body.List)
-				}
-			case *ast.SwitchStmt:
-				if s.Body != nil {
-					visit(s.Body.List)
-				}
-			case *ast.TypeSwitchStmt:
-				if s.Body != nil {
-					visit(s.Body.List)
-				}
-			case *ast.SelectStmt:
-				if s.Body != nil {
-					visit(s.Body.List)
-				}
-			case *ast.CaseClause:
-				visit(s.Body)
-			case *ast.CommClause:
-				visit(s.Body)
-			case *ast.LabeledStmt:
-				visit([]ast.Stmt{s.Stmt})
-			}
-		}
-	}
-
-	visitCallbackExprs = func(expr ast.Expr) {
-		call, ok := expr.(*ast.CallExpr)
-		if !ok {
-			return
-		}
-		for _, arg := range call.Args {
-			fnlit, ok := arg.(*ast.FuncLit)
-			if !ok || fnlit.Body == nil {
-				continue
-			}
-			visit(fnlit.Body.List)
-		}
-	}
-
-	visit(body.List)
-	return foundLock && paired
+	return everyAcquisitionPairsWith(body,
+		func(stmt ast.Stmt) bool { return isMutexMethodCallStmt(stmt, mutexName, lockMethod) },
+		func(stmt ast.Stmt) bool { return isAssignTrue(stmt, flag) },
+	)
 }
 
 func countMutexMethodCalls(block *ast.BlockStmt, mutexName, method string) int {

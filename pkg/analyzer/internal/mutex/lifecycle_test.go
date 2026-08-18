@@ -101,6 +101,84 @@ func (t *token) Close() {
 	}
 }
 
+func TestLifecycleResolver_ReturnsHandleInitializedByMethod(t *testing.T) {
+	src := `package p
+import "sync"
+type DB struct{ mmaplock sync.RWMutex }
+type Tx struct{ db *DB }
+func (tx *Tx) init(db *DB) {
+	tx.db = db
+}
+func (db *DB) beginTx() (*Tx, error) {
+	db.mmaplock.RLock()
+	tx := &Tx{}
+	tx.init(db)
+	return tx, nil
+}
+func (tx *Tx) close() {
+	tx.db.removeTx(tx)
+}
+func (db *DB) removeTx(tx *Tx) {
+	db.mmaplock.RUnlock()
+}`
+
+	l := buildLifecycleResolver(t, src, "DB", "beginTx")
+	if !l.returnsHandleFor("db.mmaplock", []string{"RUnlock"}) {
+		t.Fatal("expected returned Tx initialized by init(db) to own the eventual RUnlock")
+	}
+}
+
+func TestLifecycleResolver_ReturnedHandleReleaseViaInitializerAlias(t *testing.T) {
+	src := `package p
+import "sync"
+type DB struct{ rwlock sync.Mutex }
+type Tx struct{ db *DB }
+func (tx *Tx) init(db *DB) {
+	tx.db = db
+}
+func (db *DB) beginRWTx() (*Tx, error) {
+	db.rwlock.Lock()
+	tx := &Tx{}
+	tx.init(db)
+	return tx, nil
+}
+func (tx *Tx) close() {
+	tx.db.rwlock.Unlock()
+}`
+
+	l := buildLifecycleResolver(t, src, "Tx", "close")
+	if !l.isReleaseFor("tx.db.rwlock", []string{"Lock", "TryLock"}) {
+		t.Fatal("expected Tx.close to release the DB lock acquired before returning Tx")
+	}
+}
+
+func TestLifecycleResolver_ReleaseHelperCalledFromReturnedHandle(t *testing.T) {
+	src := `package p
+import "sync"
+type DB struct{ mmaplock sync.RWMutex }
+type Tx struct{ db *DB }
+func (tx *Tx) init(db *DB) {
+	tx.db = db
+}
+func (db *DB) beginTx() (*Tx, error) {
+	db.mmaplock.RLock()
+	tx := &Tx{}
+	tx.init(db)
+	return tx, nil
+}
+func (tx *Tx) close() {
+	tx.db.removeTx(tx)
+}
+func (db *DB) removeTx(tx *Tx) {
+	db.mmaplock.RUnlock()
+}`
+
+	l := buildLifecycleResolver(t, src, "DB", "removeTx")
+	if !l.isReleaseFor("db.mmaplock", []string{"RLock", "TryRLock"}) {
+		t.Fatal("expected DB.removeTx to be recognized as a release helper for returned Tx")
+	}
+}
+
 func TestLifecycleResolver_CallerManagedRelease(t *testing.T) {
 	src := `package p
 import "sync"

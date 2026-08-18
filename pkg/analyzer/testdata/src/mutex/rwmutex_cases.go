@@ -583,3 +583,31 @@ func (r *rwLazyReader) GoodRWReadLockUpgrade() {
 	}()
 	r.loaded = true
 }
+
+// ========== read lock split across two blocks on one condition ==========
+
+type clusteredStream struct {
+	mu    sync.RWMutex
+	clMu  sync.Mutex
+	lseq  uint64
+	clseq uint64
+}
+
+// Good: the read lock is taken and released under the same condition, in two
+// blocks so the work in between runs either way. The write lock juggled in the
+// first block is a different lock with its own balance.
+func recalculateClusteredSeq(mset *clusteredStream, needStreamLock bool) uint64 {
+	if needStreamLock {
+		mset.clMu.Unlock()
+		mset.mu.RLock()
+		mset.clMu.Lock()
+	}
+
+	lseq := mset.lseq
+	mset.clseq = lseq + 1
+
+	if needStreamLock {
+		mset.mu.RUnlock()
+	}
+	return lseq
+}

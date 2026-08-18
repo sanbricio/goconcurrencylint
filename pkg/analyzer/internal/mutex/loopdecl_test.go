@@ -19,12 +19,14 @@ func f() {
 }`
 	file, info := parseTypedLifecycleFile(t, src)
 
+	var loopStmt ast.Stmt
 	var body *ast.BlockStmt
 	ast.Inspect(file, func(n ast.Node) bool {
 		if body != nil {
 			return false
 		}
 		if loop, ok := n.(*ast.ForStmt); ok {
+			loopStmt = loop
 			body = loop.Body
 			return false
 		}
@@ -36,7 +38,7 @@ func f() {
 
 	rep := &fakeReporter{}
 	d := newLoopMutexDetector(rep, info)
-	d.check(body)
+	d.check(loopStmt, body)
 
 	if len(rep.calls) != 1 {
 		t.Fatalf("expected 1 diagnostic, got %d", len(rep.calls))
@@ -61,12 +63,14 @@ func f() {
 }`
 	file, info := parseTypedLifecycleFile(t, src)
 
+	var loopStmt ast.Stmt
 	var body *ast.BlockStmt
 	ast.Inspect(file, func(n ast.Node) bool {
 		if body != nil {
 			return false
 		}
 		if loop, ok := n.(*ast.ForStmt); ok {
+			loopStmt = loop
 			body = loop.Body
 			return false
 		}
@@ -78,7 +82,7 @@ func f() {
 
 	rep := &fakeReporter{}
 	d := newLoopMutexDetector(rep, info)
-	d.check(body)
+	d.check(loopStmt, body)
 
 	if len(rep.calls) != 1 {
 		t.Fatalf("expected 1 diagnostic, got %d", len(rep.calls))
@@ -103,12 +107,14 @@ func f() {
 }`
 	file, info := parseTypedLifecycleFile(t, src)
 
+	var loopStmt ast.Stmt
 	var body *ast.BlockStmt
 	ast.Inspect(file, func(n ast.Node) bool {
 		if body != nil {
 			return false
 		}
 		if loop, ok := n.(*ast.ForStmt); ok {
+			loopStmt = loop
 			body = loop.Body
 			return false
 		}
@@ -120,7 +126,7 @@ func f() {
 
 	rep := &fakeReporter{}
 	d := newLoopMutexDetector(rep, info)
-	d.check(body)
+	d.check(loopStmt, body)
 
 	if len(rep.calls) != 1 {
 		t.Fatalf("expected 1 diagnostic, got %d", len(rep.calls))
@@ -144,12 +150,14 @@ func f() {
 }`
 	file, info := parseTypedLifecycleFile(t, src)
 
+	var loopStmt ast.Stmt
 	var body *ast.BlockStmt
 	ast.Inspect(file, func(n ast.Node) bool {
 		if body != nil {
 			return false
 		}
 		if loop, ok := n.(*ast.ForStmt); ok {
+			loopStmt = loop
 			body = loop.Body
 			return false
 		}
@@ -161,7 +169,7 @@ func f() {
 
 	rep := &fakeReporter{}
 	d := newLoopMutexDetector(rep, info)
-	d.check(body)
+	d.check(loopStmt, body)
 
 	if len(rep.calls) != 0 {
 		t.Fatalf("expected 0 diagnostics for non-mutex decl, got %d", len(rep.calls))
