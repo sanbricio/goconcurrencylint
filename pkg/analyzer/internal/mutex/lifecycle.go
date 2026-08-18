@@ -205,11 +205,7 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 		}
 	}
 
-	if l.isReleaseCalledFromReturnedHandle(currentType, path, methodNames) {
-		return true
-	}
-
-	return false
+	return l.isReleaseCalledFromReturnedHandle(currentType, path, methodNames)
 }
 
 func (l *lifecycleResolver) returnsVariableWithReleaseFor(baseVar, suffix string, methodNames []string) bool {
