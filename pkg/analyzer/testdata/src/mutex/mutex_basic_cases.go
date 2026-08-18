@@ -171,6 +171,18 @@ func BadNegatedTryLockFalsePathUnlock() {
 	mu.Unlock()
 }
 
+// Negated TryLock with a blocking fallback: when TryLock fails the branch
+// block-acquires, so the mutex is held on both the TryLock-success path and the
+// fallback path when the deferred Unlock runs. Mirrors minio
+// internal/grid/muxclient.go close(). Must stay CLEAN.
+func GoodNegatedTryLockBlockingFallback() {
+	var mu sync.Mutex
+	if !mu.TryLock() {
+		mu.Lock()
+	}
+	defer mu.Unlock()
+}
+
 // TryLock used as a plain statement ignores whether the lock was acquired.
 func BadTryLockIgnoredReturn() {
 	var mu sync.Mutex
@@ -236,6 +248,31 @@ func BadRecoverInNestedConditionDoesNotGuardRUnlock(cond bool) {
 			mu.RUnlock()
 		}
 	}()
+}
+
+// A lock released on every normal return, with the function's fall-through exit
+// being an assertion-style panic, is not a leak: the panic never returns to the
+// caller, so no path leaves the mutex held for live code. Mirrors syncthing's
+// smallIndex.ID (internal/db/olddb/smallindex.go).
+func GoodLockReleasedBeforeTerminalPanic(m map[string]int, k string) int {
+	var mu sync.Mutex
+	mu.Lock()
+	if v, ok := m[k]; ok {
+		mu.Unlock()
+		return v
+	}
+	panic("missing key")
+}
+
+// The abort suppression inspects only the trailing statement. A panic buried in
+// a branch does not exempt a lock that leaks on the normal fall-through path, so
+// this genuine leak is still reported.
+func BadLockLeakPanicNotTail(ok bool) {
+	var mu sync.Mutex
+	mu.Lock() // want "mutex 'mu' is locked but not unlocked"
+	if !ok {
+		panic("bad")
+	}
 }
 
 // Defer-before-lock: the deferred unlock runs at return, AFTER the adjacent

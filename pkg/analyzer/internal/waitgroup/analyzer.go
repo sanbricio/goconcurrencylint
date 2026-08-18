@@ -24,10 +24,13 @@ type Checker struct {
 	function                   *ast.FuncDecl
 	commentFilter              *commentfilter.CommentFilter
 	typesInfo                  *types.Info
+	pkg                        *types.Package
 	functionDecls              map[token.Pos]*ast.FuncDecl
-	escape                     *escapeAnalyzer
-	iteration                  *iterationEstimator
-	worker                     *workerDoneAnalyzer
+	// packageCounters is shared across every function of the pass.
+	packageCounters *packageCounterIndex
+	escape          *escapeAnalyzer
+	iteration       *iterationEstimator
+	worker          *workerDoneAnalyzer
 }
 
 // addCall represents an Add() call with its position and value
@@ -62,6 +65,7 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		// analysis.Pass normally provides TypesInfo; abort detection keeps
 		// conservative fallbacks for direct tests and defensive callers.
 		typesInfo:     pass.TypesInfo,
+		pkg:           pass.Pkg,
 		functionDecls: buildFunctionDeclMap(pass.Files),
 	}
 }
@@ -303,6 +307,10 @@ func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*a
 	}
 
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if calleeWGName, ok := calleeWaitGroupNameForCompositeReceiver(sel.X, fn, wgName); ok {
+			return fn, calleeWGName, true
+		}
+
 		receiverExprName := common.GetVarName(sel.X)
 		if receiverExprName != "" && receiverExprName != "?" {
 			prefix := receiverExprName + "."
@@ -441,13 +449,21 @@ func functionBodyUsesWaitGroupName(body *ast.BlockStmt, wgName string) bool {
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		if common.GetVarName(sel.X) == wgName && (sel.Sel.Name == "Add" || sel.Sel.Name == "Done" || sel.Sel.Name == "Wait" || sel.Sel.Name == "Go") {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok &&
+			common.GetVarName(sel.X) == wgName &&
+			(sel.Sel.Name == "Add" || sel.Sel.Name == "Done" || sel.Sel.Name == "Wait" || sel.Sel.Name == "Go") {
 			found = true
 			return false
+		}
+		// The waitgroup may be delegated to a helper — `helper(wg)` or
+		// `helper(&wg)` — that performs the Done on the caller's behalf. Treat
+		// passing the waitgroup as an argument as a use so the interprocedural
+		// resolution keeps following it into the helper.
+		for _, arg := range call.Args {
+			if isWaitGroupArgument(arg, wgName) {
+				found = true
+				return false
+			}
 		}
 		return true
 	})

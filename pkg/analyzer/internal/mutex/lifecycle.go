@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
@@ -203,7 +205,7 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 		}
 	}
 
-	return false
+	return l.isReleaseCalledFromReturnedHandle(currentType, path, methodNames)
 }
 
 func (l *lifecycleResolver) returnsVariableWithReleaseFor(baseVar, suffix string, methodNames []string) bool {
@@ -211,13 +213,19 @@ func (l *lifecycleResolver) returnsVariableWithReleaseFor(baseVar, suffix string
 		return false
 	}
 
-	for _, ident := range l.returnedIdentsNamed(l.function, baseVar) {
-		returnedType := common.BaseTypeNameFromType(l.typesInfo.TypeOf(ident))
+	for _, ri := range l.returnedIdents(l.function) {
+		returnedType := common.BaseTypeNameFromType(l.typesInfo.TypeOf(ri.ident))
 		if returnedType == "" {
 			continue
 		}
-		if l.releaseMethodUnlocks(returnedType, "", suffix, methodNames) {
+		if ri.ident.Name == baseVar && l.releaseMethodUnlocks(returnedType, "", suffix, methodNames) {
 			return true
+		}
+
+		for fieldName, sourceVar := range l.returnedVariableFieldSources(l.function, ri.ident.Name, returnedType, ri.ret.Pos()) {
+			if sourceVar == baseVar && l.releaseMethodUnlocks(returnedType, fieldName, suffix, methodNames) {
+				return true
+			}
 		}
 	}
 
@@ -234,6 +242,18 @@ func (l *lifecycleResolver) functionReturningCurrentReceiverAfterAcquire(fn *ast
 			continue
 		}
 		if functionBodyContainsFieldCallBefore(fn.Body, ri.ident.Name+"."+path, acquireMethods, ri.ret.Pos()) {
+			return true
+		}
+
+		fieldName, suffix, ok := splitBaseAndSuffix(path)
+		if !ok {
+			continue
+		}
+		sourceVar := l.returnedVariableFieldSources(fn, ri.ident.Name, currentType, ri.ret.Pos())[fieldName]
+		if sourceVar == "" || sourceVar == "?" {
+			continue
+		}
+		if functionBodyContainsFieldCallBefore(fn.Body, sourceVar+"."+suffix, acquireMethods, ri.ret.Pos()) {
 			return true
 		}
 	}
@@ -256,13 +276,16 @@ func (l *lifecycleResolver) returnsFuncFor(mutexName string, methodNames []strin
 }
 
 // returnsClosureReleasingLock reports whether the function hands the release of
-// mutexName to its caller through a returned closure. Two shapes are covered:
-// the closure is returned directly (return func() { mu.Unlock() }) or it is a
-// field value of a returned composite literal — the guard/RAII pattern
-// (return Guard{release: func() { mu.Unlock() }}). In both cases the acquiring
-// function is not expected to unlock before returning, so the lock is not a
-// leak. The closure must call the matching unlock on the same mutex; a closure
-// that merely mentions it does not qualify.
+// mutexName to its caller instead of unlocking before it returns, so the lock is
+// not a leak. Three shapes are covered:
+//   - a closure returned directly: return func() { mu.Unlock() }
+//   - a closure in a returned composite literal — the guard/RAII pattern:
+//     return Guard{release: func() { mu.Unlock() }}
+//   - the bound unlock method returned directly: return mu.Unlock
+//
+// Handing back the bound method delegates release exactly like returning a
+// closure that calls it. The returned value must release the same mutex; a
+// value that merely mentions it does not qualify.
 func (l *lifecycleResolver) returnsClosureReleasingLock(mutexName string, unlockMethods []string) bool {
 	if l.function == nil || l.function.Body == nil {
 		return false
@@ -289,7 +312,58 @@ func (l *lifecycleResolver) returnsClosureReleasingLock(mutexName string, unlock
 		}
 	}
 
+	// The bound unlock method returned directly: return mu.Unlock.
+	if l.returnsUnlockMethodValue(l.function, mutexName, unlockMethods) {
+		return true
+	}
+
 	return false
+}
+
+// returnsUnlockMethodValue reports whether fn hands back the bound unlock method
+// of mutexName (return mu.Unlock), either returned directly or through a local
+// variable that is later returned (u := mu.Unlock; return u).
+func (l *lifecycleResolver) returnsUnlockMethodValue(fn *ast.FuncDecl, mutexName string, unlockMethods []string) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+
+	isUnlockValue := func(expr ast.Expr) bool {
+		sel, ok := expr.(*ast.SelectorExpr)
+		if !ok || common.GetVarName(sel.X) != mutexName {
+			return false
+		}
+		return slices.Contains(unlockMethods, sel.Sel.Name)
+	}
+
+	localValues := make(map[string]ast.Expr)
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && i < len(node.Rhs) {
+					localValues[ident.Name] = node.Rhs[i]
+				}
+			}
+		case *ast.ReturnStmt:
+			for _, result := range node.Results {
+				if isUnlockValue(result) {
+					found = true
+					return false
+				}
+				if ident, ok := result.(*ast.Ident); ok && isUnlockValue(localValues[ident.Name]) {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
 }
 
 // returnedFuncLits returns the function literals fn hands back to its caller,
@@ -444,6 +518,43 @@ func (l *lifecycleResolver) callSitesNamed(name string) []methodCallSite {
 	return l.scanCache.callSitesOfNameIndex[name]
 }
 
+func (l *lifecycleResolver) isReleaseCalledFromReturnedHandle(currentType, path string, acquireMethods []string) bool {
+	if l.function == nil || l.function.Name == nil {
+		return false
+	}
+
+	for _, site := range l.callSitesNamed(l.function.Name.Name) {
+		if site.enclosing == nil || site.enclosing == l.function {
+			continue
+		}
+
+		baseVar, ok := l.callTargetsMethod(site.call, currentType, l.function.Name.Name)
+		if !ok {
+			continue
+		}
+
+		enclosingReceiver := common.ReceiverName(site.enclosing)
+		enclosingType := common.ReceiverTypeName(site.enclosing)
+		if enclosingReceiver == "" || enclosingType == "" {
+			continue
+		}
+
+		relativePath, ok := relativeMutexPath(baseVar, enclosingReceiver)
+		if !ok {
+			continue
+		}
+
+		handlePath := relativePath + "." + path
+		for _, fn := range l.functionsReturningType(enclosingType) {
+			if l.functionReturningCurrentReceiverAfterAcquire(fn, enclosingType, handlePath, acquireMethods) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func (l *lifecycleResolver) isCallerManagedReleaseFor(mutexName string, methodNames []string) bool {
 	if l.function == nil || l.function.Name == nil {
 		return false
@@ -515,12 +626,76 @@ func (l *lifecycleResolver) releaseMethodUnlocks(returnedType, fieldName, suffix
 		if fieldName != "" {
 			targetVar = recv + "." + fieldName + "." + suffix
 		}
-		if functionBodyContainsFieldCall(fn.Body, targetVar, methodNames) {
+		if l.methodReleasesTarget(fn, targetVar, methodNames, nil) {
 			return true
 		}
 	}
 
 	return false
+}
+
+func (l *lifecycleResolver) methodReleasesTarget(fn *ast.FuncDecl, targetVar string, methodNames []string, active map[*ast.FuncDecl]bool) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+	if functionBodyContainsFieldCall(fn.Body, targetVar, methodNames) {
+		return true
+	}
+	if l.typesInfo == nil {
+		return false
+	}
+	if active == nil {
+		active = make(map[*ast.FuncDecl]bool)
+	}
+	if active[fn] {
+		return false
+	}
+	active[fn] = true
+	defer delete(active, fn)
+
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+
+		receiverVar := common.GetVarName(sel.X)
+		if receiverVar == "?" {
+			return true
+		}
+		relativePath, ok := relativeMutexPath(targetVar, receiverVar)
+		if !ok {
+			return true
+		}
+
+		receiverType := common.BaseTypeNameFromType(l.typesInfo.TypeOf(sel.X))
+		if receiverType == "" {
+			return true
+		}
+		callee := l.receiverMethods[receiverType][sel.Sel.Name]
+		if callee == nil || callee.Body == nil {
+			return true
+		}
+		calleeReceiver := common.ReceiverName(callee)
+		if calleeReceiver == "" {
+			return true
+		}
+		if l.methodReleasesTarget(callee, calleeReceiver+"."+relativePath, methodNames, active) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func (l *lifecycleResolver) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.CompositeLit {
@@ -575,13 +750,122 @@ func (l *lifecycleResolver) returnedCompositeLiterals(fn *ast.FuncDecl) []*ast.C
 	return returned
 }
 
+func (l *lifecycleResolver) returnedVariableFieldSources(fn *ast.FuncDecl, handleVar, handleType string, before token.Pos) map[string]string {
+	sources := make(map[string]string)
+	if fn == nil || fn.Body == nil || handleVar == "" {
+		return sources
+	}
+
+	recordAssignment := func(lhs, rhs ast.Expr) {
+		sel, ok := lhs.(*ast.SelectorExpr)
+		if !ok || common.GetVarName(sel.X) != handleVar {
+			return
+		}
+		sourceVar := common.GetVarName(rhs)
+		if sourceVar == "" || sourceVar == "?" {
+			return
+		}
+		sources[sel.Sel.Name] = sourceVar
+	}
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if n == nil || n.Pos() >= before {
+			return false
+		}
+
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range node.Lhs {
+				if i >= len(node.Rhs) {
+					continue
+				}
+				recordAssignment(lhs, node.Rhs[i])
+			}
+		case *ast.CallExpr:
+			maps.Copy(sources, l.fieldSourcesFromInitializerCall(node, handleVar, handleType))
+		}
+		return true
+	})
+
+	return sources
+}
+
+func (l *lifecycleResolver) fieldSourcesFromInitializerCall(call *ast.CallExpr, handleVar, handleType string) map[string]string {
+	sources := make(map[string]string)
+	if call == nil || l.typesInfo == nil {
+		return sources
+	}
+
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || common.GetVarName(sel.X) != handleVar {
+		return sources
+	}
+	if common.BaseTypeNameFromType(l.typesInfo.TypeOf(sel.X)) != handleType {
+		return sources
+	}
+
+	callee := l.receiverMethods[handleType][sel.Sel.Name]
+	if callee == nil || callee.Body == nil {
+		return sources
+	}
+	receiverName := common.ReceiverName(callee)
+	if receiverName == "" {
+		return sources
+	}
+
+	argByParam := make(map[string]string)
+	for i, paramName := range flattenParamNames(callee.Type.Params) {
+		if i >= len(call.Args) || paramName == "" {
+			continue
+		}
+		sourceVar := common.GetVarName(call.Args[i])
+		if sourceVar != "" && sourceVar != "?" {
+			argByParam[paramName] = sourceVar
+		}
+	}
+
+	ast.Inspect(callee.Body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			if i >= len(assign.Rhs) {
+				continue
+			}
+			sel, ok := lhs.(*ast.SelectorExpr)
+			if !ok || common.GetVarName(sel.X) != receiverName {
+				continue
+			}
+			rhs, ok := assign.Rhs[i].(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if sourceVar := argByParam[rhs.Name]; sourceVar != "" {
+				sources[sel.Sel.Name] = sourceVar
+			}
+		}
+		return true
+	})
+
+	return sources
+}
+
 func (l *lifecycleResolver) callTargetsCurrentMethod(call *ast.CallExpr, receiverType string) (string, bool) {
 	if l.function == nil || l.function.Name == nil || l.typesInfo == nil {
 		return "", false
 	}
 
+	return l.callTargetsMethod(call, receiverType, l.function.Name.Name)
+}
+
+func (l *lifecycleResolver) callTargetsMethod(call *ast.CallExpr, receiverType, methodName string) (string, bool) {
+	if l.typesInfo == nil {
+		return "", false
+	}
+
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != l.function.Name.Name {
+	if !ok || sel.Sel.Name != methodName {
 		return "", false
 	}
 
@@ -810,6 +1094,12 @@ func (l *lifecycleResolver) returnedIdents(fn *ast.FuncDecl) []returnedIdent {
 			return true
 		}
 		for _, res := range ret.Results {
+			// `return &t` hands out the same variable as `return t` — the
+			// caller receives a handle to t either way (constructor-latch
+			// shape: `t := T{}; t.mu.Lock(); return &t`).
+			if unary, ok := res.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				res = unary.X
+			}
 			if ident, ok := res.(*ast.Ident); ok {
 				result = append(result, returnedIdent{ident: ident, ret: ret})
 			}
@@ -837,16 +1127,6 @@ func (l *lifecycleResolver) returnedFunctionNames(fn *ast.FuncDecl) []string {
 
 	l.scanCache.returnedFuncNames[fn] = names
 	return names
-}
-
-func (l *lifecycleResolver) returnedIdentsNamed(fn *ast.FuncDecl, name string) []*ast.Ident {
-	var idents []*ast.Ident
-	for _, ri := range l.returnedIdents(fn) {
-		if ri.ident.Name == name {
-			idents = append(idents, ri.ident)
-		}
-	}
-	return idents
 }
 
 func (l *lifecycleResolver) functionReturnPos(fn *ast.FuncDecl, returnedName string) token.Pos {

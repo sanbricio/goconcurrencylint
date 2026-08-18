@@ -67,21 +67,41 @@ func (e *iterationEstimator) estimateForIterationsKnown(forStmt *ast.ForStmt) (i
 		return 0, false
 	}
 
-	if !e.loopIncrementsCounterByOne(forStmt, counterName) {
-		return 0, false
-	}
-
 	switch cond.Op {
 	case token.LSS:
+		if !e.loopIncrementsCounterByOne(forStmt, counterName) {
+			return 0, false
+		}
 		if limit <= start {
 			return 1, true
 		}
 		return limit - start, true
 	case token.LEQ:
+		if !e.loopIncrementsCounterByOne(forStmt, counterName) {
+			return 0, false
+		}
 		if limit < start {
 			return 1, true
 		}
 		return limit - start + 1, true
+	// Countdown loops (`for i := n; i > 0; i--`) are as exactly countable as
+	// count-up ones and appear in real code spawning n workers.
+	case token.GTR:
+		if !e.loopDecrementsCounterByOne(forStmt, counterName) {
+			return 0, false
+		}
+		if start <= limit {
+			return 1, true
+		}
+		return start - limit, true
+	case token.GEQ:
+		if !e.loopDecrementsCounterByOne(forStmt, counterName) {
+			return 0, false
+		}
+		if start < limit {
+			return 1, true
+		}
+		return start - limit + 1, true
 	default:
 		return 0, false
 	}
@@ -135,12 +155,31 @@ func (e *iterationEstimator) loopIncrementsCounterByOne(forStmt *ast.ForStmt, co
 }
 
 func (e *iterationEstimator) statementIncrementsCounterByOne(stmt ast.Stmt, counterName string) bool {
+	return statementStepsCounterByOne(stmt, counterName, token.INC, token.ADD_ASSIGN)
+}
+
+func (e *iterationEstimator) loopDecrementsCounterByOne(forStmt *ast.ForStmt, counterName string) bool {
+	if forStmt == nil || counterName == "" {
+		return false
+	}
+	if forStmt.Post != nil {
+		return statementStepsCounterByOne(forStmt.Post, counterName, token.DEC, token.SUB_ASSIGN)
+	}
+	for _, stmt := range forStmt.Body.List {
+		if statementStepsCounterByOne(stmt, counterName, token.DEC, token.SUB_ASSIGN) {
+			return true
+		}
+	}
+	return false
+}
+
+func statementStepsCounterByOne(stmt ast.Stmt, counterName string, incDecTok, assignTok token.Token) bool {
 	switch post := stmt.(type) {
 	case *ast.IncDecStmt:
 		ident, ok := post.X.(*ast.Ident)
-		return ok && ident.Name == counterName && post.Tok == token.INC
+		return ok && ident.Name == counterName && post.Tok == incDecTok
 	case *ast.AssignStmt:
-		if len(post.Lhs) != 1 || len(post.Rhs) != 1 || post.Tok != token.ADD_ASSIGN {
+		if len(post.Lhs) != 1 || len(post.Rhs) != 1 || post.Tok != assignTok {
 			return false
 		}
 		ident, ok := post.Lhs[0].(*ast.Ident)
@@ -183,7 +222,7 @@ func (e *iterationEstimator) collectCollectionLengthsBefore(stmts []ast.Stmt, be
 			iterations, ok := e.estimateForIterationsKnown(s)
 			if !ok || s.Body == nil {
 				if s.Body != nil {
-					e.invalidateIndexedCollectionLengthsInStatements(s.Body.List, lengths, known)
+					e.invalidateCollectionLengthsInStatements(s.Body.List, lengths, known)
 				}
 				continue
 			}
@@ -194,7 +233,7 @@ func (e *iterationEstimator) collectCollectionLengthsBefore(stmts []ast.Stmt, be
 			iterations, ok := e.estimateRangeIterationsKnown(s)
 			if !ok || s.Body == nil {
 				if s.Body != nil {
-					e.invalidateIndexedCollectionLengthsInStatements(s.Body.List, lengths, known)
+					e.invalidateCollectionLengthsInStatements(s.Body.List, lengths, known)
 				}
 				continue
 			}
@@ -237,7 +276,10 @@ func (e *iterationEstimator) recordCollectionDeclLengths(stmt *ast.DeclStmt, len
 	}
 }
 
-func (e *iterationEstimator) invalidateIndexedCollectionLengthsInStatements(stmts []ast.Stmt, lengths map[string]int, known map[string]bool) {
+// invalidateCollectionLengthsInStatements drops every collection length a
+// statement list may change. Used for loops of unknown count, where neither
+// `xs[i] = v` nor `xs = append(xs, v)` can be replayed a known number of times.
+func (e *iterationEstimator) invalidateCollectionLengthsInStatements(stmts []ast.Stmt, lengths map[string]int, known map[string]bool) {
 	for _, stmt := range stmts {
 		ast.Inspect(stmt, func(n ast.Node) bool {
 			assign, ok := n.(*ast.AssignStmt)
@@ -245,6 +287,11 @@ func (e *iterationEstimator) invalidateIndexedCollectionLengthsInStatements(stmt
 				return true
 			}
 			for _, lhs := range assign.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok {
+					delete(lengths, ident.Name)
+					delete(known, ident.Name)
+					continue
+				}
 				e.invalidateIndexedCollectionLength(lhs, lengths, known)
 			}
 			return true

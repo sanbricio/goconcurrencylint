@@ -32,28 +32,13 @@ func (b *balanceValidator) analyzeLoopBalance(forStmt *ast.ForStmt) {
 
 	ast.Inspect(forStmt.Body, func(n ast.Node) bool {
 		switch node := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.GoStmt:
+			b.recordLoopGoroutineDone(node, forStmt.Body, loopStats)
+			return false
 		case *ast.ExprStmt:
-			if call, ok := node.X.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					wgName := common.GetVarName(sel.X)
-					if b.waitGroupNames[wgName] {
-						if loopStats[wgName] == nil {
-							loopStats[wgName] = &loopAnalysis{}
-						}
-
-						switch sel.Sel.Name {
-						case "Add":
-							loopStats[wgName].addCalls = append(loopStats[wgName].addCalls, call.Pos())
-						case "Done":
-							if b.isInConditional(call, forStmt.Body) {
-								loopStats[wgName].conditionalDones++
-							} else {
-								loopStats[wgName].unconditionalDones++
-							}
-						}
-					}
-				}
-			}
+			b.recordLoopExprCall(node, forStmt.Body, loopStats)
 		}
 		return true
 	})
@@ -62,12 +47,128 @@ func (b *balanceValidator) analyzeLoopBalance(forStmt *ast.ForStmt) {
 		if len(stats.addCalls) > 0 {
 			if stats.unconditionalDones == 0 && stats.conditionalDones > 0 {
 				for _, addPos := range stats.addCalls {
+					if b.loopAddCoveredByLaterDoneInSameStatementList(forStmt.Body, addPos, wgName) {
+						continue
+					}
+					if b.addIsHandedOffThroughChannel(wgName, addPos) {
+						continue
+					}
 					b.reporter.AddError(addPos, category.AddWithoutDone,
 						"waitgroup '"+wgName+"' has Add without corresponding Done")
 				}
 			}
 		}
 	}
+}
+
+func (b *balanceValidator) loopAnalysisFor(loopStats map[string]*loopAnalysis, wgName string) *loopAnalysis {
+	if loopStats[wgName] == nil {
+		loopStats[wgName] = &loopAnalysis{}
+	}
+	return loopStats[wgName]
+}
+
+func (b *balanceValidator) recordLoopExprCall(stmt *ast.ExprStmt, scope ast.Node, loopStats map[string]*loopAnalysis) {
+	call, ok := stmt.X.(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return
+	}
+	wgName := common.GetVarName(sel.X)
+	if !b.waitGroupNames[wgName] {
+		return
+	}
+
+	stats := b.loopAnalysisFor(loopStats, wgName)
+	switch sel.Sel.Name {
+	case "Add":
+		stats.addCalls = append(stats.addCalls, call.Pos())
+	case "Done":
+		if b.isInConditional(call, scope) {
+			stats.conditionalDones++
+		} else {
+			stats.unconditionalDones++
+		}
+	}
+}
+
+func (b *balanceValidator) recordLoopGoroutineDone(goStmt *ast.GoStmt, scope ast.Node, loopStats map[string]*loopAnalysis) {
+	for wgName := range b.waitGroupNames {
+		doneInfo, related := b.goroutineDoneInfo(goStmt, wgName)
+		if !related || !doneInfo.hasAnyDone {
+			continue
+		}
+		stats := b.loopAnalysisFor(loopStats, wgName)
+		if b.isInConditional(goStmt, scope) {
+			stats.conditionalDones++
+		} else {
+			stats.unconditionalDones++
+		}
+	}
+}
+
+func (b *balanceValidator) loopAddCoveredByLaterDoneInSameStatementList(scope *ast.BlockStmt, addPos token.Pos, wgName string) bool {
+	stmts, index, ok := innermostStatementListContaining(scope, addPos)
+	if !ok {
+		return false
+	}
+	for _, stmt := range stmts[index+1:] {
+		if b.statementProvidesLoopDone(stmt, wgName) {
+			return true
+		}
+	}
+	return false
+}
+
+func innermostStatementListContaining(scope ast.Node, pos token.Pos) ([]ast.Stmt, int, bool) {
+	var (
+		foundStmts []ast.Stmt
+		foundIndex int
+		found      bool
+	)
+
+	ast.Inspect(scope, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		stmts := stmtListOf(n)
+		for i, stmt := range stmts {
+			if nodeContainsPos(stmt, pos) {
+				foundStmts = stmts
+				foundIndex = i
+				found = true
+				break
+			}
+		}
+		return true
+	})
+
+	return foundStmts, foundIndex, found
+}
+
+func (b *balanceValidator) statementProvidesLoopDone(stmt ast.Stmt, wgName string) bool {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		call, ok := s.X.(*ast.CallExpr)
+		return ok && b.callInvokesDone(call, wgName)
+	case *ast.DeferStmt:
+		return b.isSimpleDeferDone(s, wgName)
+	case *ast.GoStmt:
+		doneInfo, related := b.goroutineDoneInfo(s, wgName)
+		return related && doneInfo.hasGuaranteedDone
+	case *ast.BlockStmt:
+		for _, nested := range s.List {
+			if b.statementProvidesLoopDone(nested, wgName) {
+				return true
+			}
+		}
+	case *ast.LabeledStmt:
+		return b.statementProvidesLoopDone(s.Stmt, wgName)
+	}
+	return false
 }
 
 // isInConditional checks if a node is inside an if statement

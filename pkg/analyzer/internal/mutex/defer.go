@@ -36,6 +36,11 @@ func (c *Checker) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*S
 		return
 	}
 
+	// defer once.Do(mu.Unlock) releases the lock on return through a sync.Once.
+	if c.applyDeferredOnceRelease(stmt, stats) {
+		return
+	}
+
 	// Handle direct defer calls
 	if call, ok := stmt.Call.Fun.(*ast.SelectorExpr); ok {
 		c.handleDeferCall(call, stmt.Pos(), stats)
@@ -50,7 +55,7 @@ func (c *Checker) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*S
 
 // handleDeferCall processes direct defer calls
 func (c *Checker) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats map[string]*Stats) {
-	varName := common.GetVarName(call.X)
+	varName := c.resolveLockAlias(common.GetVarName(call.X))
 
 	if call.Sel.Name == "Lock" && c.consumeBorrowedDeferredLock(varName, stats) {
 		return
@@ -132,33 +137,35 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 
 	// Check for mutex unlocks in function literal
 	for mutexName := range c.mutexNames {
+		target := c.resolveLockAlias(mutexName)
 		if guard.containsUnlock(fnlit.Body, mutexName) && !guard.containsLock(fnlit.Body, mutexName) {
-			if c.isFlagGuarded(mutexName) {
+			if c.isFlagGuarded(target) {
 				continue
 			}
-			if stats[mutexName].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, mutexName, "Unlock") {
+			if stats[target].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, mutexName, "Unlock") {
 				continue
 			}
-			c.handleDeferUnlock(mutexName, pos, stats, false)
+			c.handleDeferUnlock(target, pos, stats, c.rwMutexNames[target])
 		}
 	}
 
 	// Check for rwmutex unlocks in function literal
 	for rwMutexName := range c.rwMutexNames {
+		target := c.resolveLockAlias(rwMutexName)
 		if guard.containsUnlock(fnlit.Body, rwMutexName) && !guard.containsLock(fnlit.Body, rwMutexName) {
-			if c.isFlagGuarded(rwMutexName) {
+			if c.isFlagGuarded(target) {
 				continue
 			}
-			if stats[rwMutexName].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "Unlock") {
+			if stats[target].lock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "Unlock") {
 				continue
 			}
-			c.handleDeferUnlock(rwMutexName, pos, stats, true)
+			c.handleDeferUnlock(target, pos, stats, true)
 		}
 		if guard.containsRUnlock(fnlit.Body, rwMutexName) && !guard.containsRLock(fnlit.Body, rwMutexName) {
-			if stats[rwMutexName].rlock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "RUnlock") {
+			if stats[target].rlock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "RUnlock") {
 				continue
 			}
-			c.handleDeferRUnlock(rwMutexName, pos, stats)
+			c.handleDeferRUnlock(target, pos, stats)
 		}
 	}
 }

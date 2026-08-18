@@ -99,6 +99,17 @@ func (c *Checker) terminatingTailUnlockSuppressed(mutexName string) bool {
 	return c.terminatingTailDepth > 0 && c.varRootIsFunctionParameter(mutexName)
 }
 
+// heldLockAtAbortSuppressed reports whether a lock still held at function exit
+// reaches that exit only by falling into an aborting terminator (panic /
+// os.Exit / log.Fatal / runtime.Goexit). Such a lock is released by no normal
+// return, so requiring balance there would flag assertion-style aborts such as
+// `mu.Lock(); if ok { mu.Unlock(); return }; panic("unreachable")`. Only the
+// held-lock ("locked but not unlocked") diagnostic is suppressed; an
+// unlock-without-lock is a distinct defect and still reported.
+func (c *Checker) heldLockAtAbortSuppressed() bool {
+	return c.function != nil && c.termination.blockEndsInAbort(c.function.Body)
+}
+
 // reportUnmatchedMutexLocksWithContext reports unmatched locks for a specific mutex with context
 func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *Stats, isRWMutex bool, branchType string) {
 	if stats == nil {
@@ -128,7 +139,8 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 		suppress := branchType == "" &&
 			(c.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods) ||
 				c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods) ||
-				c.lifecycle.returnsClosureReleasingLock(mutexName, WriteLockPattern.UnlockMethods))
+				c.lifecycle.returnsClosureReleasingLock(mutexName, WriteLockPattern.UnlockMethods) ||
+				c.heldLockAtAbortSuppressed())
 		if !suppress {
 			for _, pos := range lockPositions {
 				c.errorCollector.AddError(pos, category.LockWithoutUnlock, lockMessage)
@@ -152,7 +164,8 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 			suppress := branchType == "" &&
 				(c.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods) ||
 					c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods) ||
-					c.lifecycle.returnsClosureReleasingLock(mutexName, ReadLockPattern.UnlockMethods))
+					c.lifecycle.returnsClosureReleasingLock(mutexName, ReadLockPattern.UnlockMethods) ||
+					c.heldLockAtAbortSuppressed())
 			if !suppress {
 				for _, pos := range rlockPositions {
 					c.errorCollector.AddError(pos, category.LockWithoutUnlock, rlockMessage)

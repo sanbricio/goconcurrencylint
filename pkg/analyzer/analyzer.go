@@ -27,8 +27,8 @@
 package analyzer
 
 import (
-	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/cond"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/channel"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/cond"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/copycheck"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/mutex"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/once"

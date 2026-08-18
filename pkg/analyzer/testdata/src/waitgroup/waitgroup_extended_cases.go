@@ -545,6 +545,29 @@ func BadWaitAndDoneInSameGoroutine() {
 	}()
 }
 
+// GoodShadowedWaitGroupNotConflatedWithOuterDone mirrors minio cmd/erasure.go: a
+// worker goroutine defers Done on an OUTER wg while an inner wg (same name,
+// shadowed) is fully balanced and waited on. The inner Wait must not be blamed
+// for the outer wg's pending Done — the two names resolve to different objects.
+func GoodShadowedWaitGroupNotConflatedWithOuterDone(disks []int, work chan int) {
+	var wg sync.WaitGroup
+	wg.Add(len(disks))
+	for range disks {
+		go func() {
+			defer wg.Done() // outer wg
+			for range work {
+				var wg sync.WaitGroup // shadows the outer wg
+				wg.Add(1)
+				go func() {
+					defer wg.Done() // inner wg
+				}()
+				wg.Wait() // inner wg — must stay CLEAN, not a deadlock
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func BadParentDoneForWorkerGoroutine() {
 	var wg sync.WaitGroup
 	wg.Add(1)

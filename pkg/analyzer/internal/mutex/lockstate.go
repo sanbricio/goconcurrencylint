@@ -29,6 +29,10 @@ func (c *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[strin
 		return
 	}
 
+	if c.applyOnceRelease(call, stats) {
+		return
+	}
+
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return
@@ -41,7 +45,7 @@ func (c *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[strin
 		return
 	}
 
-	varName := common.GetVarName(sel.X)
+	varName := c.resolveLockAlias(common.GetVarName(sel.X))
 
 	// When a TryLock/TryRLock return value is ignored, the caller has no way to
 	// know whether the lock was actually acquired, so any subsequent operation

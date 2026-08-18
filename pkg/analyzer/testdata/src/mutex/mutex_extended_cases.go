@@ -1352,6 +1352,70 @@ func (t *positionalLifecycleToken) Release() {
 	t.mu.Unlock()
 }
 
+type bboltLikeDB struct {
+	rwlock   sync.Mutex
+	mmaplock sync.RWMutex
+	opened   bool
+	data     []byte
+	rwtx     *bboltLikeTx
+}
+
+type bboltLikeTx struct {
+	writable bool
+	db       *bboltLikeDB
+}
+
+func (tx *bboltLikeTx) init(db *bboltLikeDB) {
+	tx.db = db
+}
+
+func (db *bboltLikeDB) GoodBBoltLikeBeginTx() (*bboltLikeTx, error) {
+	db.mmaplock.RLock()
+	if !db.opened {
+		db.mmaplock.RUnlock()
+		return nil, errors.New("closed")
+	}
+	if db.data == nil {
+		db.mmaplock.RUnlock()
+		return nil, errors.New("invalid mapping")
+	}
+
+	tx := &bboltLikeTx{}
+	tx.init(db)
+	return tx, nil
+}
+
+func (db *bboltLikeDB) GoodBBoltLikeBeginRWTx() (*bboltLikeTx, error) {
+	db.rwlock.Lock()
+	if !db.opened {
+		db.rwlock.Unlock()
+		return nil, errors.New("closed")
+	}
+	if db.data == nil {
+		db.rwlock.Unlock()
+		return nil, errors.New("invalid mapping")
+	}
+
+	tx := &bboltLikeTx{writable: true}
+	tx.init(db)
+	db.rwtx = tx
+	return tx, nil
+}
+
+func (db *bboltLikeDB) removeTx(tx *bboltLikeTx) {
+	db.mmaplock.RUnlock()
+	_ = tx
+}
+
+func (tx *bboltLikeTx) close() {
+	if tx.writable {
+		tx.db.rwtx = nil
+		tx.db.rwlock.Unlock()
+	} else {
+		tx.db.removeTx(tx)
+	}
+}
+
 // Good: lock acquired before a label and unlocked after `goto label`.
 func GoodGotoUnlockAfterLabel() {
 	var mu sync.Mutex
@@ -1858,6 +1922,256 @@ func GoodMutexInLoopJoinedByWaitGroupGo(jobs chan int) {
 		wg.Wait()
 		if done {
 			break
+		}
+	}
+}
+
+// ========== FATAL-BY-NAME TERMINATION (tailscale testenv.TB shape) ==========
+
+// fatalReporter mirrors test helpers that re-declare testing.TB as a local
+// interface so non-test code can hold one; its Fatal is testing's Fatal in all
+// but package path.
+type fatalReporter interface {
+	Fatal(args ...any)
+	Print(args ...any)
+}
+
+type suspendableStore struct {
+	tb           fatalReporter
+	storeLock    sync.RWMutex
+	suspendCount int
+}
+
+func (s *suspendableStore) touch() { s.suspendCount++ }
+
+// A switch arm that aborts through a custom interface's Fatal never reaches
+// the code after the switch, so the surviving arms (which all unlock) converge
+// and the held locks in the Fatal arm are not leaks (tailscale
+// test_store.go Resume).
+func (s *suspendableStore) GoodSwitchArmAbortsViaCustomFatal() {
+	s.storeLock.Lock()
+	switch s.suspendCount--; {
+	case s.suspendCount == 0:
+		s.storeLock.Unlock()
+		s.touch()
+	case s.suspendCount < 0:
+		s.tb.Fatal("negative suspendCount")
+	default:
+		s.storeLock.Unlock()
+	}
+}
+
+// A non-Fatal method call does not terminate: an arm that keeps the lock and
+// falls through to live code is still a leak.
+func (s *suspendableStore) BadSwitchArmPrintDoesNotAbort() {
+	s.storeLock.Lock() // want "rwmutex 's.storeLock' is locked but not unlocked"
+	switch {
+	case s.suspendCount == 0:
+		s.storeLock.Unlock()
+		s.touch()
+	case s.suspendCount < 0:
+		s.tb.Print("negative suspendCount")
+	default:
+		s.storeLock.Unlock()
+	}
+}
+
+// ========== LOCKER ADAPTER OVER READ LOCK (sync.RWMutex.RLocker shape) ==========
+
+// lockableStore implements a Lock/Unlock interface over the READ half of an
+// inner RWMutex (tailscale test_store.go): the unbalanced op is each method's
+// entire purpose, paired across the adapter siblings.
+type lockableStore struct {
+	storeLock sync.RWMutex
+	count     int
+}
+
+func (s *lockableStore) Lock() error {
+	s.storeLock.RLock()
+	s.count++
+	return nil
+}
+
+func (s *lockableStore) Unlock() {
+	s.count--
+	s.storeLock.RUnlock()
+}
+
+// A read-locking Lock method with NO read-releasing Unlock sibling is still a
+// leak — the adapter suppression requires the paired contract method.
+type halfLockableStore struct {
+	storeLock sync.RWMutex
+}
+
+func (s *halfLockableStore) Lock() error {
+	s.storeLock.RLock() // want "rwmutex 's.storeLock' is rlocked but not runlocked"
+	return nil
+}
+
+// ========== CONSTRUCTOR LATCH RETURNING &t (tailscale trafficgen shape) ==========
+
+type latchedGen struct {
+	mu      sync.Mutex
+	packets int64
+}
+
+// The constructor locks the local's mutex and hands the caller `&t`; the
+// returned type's Start releases it, so the lock's lifetime is the handle's,
+// not the constructor's.
+func GoodNewLatchedGenLocksUntilStart() *latchedGen {
+	t := latchedGen{}
+	// initially locked, until first Start()
+	t.mu.Lock()
+	return &t
+}
+
+// Start assumes mu is already locked (taken by the constructor) and releases
+// it — the other half of the handoff, not an unmatched unlock.
+func (t *latchedGen) Start(packets int64) {
+	t.packets = packets
+	t.mu.Unlock()
+}
+
+type leakedLatchGen struct {
+	mu sync.Mutex
+}
+
+// Same constructor shape but NO method of the returned type ever unlocks:
+// the latch has no release half anywhere, so it is a leak.
+func BadNewLeakedLatchNeverReleased() *leakedLatchGen {
+	t := leakedLatchGen{}
+	t.mu.Lock() // want "mutex 't.mu' is locked but not unlocked"
+	return &t
+}
+
+// ========== GO-METHOD RELEASE HANDOFF (grpc resetTransportAndUnlock shape) ==========
+
+type connLike struct {
+	mu    sync.Mutex
+	state int
+}
+
+// The method's name declares the contract ("...AndUnlock") and its body
+// honours it, so `go ac.resetAndUnlock()` hands the held lock to the goroutine.
+func (ac *connLike) resetAndUnlock() {
+	ac.state = 1
+	ac.mu.Unlock()
+}
+
+func (ac *connLike) GoodLockHandedToGoAndUnlockMethod(equal bool) {
+	ac.mu.Lock()
+	if equal {
+		ac.mu.Unlock()
+		return
+	}
+	go ac.resetAndUnlock()
+}
+
+type connLikeLiar struct {
+	mu    sync.Mutex
+	state int
+}
+
+// A method whose name promises the unlock but whose body never performs it
+// does not release anything: the parent's lock is still leaked.
+func (ac *connLikeLiar) resetAndUnlock() {
+	ac.state = 1
+}
+
+func (ac *connLikeLiar) BadGoMethodNamedUnlockDoesNotRelease() {
+	ac.mu.Lock() // want "mutex 'ac.mu' is locked but not unlocked"
+	go ac.resetAndUnlock()
+}
+
+// ========== MUTEX IN LOOP GUARDING ITERATION-LOCAL STATE (grpc retry_test) ==========
+
+type stubHandlers struct {
+	onStream func() error
+	onUnary  func() error
+}
+
+// The per-iteration mutex guards counters declared in the same iteration and
+// consumed by that iteration's handlers: mutex and state share one lifetime,
+// so a fresh mutex per iteration is correct (grpc TestMaxCallAttempts).
+func GoodLoopMutexGuardsIterationLocalCounters() {
+	for i := 0; i < 3; i++ {
+		serverMu := sync.Mutex{}
+		streamCalls := 0
+		unaryCalls := 0
+
+		h := &stubHandlers{
+			onStream: func() error {
+				serverMu.Lock()
+				defer serverMu.Unlock()
+				streamCalls++
+				return nil
+			},
+			onUnary: func() error {
+				serverMu.Lock()
+				defer serverMu.Unlock()
+				unaryCalls++
+				return nil
+			},
+		}
+		_ = h
+	}
+}
+
+// The critical section writes a counter declared OUTSIDE the loop: each
+// iteration's fresh mutex cannot provide exclusion for it, which is exactly
+// the bug this check exists for.
+func BadLoopMutexGuardsOuterCounter() {
+	total := 0
+	for i := 0; i < 3; i++ {
+		mu := sync.Mutex{} // want "mutex 'mu' declared inside loop, each iteration creates a new mutex that cannot protect shared state"
+		h := &stubHandlers{
+			onStream: func() error {
+				mu.Lock()
+				defer mu.Unlock()
+				total++
+				return nil
+			},
+		}
+		_ = h
+	}
+	_ = total
+}
+
+// ========== ONCE-GUARDED DEFER UNLOCK IN LOOP (grpc interop hasORCALock) ==========
+
+type orcaLikeServer struct {
+	orcaMu  sync.Mutex
+	metrics int
+}
+
+// `if !flag { Lock; defer Unlock; flag = true }` disables itself after the
+// first iteration that takes it: exactly one deferred unlock is registered for
+// the whole loop, which is the ordinary hold-until-return pattern.
+func (s *orcaLikeServer) GoodOnceGuardedDeferUnlockInLoop(items []int) {
+	hasLock := false
+	for _, in := range items {
+		if in > 0 {
+			if !hasLock {
+				s.orcaMu.Lock()
+				defer s.orcaMu.Unlock()
+				hasLock = true
+			}
+			s.metrics += in
+		}
+	}
+}
+
+// Without the self-disabling flag assignment the branch re-arms every
+// iteration and the deferred unlocks pile up — still reported.
+func (s *orcaLikeServer) BadUnguardedDeferUnlockInLoop(items []int) {
+	hasLock := false
+	for _, in := range items {
+		if in > 0 {
+			if !hasLock {
+				s.orcaMu.Lock()
+				defer s.orcaMu.Unlock() // want "mutex 's.orcaMu' defers unlock inside loop"
+			}
+			s.metrics += in
 		}
 	}
 }

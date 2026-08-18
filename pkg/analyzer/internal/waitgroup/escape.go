@@ -103,7 +103,11 @@ func (e *escapeAnalyzer) isWaitGroupPassedToOtherFunctions(wgName string) bool {
 }
 
 func (e *escapeAnalyzer) sendEscapesWaitGroup(send *ast.SendStmt, wgName string, callbacks map[string]ast.Expr) bool {
-	if send == nil || !e.exprEscapesWaitGroup(send.Value, wgName, callbacks, make(map[string]bool)) {
+	if send == nil {
+		return false
+	}
+	if !e.exprEscapesWaitGroup(send.Value, wgName, callbacks, make(map[string]bool)) &&
+		!sendsWaitGroupOwner(send.Value, wgName) {
 		return false
 	}
 	chanName := common.GetVarName(send.Chan)
@@ -273,4 +277,24 @@ func (e *escapeAnalyzer) methodValueContainsDoneForWaitGroup(sel *ast.SelectorEx
 	suffix := strings.TrimPrefix(wgName, receiverExprName)
 	calleeWGName := calleeReceiverName + suffix
 	return e.functionCouldManageWaitGroup(fn, calleeWGName, make(map[token.Pos]bool))
+}
+
+// sendsWaitGroupOwner reports whether the value sent on a channel owns the
+// WaitGroup field: a worker handed a `batch` gets `batch.wg` with it, and calls
+// the matching Done.
+func sendsWaitGroupOwner(value ast.Expr, wgName string) bool {
+	if !strings.Contains(wgName, ".") {
+		return false
+	}
+
+	expr := common.UnwrapParenExpr(value)
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+		expr = common.UnwrapParenExpr(unary.X)
+	}
+
+	sentName := common.GetVarName(expr)
+	if sentName == "" || sentName == "?" {
+		return false
+	}
+	return strings.HasPrefix(wgName, sentName+".")
 }

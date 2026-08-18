@@ -53,6 +53,11 @@ type Checker struct {
 	// analyzed function (see detectCrossGoroutineDeferHandoff).
 	crossGoroutineDeferHandoff map[token.Pos]bool
 
+	// lockAliases maps a variable that holds a lock (a sync.Locker or a mutex
+	// pointer) to the lock it refers to, so operations performed through the
+	// alias land on the real lock's counters (see detectLockAliases).
+	lockAliases map[string]string
+
 	*funcAnalysis
 }
 
@@ -136,6 +141,7 @@ func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects, c.typesInfo)
 	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.lifecycleScanCache, c.function)
 	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
+	c.lockAliases = c.detectLockAliases(fn)
 	c.flagGuardedFlags = c.detectFlagGuardedReleaseFlags(fn)
 	c.safeDeferBeforeLock = c.detectSafeDeferBeforeLock(fn)
 	c.crossGoroutineDeferHandoff = c.detectCrossGoroutineDeferHandoff(fn)

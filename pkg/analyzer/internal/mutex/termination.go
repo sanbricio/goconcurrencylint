@@ -55,6 +55,25 @@ func (t *terminationAnalyzer) blockAlwaysTerminates(block *ast.BlockStmt) bool {
 	return slices.ContainsFunc(block.List, t.statementAlwaysTerminates)
 }
 
+// blockEndsInAbort reports whether the block's final statement is an aborting
+// terminator — panic / os.Exit / log.Fatal / runtime.Goexit. Unlike
+// blockAlwaysTerminates (true if ANY statement terminates), this inspects only
+// the trailing statement: a lock still held when a body falls off its end into
+// such a statement is released by no normal return, so it is an assertion-style
+// abort path rather than a leak. A plain `return`/`break` tail is excluded — a
+// lock held at a normal return IS a leak.
+func (t *terminationAnalyzer) blockEndsInAbort(block *ast.BlockStmt) bool {
+	if block == nil || len(block.List) == 0 {
+		return false
+	}
+	last, ok := block.List[len(block.List)-1].(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := last.X.(*ast.CallExpr)
+	return ok && t.callTerminatesExecution(call)
+}
+
 func (t *terminationAnalyzer) statementAlwaysTerminates(stmt ast.Stmt) bool {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
@@ -112,14 +131,21 @@ func (t *terminationAnalyzer) callTerminatesExecution(call *ast.CallExpr) bool {
 		}
 	}
 
+	// A method named Fatal/Fatalf/Fatalln terminates regardless of the
+	// receiver's package: the name is a Go-wide convention (log, testing,
+	// logrus, zap, klog all abort), and test helpers routinely re-declare
+	// testing.TB as a local interface (e.g. tailscale's testenv.TB) whose
+	// Fatal the package-path check above cannot attribute to "testing".
+	if isFatalMethod(methodName) {
+		return true
+	}
+
 	receiverName := common.GetVarName(sel.X)
 	switch receiverName {
 	case "os":
 		return methodName == "Exit"
 	case "runtime":
 		return methodName == "Goexit"
-	case "log":
-		return isFatalMethod(methodName)
 	default:
 		return false
 	}
