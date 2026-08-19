@@ -62,6 +62,55 @@ cd goconcurrencylint
 go build -o goconcurrencylint ./cmd/goconcurrencylint
 ```
 
+### Use it from golangci-lint
+
+goconcurrencylint is also a [golangci-lint module
+plugin](https://golangci-lint.run/plugins/module-plugins/), so you can run it
+from the golangci-lint you already have instead of installing a second binary.
+Declare it in `.custom-gcl.yml`:
+
+```yaml
+version: v2.12.2
+name: custom-gcl
+destination: ./bin
+
+plugins:
+  - module: github.com/sanbricio/goconcurrencylint
+    import: github.com/sanbricio/goconcurrencylint/pkg/golangci
+    version: v0.5.0
+```
+
+Run `golangci-lint custom` to build `./bin/custom-gcl` — a golangci-lint binary
+with this linter compiled in — then enable it in `.golangci.yml`:
+
+```yaml
+linters:
+  enable:
+    - goconcurrencylint
+  settings:
+    custom:
+      goconcurrencylint:
+        type: module
+        description: Detects misuse of sync primitives and channels.
+        settings:
+          checks:
+            - all
+            - -GCL5001
+```
+
+`checks` is the [`-checks` flag](#selecting-checks) written as a YAML list, one
+entry per element, the way golangci-lint writes every other list setting:
+`-checks "all,-GCL5001"` on the command line is `checks: [all, -GCL5001]` here.
+Omit the key to run every check.
+
+Getting it wrong fails the run with exit code 3 rather than quietly dropping a
+check — a mistyped key, a check that does not exist, an empty list, and the
+flag's comma-separated string in place of a list are all errors, the last one
+printing the list to write instead.
+
+Full walkthrough — CI, severity rules, `run.tests`, and building against a local
+checkout: [docs/golangci-lint.md](docs/golangci-lint.md).
+
 ## Quick Start
 
 Run the analyzer against your module:
@@ -293,6 +342,7 @@ goconcurrencylint/
 │   │   ├── copycheck/           # Copy-by-value analyzer
 │   │   └── common/              # Shared helpers, check catalogue, reporting
 │   └── testdata/src/            # analysistest fixtures
+├── pkg/golangci/                # golangci-lint module plugin
 ├── docs/checks/                 # Per-check reference pages + index (generated)
 ├── scripts/gendocs/             # Check-docs generator (go generate ./...)
 ├── assets/                      # Logo and branding
