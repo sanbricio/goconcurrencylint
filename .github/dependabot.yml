@@ -21,3 +21,26 @@ updates:
       all-dependencies:
         patterns:
           - "*"
+
+  # Keeps the GitHub Actions used by every workflow in .github/workflows
+  # up to date (actions/checkout, actions/setup-go, golangci/golangci-lint-action, ...).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Madrid"
+    open-pull-requests-limit: 3
+    target-branch: "main"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
+    assignees:
+      - "sanbricio"
+    groups:
+      all-actions:
+        patterns:
+          - "*"
