@@ -68,6 +68,11 @@ func run(pass *analysis.Pass) (any, error) {
 			continue
 		}
 		for _, d := range diags {
+			// Applied here, the single point every diagnostic converges on,
+			// so the sub-analyzers stay unaware of it.
+			if !selection.reportable(pass, d) {
+				continue
+			}
 			// Surface the check code in the message itself (e.g.
 			// "GCL1001: ...") so it is visible in plain CLI output, which
 			// otherwise prints only file:line:col + message. The Category

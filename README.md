@@ -131,6 +131,47 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 
 All checks above also fire on package-scoped primitives declared in any file of the same package — there is no separate code for that case; the diagnostic carries the same category as the in-function variant.
 
+### Selecting checks
+
+Every check runs by default. `-checks` narrows that down and `-tests` controls
+test files. Both are declared on the analyzer itself, so they behave identically
+in the CLI and in any `go/analysis` driver that consumes it.
+
+```bash
+goconcurrencylint -checks "all,-GCL5001" ./...
+```
+
+```bash
+goconcurrencylint -checks "all,-GCL5*" -tests=false ./...
+```
+
+```bash
+goconcurrencylint -checks "GCL1*,-GCL1005" ./...
+```
+
+The list is processed left to right starting from an empty set: a plain entry
+adds the checks it matches, an entry prefixed with `-` removes them, and `all`
+matches the whole catalogue. Later entries override earlier ones, so
+`GCL1*,-GCL1005` is "the mutex family except that one" and `all,-GCL2*,GCL2001`
+puts a single check back after excluding its family. This is the same syntax
+[staticcheck](https://staticcheck.dev/docs/configuration/) uses for its own
+`-checks` flag.
+
+- Entries may be canonical codes (`GCL1001`), legacy slugs
+  (`lock-without-unlock`), or a code prefix ending in `*` (`GCL1*`). Separate
+  several with commas, spaces or semicolons, and quote the value so the shell
+  does not expand the star.
+- An unknown entry is a flag error, not a silent no-op — a typo in a CI config
+  fails loudly instead of leaving a check enabled that you believe is off. So is
+  a list that resolves to no checks at all (`-checks ""`, `-checks "all,-all"`):
+  an unset variable in a pipeline should not quietly turn the linter off.
+- `-tests=false` drops every diagnostic reported in a `_test.go` file. Unlike
+  staticcheck's flag of the same name it does not skip analyzing those files, so
+  it changes what you see rather than how long the run takes.
+
+Use these for repo-wide policy and the inline directive below for one-off
+exceptions.
+
 ### Suppressing diagnostics
 
 Place `// goconcurrencylint:ignore` on the same line as the offending call. Each id may be a canonical code (`GCL1001`) or the legacy slug (`lock-without-unlock`); the two forms are interchangeable and can be mixed:
