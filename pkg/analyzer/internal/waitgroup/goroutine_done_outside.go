@@ -2,6 +2,7 @@ package waitgroup
 
 import (
 	"go/ast"
+	"go/token"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
@@ -166,6 +167,10 @@ func (g *goroutineInspector) checkAddInsideGoroutine(fn *ast.FuncDecl) {
 		}
 
 		ast.Inspect(fnLit.Body, func(inner ast.Node) bool {
+			// Nested goroutines own their Adds; the outer walk reaches them.
+			if _, nested := inner.(*ast.GoStmt); nested {
+				return false
+			}
 			call, ok := inner.(*ast.CallExpr)
 			if !ok || g.shouldSkipCall(call) {
 				return true
@@ -185,12 +190,35 @@ func (g *goroutineInspector) checkAddInsideGoroutine(fn *ast.FuncDecl) {
 			if g.addHandedOffToWorker(fnLit.Body, wgName) {
 				return true
 			}
+			if g.goroutineHoldsCountBefore(fnLit.Body, wgName, call.Pos()) {
+				return true
+			}
 			g.reporter.AddError(call.Pos(), category.AddInsideGoroutine, "waitgroup '"+wgName+"' Add called inside goroutine, may race with Wait")
 			return true
 		})
 
 		return true
 	})
+}
+
+// goroutineHoldsCountBefore reports whether body defers Done on wgName before
+// pos. The deferred Done proves the goroutine already owns a counter unit for
+// the rest of its body, so an Add running later cannot race a Wait: the counter
+// cannot reach zero while the goroutine is alive.
+func (g *goroutineInspector) goroutineHoldsCountBefore(body *ast.BlockStmt, wgName string, pos token.Pos) bool {
+	if body == nil || g.deferInvokesDone == nil {
+		return false
+	}
+	for _, stmt := range body.List {
+		deferStmt, ok := stmt.(*ast.DeferStmt)
+		if !ok || deferStmt.Pos() >= pos {
+			continue
+		}
+		if g.deferInvokesDone(deferStmt, wgName) {
+			return true
+		}
+	}
+	return false
 }
 
 // addHandedOffToWorker reports whether body spawns a worker goroutine that owns

@@ -1155,3 +1155,48 @@ func BadRangeOverSliceGrownInUnknownCountLoopWithoutDone(limit int) {
 	}
 	wg.Wait()
 }
+
+// GoodAddInsideGoroutineAfterDeferredDone mirrors containerd's concurrent mark
+// loop: the worker defers its Done first, so it owns a counter unit for the
+// whole body and the later Add cannot race the Wait.
+func GoodAddInsideGoroutineAfterDeferredDone(refs func(func(int))) {
+	var wg sync.WaitGroup
+	grays := make(chan int)
+
+	go func() {
+		for gray := range grays {
+			go func(gray int) {
+				defer wg.Done()
+
+				send := func(n int) {
+					wg.Add(1)
+					grays <- n
+				}
+				refs(send)
+			}(gray)
+		}
+	}()
+
+	wg.Add(1)
+	grays <- 1
+	wg.Wait()
+}
+
+// Same nested-closure Add, but the goroutine owns no counter unit when it runs:
+// the Done is not deferred ahead of the Add, so the race stays reportable.
+func BadAddInsideGoroutineNestedClosureWithoutDeferredDone(refs func(func(int))) {
+	var wg sync.WaitGroup
+	grays := make(chan int)
+
+	go func(gray int) {
+		send := func(n int) {
+			wg.Add(1) // want "waitgroup 'wg' Add called inside goroutine, may race with Wait"
+			grays <- n
+		}
+		refs(send)
+		wg.Done()
+	}(1)
+
+	wg.Add(1)
+	wg.Wait()
+}
