@@ -133,16 +133,16 @@ All checks above also fire on package-scoped primitives declared in any file of 
 
 ### Selecting checks
 
-Every check runs by default. `-checks` narrows that down and `-tests` controls
-test files. Both are declared on the analyzer itself, so they behave identically
-in the CLI and in any `go/analysis` driver that consumes it.
+Every check runs by default. `-checks` narrows that down. It is declared on the
+analyzer itself, so it behaves identically in the CLI and in any `go/analysis`
+driver that consumes it.
 
 ```bash
 goconcurrencylint -checks "all,-GCL5001" ./...
 ```
 
 ```bash
-goconcurrencylint -checks "all,-GCL5*" -tests=false ./...
+goconcurrencylint -checks "all,-GCL5*" ./...
 ```
 
 ```bash
@@ -165,9 +165,15 @@ puts a single check back after excluding its family. This is the same syntax
   fails loudly instead of leaving a check enabled that you believe is off. So is
   a list that resolves to no checks at all (`-checks ""`, `-checks "all,-all"`):
   an unset variable in a pipeline should not quietly turn the linter off.
-- `-tests=false` drops every diagnostic reported in a `_test.go` file. Unlike
-  staticcheck's flag of the same name it does not skip analyzing those files, so
-  it changes what you see rather than how long the run takes.
+
+To leave test files out, use the flag the `go/analysis` driver already provides
+— it skips loading them entirely, so the run also gets faster:
+
+```bash
+goconcurrencylint -test=false ./...
+```
+
+Under golangci-lint the equivalent is `run.tests: false`.
 
 Use these for repo-wide policy and the inline directive below for one-off
 exceptions.

@@ -168,13 +168,6 @@ func TestCheckListSetIsLastWins(t *testing.T) {
 	assert.Equal(t, "GCL5001", s.checks.String())
 }
 
-func TestIsTestFile(t *testing.T) {
-	assert.True(t, isTestFile("worker_test.go"))
-	assert.True(t, isTestFile("/abs/path/worker_test.go"))
-	assert.False(t, isTestFile("worker.go"), "-tests=false must not touch non-test files")
-	assert.False(t, isTestFile("not_testing.go"), "only the _test.go suffix counts")
-}
-
 func TestCheckSelectionEnabled(t *testing.T) {
 	s := newCheckSelection()
 	assert.True(t, s.enabled(category.LockWithoutUnlock))
@@ -234,11 +227,6 @@ func TestSelectionDefaultReportsEveryCheck(t *testing.T) {
 func TestSelectionExcludesFamily(t *testing.T) {
 	setFlag(t, "checks", "all,-GCL5*")
 	analysistest.Run(t, analysistest.TestData(), Analyzer, "selectionfiltered")
-}
-
-func TestSelectionSkipsTestFiles(t *testing.T) {
-	setFlag(t, "tests", "false")
-	analysistest.Run(t, analysistest.TestData(), Analyzer, "selectiontests")
 }
 
 // sortedCodes renders a resolved set in catalogue order. Test-only.

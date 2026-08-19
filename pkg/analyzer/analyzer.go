@@ -28,6 +28,7 @@ package analyzer
 
 import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/channel"
+	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/cond"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/copycheck"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/mutex"
@@ -70,7 +71,7 @@ func run(pass *analysis.Pass) (any, error) {
 		for _, d := range diags {
 			// Applied here, the single point every diagnostic converges on,
 			// so the sub-analyzers stay unaware of it.
-			if !selection.reportable(pass, d) {
+			if !selection.enabled(category.Category(d.Category)) {
 				continue
 			}
 			// Surface the check code in the message itself (e.g.

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
-	"golang.org/x/tools/go/analysis"
 )
 
 // Check selection runs a subset of the catalogue without editing source, so a
@@ -24,9 +23,9 @@ import (
 // flag errors: a typo or an unset variable must not leave a green pipeline that
 // lints nothing.
 //
-// -tests=false drops diagnostics in _test.go files. Unlike staticcheck's flag
-// of the same name it does not skip analyzing them — filtering happens at report
-// time, so it changes output rather than runtime.
+// There is deliberately no flag here for test files: the go/analysis driver
+// already exposes -test=false, which keeps them from being loaded at all, and
+// golangci-lint has run.tests. Either beats filtering at report time.
 
 // selection is process-wide because analysis.Analyzer.Flags is. Consequence for
 // tests: they must stay serial, since a t.Parallel() test would read whatever
@@ -39,37 +38,20 @@ func init() {
 
 type checkSelection struct {
 	checks checkList
-	tests  bool
 }
 
 func newCheckSelection() *checkSelection {
-	return &checkSelection{checks: newCheckList(), tests: true}
+	return &checkSelection{checks: newCheckList()}
 }
 
 func (s *checkSelection) register(fs *flag.FlagSet) {
 	fs.Var(&s.checks, "checks",
 		`comma-separated list of checks to run: codes, legacy slugs or prefixes like "GCL1*", "-" to exclude, "all" for everything`)
-	fs.BoolVar(&s.tests, "tests", true,
-		"report diagnostics found in _test.go files")
 }
 
 // reset restores the defaults. Only tests need it, to undo a flag they set.
 func (s *checkSelection) reset() {
 	s.checks = newCheckList()
-	s.tests = true
-}
-
-// reportable decides whether d survives the user's configuration. The category
-// is tested first: it is a map lookup, while resolving a filename walks the
-// FileSet — work the default path never needs.
-func (s *checkSelection) reportable(pass *analysis.Pass, d analysis.Diagnostic) bool {
-	if !s.enabled(category.Category(d.Category)) {
-		return false
-	}
-	if s.tests {
-		return true
-	}
-	return !isTestFile(pass.Fset.Position(d.Pos).Filename)
 }
 
 // enabled reports whether cat is selected. An empty category is always kept: it
@@ -80,10 +62,6 @@ func (s *checkSelection) enabled(cat category.Category) bool {
 		return true
 	}
 	return s.checks.has(cat)
-}
-
-func isTestFile(filename string) bool {
-	return strings.HasSuffix(filename, "_test.go")
 }
 
 // checkList is the flag.Value behind -checks: the resolved set, plus the raw
