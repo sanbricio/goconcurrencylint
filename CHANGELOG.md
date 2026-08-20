@@ -1,3 +1,35 @@
+## [0.5.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.5.0) - 2026-08-20
+
+### 🚀 Features
+
+- Enhance analysis for branch statements and add exhaustive test cases for mutex and waitgroup usage ([#52](https://github.com/sanbricio/goconcurrencylint/issues/52))
+- Detect sync.Once misuse (re-entrant Do, Do(nil)) ([#53](https://github.com/sanbricio/goconcurrencylint/issues/53))
+- Add sync.Cond checks and sharpen mutex/waitgroup analysis ([#56](https://github.com/sanbricio/goconcurrencylint/issues/56))
+- Add sync.Pool, once-constructor and rwmutex recursive-lock checks ([#57](https://github.com/sanbricio/goconcurrencylint/issues/57))
+- Enhance waitgroup analysis with "Add before you spawn" checks ([#58](https://github.com/sanbricio/goconcurrencylint/issues/58))
+- Add channel misuse checks (GCL6001-6004) ([#59](https://github.com/sanbricio/goconcurrencylint/issues/59))
+- Add checks for deferred Done in goroutines to prevent race conditions
+- Check selection flags (-checks, -tests) ([#64](https://github.com/sanbricio/goconcurrencylint/issues/64))
+- Add golangci-lint module plugin support and documentation ([#65](https://github.com/sanbricio/goconcurrencylint/issues/65))
+
+### 🐛 Bug Fixes
+
+- Treat Wait in a returning for-select branch as early-exit
+- Remove waitgroup/mutex false positives found on real repos ([#60](https://github.com/sanbricio/goconcurrencylint/issues/60))
+
+### 🚜 Refactor
+
+- Check categories to use stable numeric codes and enhance documentation
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump the all-actions group with 2 updates ([#63](https://github.com/sanbricio/goconcurrencylint/issues/63))
+
+### ❤️ Contributors
+
+- @sanbricio
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.4.1...v0.5.0
 ## [0.4.1](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.4.1) - 2026-06-07
 
 ### 🐛 Bug Fixes
