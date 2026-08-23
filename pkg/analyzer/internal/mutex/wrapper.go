@@ -470,8 +470,8 @@ func (w *wrapperResolver) embeddedFieldType(fieldName string) types.Type {
 		return nil
 	}
 
-	for i := range structType.NumFields() {
-		if field := structType.Field(i); field.Embedded() && field.Name() == fieldName {
+	for field := range structType.Fields() {
+		if field.Embedded() && field.Name() == fieldName {
 			return field.Type()
 		}
 	}
