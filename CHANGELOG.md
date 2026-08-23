@@ -1,3 +1,15 @@
+## [0.5.1](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.5.1) - 2026-08-23
+
+### 🐛 Bug Fixes
+
+- Add checks for embedded mutex delegation and improve waitgroup handling
+- Optimize embedded field iteration in wrapperResolver
+
+### ❤️ Contributors
+
+- @sanbricio
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.5.0...v0.5.1
 ## [0.5.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.5.0) - 2026-08-20
 
 ### 🚀 Features
