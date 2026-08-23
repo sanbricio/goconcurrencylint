@@ -707,3 +707,32 @@ func CommentedGoodReuseWaitGroup() {
 //     wg.Add(1) // This should be ignored
 //     wg.Wait()
 // }
+
+type queuedBatch struct {
+	wgs []*sync.WaitGroup
+}
+
+// GoodWaitOnRangedWaitGroups waits on producer-owned WaitGroups.
+func GoodWaitOnRangedWaitGroups(q queuedBatch, enqueue func(*sync.WaitGroup)) {
+	done := make(chan struct{})
+	go func() {
+		for _, wg := range q.wgs {
+			wg.Wait()
+		}
+		close(done)
+	}()
+	<-done
+
+	wg := &sync.WaitGroup{}
+	enqueue(wg)
+}
+
+// BadWaitWithoutAddBesideRangedWaitGroups keeps local checks enabled.
+func BadWaitWithoutAddBesideRangedWaitGroups(q queuedBatch) {
+	for _, wg := range q.wgs {
+		wg.Wait()
+	}
+
+	var solo sync.WaitGroup
+	solo.Wait() // want "waitgroup 'solo' Wait called without any Add"
+}

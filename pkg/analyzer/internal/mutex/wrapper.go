@@ -57,6 +57,10 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return false
 	}
 
+	if w.isEmbeddedMutexDelegation(varName, methodName, oppositeMethods) {
+		return true
+	}
+
 	if methodName == "RLock" && w.isOneWayReadLatch(varName) {
 		return true
 	}
@@ -407,4 +411,70 @@ func functionBodyContainsFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string
 	})
 
 	return found
+}
+
+// isEmbeddedMutexDelegation reports calls delegated to an embedded mutex.
+func (w *wrapperResolver) isEmbeddedMutexDelegation(varName, methodName string, oppositeMethods []string) bool {
+	if w.typesInfo == nil || w.function == nil || w.function.Name == nil {
+		return false
+	}
+
+	baseVar, fieldName, ok := splitBaseAndSuffix(varName)
+	if !ok || baseVar != common.ReceiverName(w.function) {
+		return false
+	}
+	// Only direct fields are promoted onto the receiver.
+	if fieldName == "" || strings.Contains(fieldName, ".") {
+		return false
+	}
+
+	if !methodNameLooksLikeWrapper(w.function.Name.Name, methodName) {
+		return false
+	}
+
+	fieldType := w.embeddedFieldType(fieldName)
+	if fieldType == nil {
+		return false
+	}
+
+	for _, opposite := range oppositeMethods {
+		obj, _, _ := types.LookupFieldOrMethod(fieldType, true, nil, opposite)
+		if _, isMethod := obj.(*types.Func); isMethod {
+			return true
+		}
+	}
+
+	return false
+}
+
+// embeddedFieldType returns a directly embedded receiver field's type.
+func (w *wrapperResolver) embeddedFieldType(fieldName string) types.Type {
+	if w.function.Recv == nil || len(w.function.Recv.List) == 0 {
+		return nil
+	}
+
+	recvType := w.typesInfo.TypeOf(w.function.Recv.List[0].Type)
+	if recvType == nil {
+		return nil
+	}
+	if ptr, ok := types.Unalias(recvType).(*types.Pointer); ok {
+		recvType = ptr.Elem()
+	}
+
+	named, ok := types.Unalias(recvType).(*types.Named)
+	if !ok {
+		return nil
+	}
+	structType, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		return nil
+	}
+
+	for i := range structType.NumFields() {
+		if field := structType.Field(i); field.Embedded() && field.Name() == fieldName {
+			return field.Type()
+		}
+	}
+
+	return nil
 }

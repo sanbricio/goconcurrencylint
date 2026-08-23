@@ -73,3 +73,10 @@ func BadPackageLevelWaitGroupWithForeignCall() {
 	log.Print("starting")
 	packageWG.Wait()
 }
+
+// GoodPackageLevelWaitGroupResetAfterWait resets shared package state.
+func GoodPackageLevelWaitGroupResetAfterWait() {
+	resetWG.Wait()
+
+	resetWG = &sync.WaitGroup{}
+}

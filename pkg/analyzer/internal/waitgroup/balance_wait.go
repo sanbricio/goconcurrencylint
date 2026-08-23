@@ -25,7 +25,8 @@ func (b *balanceValidator) checkWaitWithoutAdd(stats map[string]*Stats) {
 			// Wait, since later code cannot supply the missing Add.
 			if targetObj != nil &&
 				(b.isWaitGroupPassedToOtherFunctionsForWait(targetObj, waitPos) ||
-					b.hasAddInLocalClosure(targetObj, waitPos)) {
+					b.hasAddInLocalClosure(targetObj, waitPos) ||
+					b.isRangeVariable(targetObj)) {
 				continue
 			}
 			b.reporter.AddError(waitPos, category.WaitWithoutAdd, "waitgroup '"+wgName+"' Wait called without any Add")
@@ -276,4 +277,35 @@ func (b *balanceValidator) checkUnreachableDone() {
 			return true
 		})
 	}
+}
+
+// isRangeVariable reports whether target is a range key or value.
+// Ranged WaitGroups are owned by the collection's producer.
+func (b *balanceValidator) isRangeVariable(target types.Object) bool {
+	if b.function == nil || b.function.Body == nil || target == nil || b.typesInfo == nil {
+		return false
+	}
+
+	found := false
+	ast.Inspect(b.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		rangeStmt, ok := n.(*ast.RangeStmt)
+		if !ok {
+			return true
+		}
+		for _, expr := range []ast.Expr{rangeStmt.Key, rangeStmt.Value} {
+			ident, ok := expr.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if b.typesInfo.ObjectOf(ident) == target {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }

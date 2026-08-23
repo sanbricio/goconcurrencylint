@@ -182,6 +182,11 @@ func scanBody(body *ast.BlockStmt, pass *analysis.Pass, fr *FunctionResult) {
 				if !ok || i >= len(node.Rhs) {
 					continue
 				}
+				// A package-level reassignment resets shared state; it does not
+				// introduce a function-local primitive.
+				if node.Tok == token.ASSIGN && isPackageScopedVar(ident, pass) {
+					continue
+				}
 				if typ := pass.TypesInfo.TypeOf(node.Rhs[i]); typ != nil {
 					classify(ident.Name, typ, fr.maps())
 				}
@@ -235,4 +240,18 @@ func classify(name string, typ types.Type, into primitiveMaps) {
 	case common.IsOnce(typ):
 		into.once[name] = true
 	}
+}
+
+// isPackageScopedVar reports whether ident is declared at package level.
+func isPackageScopedVar(ident *ast.Ident, pass *analysis.Pass) bool {
+	if pass == nil || pass.TypesInfo == nil {
+		return false
+	}
+
+	v, ok := pass.TypesInfo.ObjectOf(ident).(*types.Var)
+	if !ok || v.Pkg() == nil {
+		return false
+	}
+
+	return v.Parent() == v.Pkg().Scope()
 }
