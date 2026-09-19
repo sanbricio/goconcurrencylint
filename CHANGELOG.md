@@ -1,3 +1,23 @@
+## [0.6.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.6.0) - 2026-09-19
+
+### 🚀 Features
+
+- Enhance mutex analysis with branch stats merging and tryLock handling
+
+### 🚜 Refactor
+
+- Simplify loop iterations using slices.Backward for clarity
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Go version and dependencies to v1.26.0 and latest module versions
+- Update Go version to 1.26 in CI workflows
+
+### ❤️ Contributors
+
+- @sanbricio
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.5.1...v0.6.0
 ## [0.5.1](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.5.1) - 2026-08-23
 
 ### 🐛 Bug Fixes
