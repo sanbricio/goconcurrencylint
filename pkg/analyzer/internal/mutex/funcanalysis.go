@@ -21,6 +21,10 @@ type funcAnalysis struct {
 	labelGotoSnapshots     map[string]map[string]*Stats
 	simulationStack        map[methodSimulationKey]bool
 	localFuncStack         map[*ast.FuncLit]bool
+	statementLocations     map[ast.Stmt]statementLocation
+	enclosingIfs           map[*ast.IfStmt][]*ast.IfStmt
+	ifInitOwners           map[ast.Stmt]*ast.IfStmt
+	handoffErrorGuards     map[*ast.IfStmt][]handoffErrorGuard
 
 	// flagGuardedFlags maps mutexes released by a deferred, flag-guarded unlock
 	// (see detectFlagGuardedReleaseFlags) to their guard flag name. Populated once
@@ -32,11 +36,13 @@ func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
 	// tryLock is wired separately (in AnalyzeFunction / forkForSimulation)
 	// because the tracker needs the Checker's names and reporting boundary,
 	// which newFuncAnalysis does not have.
-	return &funcAnalysis{
-		function:    fn,
-		stats:       make(map[string]*Stats),
-		deferErrors: newDeferErrorCollector(),
+	fa := &funcAnalysis{
+		function:           fn,
+		stats:              make(map[string]*Stats),
+		deferErrors:        newDeferErrorCollector(),
+		handoffErrorGuards: make(map[*ast.IfStmt][]handoffErrorGuard),
 	}
+	return fa
 }
 
 func newDeferErrorCollector() *deferErrorCollector {
@@ -75,6 +81,7 @@ func (c *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames m
 		loopCarry:             c.loopCarry,
 		explicitTransferCache: c.explicitTransferCache,
 		lifecycleScanCache:    c.lifecycleScanCache,
+		lockedReturnCache:     c.lockedReturnCache,
 		safeDeferBeforeLock:   c.safeDeferBeforeLock,
 		funcAnalysis:          fa,
 	}

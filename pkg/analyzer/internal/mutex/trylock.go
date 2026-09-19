@@ -161,9 +161,17 @@ func (t *tryLockTracker) applyToBranch(cond ast.Expr, stats map[string]*Stats) b
 	}
 
 	result.checked = true
+	applyTryLockResult(result, stats)
+	return true
+}
+
+func applyTryLockResult(result *tryLockResult, stats map[string]*Stats) {
+	if result == nil {
+		return
+	}
 	st := stats[result.varName]
 	if st == nil {
-		return true
+		return
 	}
 	switch result.method {
 	case "TryLock":
@@ -173,5 +181,33 @@ func (t *tryLockTracker) applyToBranch(cond ast.Expr, stats map[string]*Stats) b
 		st.rlock++
 		st.rlockPos = append(st.rlockPos, result.pos)
 	}
+}
+
+// applyAssertedTryLock recognises testify/require's terminating truth
+// assertion. Unlike assert.True, require.True does not return on failure, so a
+// TryLock nested in its boolean argument is definitely held afterwards.
+func (c *Checker) applyAssertedTryLock(call *ast.CallExpr, stats map[string]*Stats) bool {
+	if call == nil || len(call.Args) < 2 || c.typesInfo == nil {
+		return false
+	}
+	sel, ok := common.UnwrapParenExpr(call.Fun).(*ast.SelectorExpr)
+	if !ok || (sel.Sel.Name != "True" && sel.Sel.Name != "Truef") {
+		return false
+	}
+	obj := c.typesInfo.ObjectOf(sel.Sel)
+	if obj == nil || obj.Pkg() == nil || obj.Pkg().Path() != "github.com/stretchr/testify/require" {
+		return false
+	}
+
+	tryCall, ok := common.UnwrapParenExpr(call.Args[1]).(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	result := c.tryLock.resultFromCall(tryCall)
+	if result == nil {
+		return false
+	}
+	result.checked = true
+	applyTryLockResult(result, stats)
 	return true
 }

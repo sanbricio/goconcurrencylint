@@ -37,6 +37,7 @@ type Checker struct {
 	// lifecycleScanCache memoizes per-function AST scans (returned idents and
 	// composite literals), shared by reference across functions; read-only.
 	lifecycleScanCache *lifecycleScanCache
+	lockedReturnCache  map[*ast.FuncDecl]lockedReturnSummary
 
 	// safeDeferBeforeLock holds the positions of defer statements whose deferred
 	// unlock is immediately balanced by a matching lock in the same block (see
@@ -103,6 +104,7 @@ type packageScope struct {
 	functions             []*ast.FuncDecl
 	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
 	scanCache             *lifecycleScanCache
+	lockedReturnCache     map[*ast.FuncDecl]lockedReturnSummary
 }
 
 func newPackageScope(files []*ast.File) *packageScope {
@@ -111,6 +113,7 @@ func newPackageScope(files []*ast.File) *packageScope {
 		functions:             collectFunctionDecls(files),
 		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
 		scanCache:             newLifecycleScanCache(),
+		lockedReturnCache:     make(map[*ast.FuncDecl]lockedReturnSummary),
 	}
 }
 
@@ -130,6 +133,7 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		termination:           term,
 		explicitTransferCache: scope.explicitTransferCache,
 		lifecycleScanCache:    scope.scanCache,
+		lockedReturnCache:     scope.lockedReturnCache,
 	}
 	c.loopCarry = newLoopCarryAnalyzer(c.mutexNames, c.rwMutexNames, cf, errorCollector, term)
 	return c

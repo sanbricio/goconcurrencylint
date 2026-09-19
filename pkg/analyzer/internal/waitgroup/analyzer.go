@@ -56,6 +56,16 @@ type Stats struct {
 // the package-level subset kept apart so Add/Wait pairing can be
 // validated against the right scope.
 func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Checker {
+	return newCheckerWithFunctionDecls(fr, errorCollector, cf, pass, buildFunctionDeclMap(pass.Files))
+}
+
+func newCheckerWithFunctionDecls(
+	fr *primitives.FunctionResult,
+	errorCollector report.Reporter,
+	cf *commentfilter.CommentFilter,
+	pass *analysis.Pass,
+	functionDecls map[token.Pos]*ast.FuncDecl,
+) *Checker {
 	return &Checker{
 		waitGroupNames:             fr.WaitGroups,
 		localWaitGroupNames:        fr.LocalWaitGroups,
@@ -66,7 +76,7 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		// conservative fallbacks for direct tests and defensive callers.
 		typesInfo:     pass.TypesInfo,
 		pkg:           pass.Pkg,
-		functionDecls: buildFunctionDeclMap(pass.Files),
+		functionDecls: functionDecls,
 	}
 }
 

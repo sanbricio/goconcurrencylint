@@ -47,9 +47,18 @@ func (c *Checker) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*S
 		return
 	}
 
-	// Handle defer with function literals
-	if fnlit, ok := stmt.Call.Fun.(*ast.FuncLit); ok {
+	// Handle deferred function literals, including a literal assigned to a
+	// local variable before `defer release()`.
+	var fnlit *ast.FuncLit
+	switch fun := common.UnwrapParenExpr(stmt.Call.Fun).(type) {
+	case *ast.FuncLit:
+		fnlit = fun
+	case *ast.Ident:
+		fnlit = c.localFunctionLiteralBefore(fun.Name, stmt.Pos())
+	}
+	if fnlit != nil {
 		c.handleDeferFunctionLiteral(fnlit, stmt.Pos(), stats)
+		c.handleDeferredOnceReleases(fnlit, stmt.Pos(), stats)
 	}
 }
 

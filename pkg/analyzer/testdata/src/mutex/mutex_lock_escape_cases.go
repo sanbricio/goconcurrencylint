@@ -1,6 +1,9 @@
 package mutex
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 // ========== lock released by a returned closure (guard/RAII pattern) ==========
 
@@ -119,6 +122,17 @@ func (o *onceLocker) LockReleasedByInlineOnce() {
 	unlock.Do(o.mu.Unlock)
 }
 
+// Good: the deferred callable is stored in a local before registration and
+// delegates the release through Once. This mirrors Prometheus' appender cleanup.
+func (o *onceLocker) LockReleasedByDeferredLocalClosure() {
+	o.mu.Lock()
+	unlock := sync.Once{}
+	release := func() {
+		unlock.Do(o.mu.Unlock)
+	}
+	defer release()
+}
+
 // Bad: the Once runs unrelated cleanup, so nothing releases the lock.
 func (o *onceLocker) BadLockWithOnceNotReleasing() {
 	o.mu.Lock() // want "mutex 'o.mu' is locked but not unlocked"
@@ -174,4 +188,145 @@ func (q *quotaChecker) BadLockNeverRecordedInLocker() {
 		q.quotaLock.Lock() // want "rwmutex 'q.quotaLock' is locked but not unlocked in if"
 	}
 	locker = &q.quotaLock
+}
+
+type serializedEntry struct {
+	sync.Mutex
+	value int
+}
+
+type entryCache struct {
+	entries map[string]*serializedEntry
+}
+
+// The lock travels out inside the returned value, so the release belongs to
+// whoever called this.
+func (c *entryCache) serialize(key string) *serializedEntry {
+	entry, ok := c.entries[key]
+	if !ok {
+		entry = &serializedEntry{}
+		c.entries[key] = entry
+	}
+
+	entry.Lock()
+	return entry
+}
+
+func GoodCallerReleasesHandedOverLock(c *entryCache, key string) int {
+	entry := c.serialize(key)
+	defer entry.Unlock()
+	return entry.value
+}
+
+func BadCallerKeepsHandedOverLock(c *entryCache, key string) int {
+	entry := c.serialize(key) // want "mutex 'entry' is locked but not unlocked"
+	return entry.value
+}
+
+// The locked value is the first result of a multi-result call. Returning an
+// error in another result slot must not hide the ownership handoff.
+func (c *entryCache) serializeResult(key string) (*serializedEntry, error) {
+	if key == "" {
+		return nil, errors.New("empty key")
+	}
+	entry, ok := c.entries[key]
+	if !ok {
+		entry = &serializedEntry{}
+		c.entries[key] = entry
+	}
+
+	entry.Lock()
+	return entry, nil
+}
+
+func GoodCallerReleasesMultiResultHandoff(c *entryCache, key string) (int, error) {
+	entry, err := c.serializeResult(key)
+	if err != nil {
+		return 0, err
+	}
+	defer entry.Unlock()
+	return entry.value, nil
+}
+
+func BadCallerKeepsMultiResultHandoff(c *entryCache, key string) (int, error) {
+	entry, err := c.serializeResult(key) // want "mutex 'entry' is locked but not unlocked"
+	if err != nil {
+		return 0, err
+	}
+	return entry.value, nil
+}
+
+type promotedEntryCache struct {
+	*entryCache
+}
+
+func BadCallerKeepsPromotedMultiResultHandoff(c *promotedEntryCache, key string) (int, error) {
+	entry, err := c.serializeResult(key) // want "mutex 'entry' is locked but not unlocked"
+	if err != nil {
+		return 0, err
+	}
+	return entry.value, nil
+}
+
+func GoodCallerReleasesInitHandoff(c *entryCache, key string) (int, error) {
+	var entry *serializedEntry
+	var err error
+	if entry, err = c.serializeResult(key); err != nil {
+		return 0, err
+	}
+	entry.Unlock()
+	return entry.value, nil
+}
+
+func BadCallerKeepsInitHandoff(c *entryCache, key string) (int, error) {
+	var entry *serializedEntry
+	var err error
+	if entry, err = c.serializeResult(key); err != nil { // want "mutex 'entry' is locked but not unlocked"
+		return 0, err
+	}
+	return entry.value, nil
+}
+
+// ===== lock ownership split across a keyed Lock/Unlock API =====
+
+type keyedMutexRegistry struct {
+	gate  sync.Mutex
+	items map[string]*serializedEntry
+}
+
+func (r *keyedMutexRegistry) LockID(key string) {
+	r.gate.Lock()
+	entry := r.items[key]
+	r.gate.Unlock()
+	entry.Lock()
+}
+
+func (r *keyedMutexRegistry) UnlockID(key string) {
+	r.gate.Lock()
+	entry := r.items[key]
+	r.gate.Unlock()
+	entry.Unlock()
+}
+
+// ===== a wrapper-typed mutex handed whole to a returned iterator =====
+
+type guardedStore struct {
+	sync.RWMutex
+	items []int
+}
+
+type storeIterator struct {
+	store *guardedStore
+	next  int
+}
+
+// Close releases the read lock the iterator was handed.
+func (it *storeIterator) Close() {
+	it.store.RUnlock()
+}
+
+// Iterator returns a handle holding the read lock; Close releases it.
+func (s *guardedStore) Iterator() *storeIterator {
+	s.RLock()
+	return &storeIterator{store: s}
 }

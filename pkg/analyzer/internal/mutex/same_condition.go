@@ -2,6 +2,7 @@ package mutex
 
 import (
 	"go/ast"
+	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
@@ -19,7 +20,7 @@ func (c *Checker) releasedByLaterSiblingWithSameCondition(stmt *ast.IfStmt, init
 		return false
 	}
 
-	sibling := c.siblingIfWithSameCondition(stmt)
+	sibling := c.sameConditionSibling(stmt)
 	if sibling == nil {
 		return false
 	}
@@ -40,7 +41,7 @@ func (c *Checker) acquiredByEarlierSiblingWithSameCondition(stmt *ast.IfStmt, in
 		return false
 	}
 
-	sibling := c.siblingIfWithSameCondition(stmt)
+	sibling := c.sameConditionSibling(stmt)
 	if sibling == nil {
 		return false
 	}
@@ -114,6 +115,199 @@ func statsOrEmpty(stats *Stats) *Stats {
 		return &Stats{}
 	}
 	return stats
+}
+
+// mirrorRole says how an if/else relates to the `if` on the same condition that
+// mirrors it.
+type mirrorRole int
+
+const (
+	// noMirror: the branches are not paired by a same-condition `if`.
+	noMirror mirrorRole = iota
+	// mirrorReleasesLater: these branches take the locks, the mirror releases them.
+	mirrorReleasesLater
+	// mirrorAcquiredEarlier: these branches release what the mirror took.
+	mirrorAcquiredEarlier
+)
+
+// sameConditionMirrorRole reports how both halves of an if/else are paired by
+// another `if` on the same condition. Both halves must be paired the same way:
+// a pair where only one branch lines up is not the mirrored shape and its
+// imbalance is real.
+func (c *Checker) sameConditionMirrorRole(stmt *ast.IfStmt, initial, thenStats, elseStats map[string]*Stats) mirrorRole {
+	sibling := c.sameConditionSibling(stmt)
+	if sibling == nil || sibling.Else == nil {
+		return noMirror
+	}
+	elseBody := elseBranchBlock(sibling.Else)
+	if elseBody == nil {
+		return noMirror
+	}
+
+	switch {
+	case c.branchDeltaMatched(initial, thenStats, sibling.Body, true) &&
+		c.branchDeltaMatched(initial, elseStats, elseBody, true):
+		return mirrorReleasesLater
+	case c.branchDeltaMatched(initial, thenStats, sibling.Body, false) &&
+		c.branchDeltaMatched(initial, elseStats, elseBody, false):
+		return mirrorAcquiredEarlier
+	default:
+		return noMirror
+	}
+}
+
+func (c *Checker) branchDeltaMatched(initial, final map[string]*Stats, body *ast.BlockStmt, releases bool) bool {
+	var delta map[string]lockKind
+	if releases {
+		delta = heldLockDelta(c.mutexNames, c.rwMutexNames, initial, final)
+	} else {
+		delta = releasedLockDelta(c.mutexNames, c.rwMutexNames, initial, final)
+	}
+	if len(delta) == 0 || body == nil {
+		return false
+	}
+	for name, kind := range delta {
+		method := kind.acquire()
+		if releases {
+			method = kind.release()
+		}
+		if countMutexMethodCalls(body, name, method) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func elseBranchBlock(stmt ast.Stmt) *ast.BlockStmt {
+	switch node := stmt.(type) {
+	case *ast.BlockStmt:
+		return node
+	case *ast.IfStmt:
+		return &ast.BlockStmt{List: []ast.Stmt{node}}
+	default:
+		return nil
+	}
+}
+
+// sameConditionSibling returns the `if` that mirrors stmt: the one in stmt's own
+// statement list when there is one, otherwise the mirror of an `if` that
+// encloses it.
+//
+// The nested form appears whenever a caller decides once whether to lock and
+// then repeats that decision to release:
+//
+//	if doLock {
+//		if cacheEnabled { s.Lock() } else { s.RLock() }
+//	}
+//	...
+//	if doLock {
+//		if cacheEnabled { s.Unlock() } else { s.RUnlock() }
+//	}
+//
+// The inner `if` has no sibling of its own, but the outer one does, and the
+// same argument applies to it: both blocks run together or neither does.
+func (c *Checker) sameConditionSibling(stmt *ast.IfStmt) *ast.IfStmt {
+	if sibling := c.siblingIfWithSameCondition(stmt); sibling != nil {
+		return sibling
+	}
+
+	for _, enclosing := range c.enclosingIfStatements(stmt) {
+		sibling := c.siblingIfWithSameCondition(enclosing)
+		if sibling == nil {
+			continue
+		}
+		candidate, ok := correspondingStatement(enclosing.Body.List, stmt, sibling.Body.List).(*ast.IfStmt)
+		if !ok || !sameStableCondition(stmt, candidate) || (stmt.Else == nil) != (candidate.Else == nil) {
+			continue
+		}
+		return candidate
+	}
+
+	return nil
+}
+
+// enclosingIfStatements returns the `if` statements that contain target,
+// innermost first.
+func (c *Checker) enclosingIfStatements(target ast.Stmt) []*ast.IfStmt {
+	if c.function == nil || c.function.Body == nil || target == nil {
+		return nil
+	}
+
+	c.ensureControlFlowStructure()
+	if ifStmt, ok := target.(*ast.IfStmt); ok && c.enclosingIfs != nil {
+		return slices.Clone(c.enclosingIfs[ifStmt])
+	}
+
+	var enclosing []*ast.IfStmt
+	ast.Inspect(c.function.Body, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok || ifStmt == target {
+			return true
+		}
+		if ifStmt.Pos() <= target.Pos() && target.End() <= ifStmt.End() {
+			enclosing = append(enclosing, ifStmt)
+		}
+		return true
+	})
+
+	// Inspect walks in pre-order, so the outermost `if` comes first; the nearest
+	// enclosing one is the most likely mirror.
+	slices.Reverse(enclosing)
+	return enclosing
+}
+
+func sameStableCondition(a, b *ast.IfStmt) bool {
+	if a == nil || b == nil || a.Init != nil || b.Init != nil {
+		return false
+	}
+	x, ok := stableConditionKey(a.Cond)
+	if !ok {
+		return false
+	}
+	y, ok := stableConditionKey(b.Cond)
+	return ok && x == y
+}
+
+type relativeStatementStep struct {
+	index int
+	child int
+}
+
+func correspondingStatement(source []ast.Stmt, target ast.Stmt, destination []ast.Stmt) ast.Stmt {
+	path, ok := relativeStatementPath(source, target)
+	if !ok {
+		return nil
+	}
+	list := destination
+	for _, step := range path {
+		if step.index < 0 || step.index >= len(list) {
+			return nil
+		}
+		stmt := list[step.index]
+		if step.child < 0 {
+			return stmt
+		}
+		children := statementChildLists(stmt)
+		if step.child >= len(children) {
+			return nil
+		}
+		list = children[step.child]
+	}
+	return nil
+}
+
+func relativeStatementPath(list []ast.Stmt, target ast.Stmt) ([]relativeStatementStep, bool) {
+	for index, stmt := range list {
+		if stmt == target {
+			return []relativeStatementStep{{index: index, child: -1}}, true
+		}
+		for childIndex, children := range statementChildLists(stmt) {
+			if path, ok := relativeStatementPath(children, target); ok {
+				return append([]relativeStatementStep{{index: index, child: childIndex}}, path...), true
+			}
+		}
+	}
+	return nil, false
 }
 
 // siblingIfWithSameCondition returns the other `if` in the same statement list
@@ -257,6 +451,10 @@ func (c *Checker) statementListContaining(target ast.Stmt) ([]ast.Stmt, int, boo
 	if c.function == nil || c.function.Body == nil {
 		return nil, 0, false
 	}
+	c.ensureControlFlowStructure()
+	if location, ok := c.statementLocations[target]; ok {
+		return location.list, location.index, true
+	}
 
 	var (
 		list  []ast.Stmt
@@ -276,6 +474,57 @@ func (c *Checker) statementListContaining(target ast.Stmt) ([]ast.Stmt, int, boo
 		return true
 	})
 	return list, index, found
+}
+
+type statementLocation struct {
+	list  []ast.Stmt
+	index int
+}
+
+func (c *Checker) ensureControlFlowStructure() {
+	if c.funcAnalysis == nil || c.statementLocations != nil {
+		return
+	}
+	c.indexControlFlowStructure()
+}
+
+func (fa *funcAnalysis) indexControlFlowStructure() {
+	fa.statementLocations = make(map[ast.Stmt]statementLocation)
+	fa.enclosingIfs = make(map[*ast.IfStmt][]*ast.IfStmt)
+	fa.ifInitOwners = make(map[ast.Stmt]*ast.IfStmt)
+	if fa.function == nil || fa.function.Body == nil {
+		return
+	}
+
+	var stack []ast.Node
+	ast.Inspect(fa.function.Body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+
+		if current, ok := n.(*ast.IfStmt); ok {
+			if current.Init != nil {
+				fa.ifInitOwners[current.Init] = current
+			}
+			for i := len(stack) - 1; i >= 0; i-- {
+				if _, boundary := stack[i].(*ast.FuncLit); boundary {
+					break
+				}
+				if parent, ok := stack[i].(*ast.IfStmt); ok {
+					fa.enclosingIfs[current] = append(fa.enclosingIfs[current], parent)
+				}
+			}
+		}
+		if list := statementListOf(n); len(list) > 0 {
+			for index, stmt := range list {
+				fa.statementLocations[stmt] = statementLocation{list: list, index: index}
+			}
+		}
+
+		stack = append(stack, n)
+		return true
+	})
 }
 
 // statementListOf returns the statements a node holds directly.

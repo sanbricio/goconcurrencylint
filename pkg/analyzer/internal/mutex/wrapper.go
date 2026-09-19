@@ -61,6 +61,10 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return true
 	}
 
+	if w.isKeyedLocalWrapperPair(varName, methodName, oppositeMethods) {
+		return true
+	}
+
 	if methodName == "RLock" && w.isOneWayReadLatch(varName) {
 		return true
 	}
@@ -109,6 +113,101 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 	}
 
 	return w.anySiblingMethodContainsFieldCall(suffix, w.function.Name.Name, oppositeMethods, oppositeMethods)
+}
+
+// isKeyedLocalWrapperPair recognizes keyed-lock APIs whose public Lock/Unlock
+// methods fetch the same mutex from a registry and deliberately split its
+// lifecycle across calls:
+//
+//	func (r *registry) LockID(id any)   { m, _ := r.items[id]; m.Lock() }
+//	func (r *registry) UnlockID(id any) { m, _ := r.items[id]; m.Unlock() }
+//
+// The exact counterpart method name, local name, indexed source and opposite
+// operation must all match. Those gates keep an unrelated local mutex in a
+// vaguely lock-named sibling from suppressing a real leak.
+func (w *wrapperResolver) isKeyedLocalWrapperPair(varName, methodName string, oppositeMethods []string) bool {
+	if strings.Contains(varName, ".") {
+		return false
+	}
+	counterpartName, ok := keyedWrapperCounterpartName(w.function.Name.Name, methodName)
+	if !ok {
+		return false
+	}
+	receiverType := common.ReceiverTypeName(w.function)
+	sibling := w.receiverMethods[receiverType][counterpartName]
+	if sibling == nil || sibling.Body == nil {
+		return false
+	}
+
+	source := localIndexedSource(w.function.Body, varName)
+	if source == "" || localIndexedSource(sibling.Body, varName) != source {
+		return false
+	}
+	return functionBodyContainsFieldCall(sibling.Body, varName, oppositeMethods)
+}
+
+func keyedWrapperCounterpartName(functionName, methodName string) (string, bool) {
+	switch methodName {
+	case "Lock":
+		if strings.Contains(functionName, "Unlock") || !strings.Contains(functionName, "Lock") {
+			return "", false
+		}
+		return strings.Replace(functionName, "Lock", "Unlock", 1), true
+	case "Unlock":
+		if !strings.Contains(functionName, "Unlock") {
+			return "", false
+		}
+		return strings.Replace(functionName, "Unlock", "Lock", 1), true
+	case "RLock":
+		if strings.Contains(functionName, "RUnlock") || !strings.Contains(functionName, "RLock") {
+			return "", false
+		}
+		return strings.Replace(functionName, "RLock", "RUnlock", 1), true
+	case "RUnlock":
+		if !strings.Contains(functionName, "RUnlock") {
+			return "", false
+		}
+		return strings.Replace(functionName, "RUnlock", "RLock", 1), true
+	default:
+		return "", false
+	}
+}
+
+func localIndexedSource(body *ast.BlockStmt, localName string) string {
+	if body == nil || localName == "" {
+		return ""
+	}
+	found := ""
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found != "" {
+			return false
+		}
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for index, lhs := range assign.Lhs {
+			ident, ok := lhs.(*ast.Ident)
+			if !ok || ident.Name != localName {
+				continue
+			}
+			var rhs ast.Expr
+			switch {
+			case len(assign.Rhs) == 1:
+				rhs = assign.Rhs[0]
+			case index < len(assign.Rhs):
+				rhs = assign.Rhs[index]
+			}
+			indexed, ok := common.UnwrapParenExpr(rhs).(*ast.IndexExpr)
+			if !ok {
+				continue
+			}
+			found = common.GetVarName(indexed.X)
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // isOneWayReadLatch recognizes a read lock used as a one-way "start gate": a

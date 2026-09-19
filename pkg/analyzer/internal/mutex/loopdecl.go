@@ -84,8 +84,13 @@ func (d *loopMutexDetector) reportAssign(s *ast.AssignStmt, loop ast.Stmt, loopB
 // is shared with per-iteration goroutines that are joined before the iteration
 // ends, in which case a fresh mutex per iteration is intentional.
 func (d *loopMutexDetector) reportMutexDecl(typ types.Type, name string, pos token.Pos, loop ast.Stmt, loopBody *ast.BlockStmt) {
-	isMutex := common.IsMutex(typ)
-	isRWMutex := common.IsRWMutex(typ)
+	// A fresh lock per iteration is the bug this check describes. A domain
+	// object that happens to embed one is not a lock, and building one per
+	// iteration is how table-driven tests and per-connection state are written.
+	kind := common.ClassifyMutexValue(typ)
+	lockOnly := common.IsLockOnlyValue(typ)
+	isMutex := lockOnly && kind == common.MutexValue
+	isRWMutex := lockOnly && kind == common.RWMutexValue
 	if !isMutex && !isRWMutex {
 		return
 	}

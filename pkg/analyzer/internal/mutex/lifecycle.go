@@ -104,9 +104,19 @@ func newLifecycleResolver(
 }
 
 func (l *lifecycleResolver) returnsHandleFor(mutexName string, methodNames []string) bool {
-	baseVar, suffix, ok := splitBaseAndSuffix(mutexName)
-	if !ok || l.function == nil {
+	if l.returnsLockedValueItself(mutexName) {
+		return true
+	}
+
+	if l.function == nil {
 		return false
+	}
+
+	baseVar, suffix, ok := splitBaseAndSuffix(mutexName)
+	if !ok {
+		// A wrapper type is the mutex, so there is no field to strip: the whole
+		// name is what gets handed to the returned object.
+		baseVar, suffix = mutexName, ""
 	}
 
 	for _, lit := range l.returnedCompositeLiterals(l.function) {
@@ -184,6 +194,14 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 						return true
 					}
 				}
+
+				// The field holds the mutex itself — a wrapper type stored whole
+				// in the returned handle — so the acquire lands on the value the
+				// literal was given, with no field to append.
+				if sourceVar := compositeLiteralFieldVarName(lit, path); sourceVar != "" && sourceVar != "?" &&
+					functionBodyContainsFieldCall(fn.Body, sourceVar, methodNames) {
+					return true
+				}
 				continue
 			}
 
@@ -206,6 +224,31 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 	}
 
 	return l.isReleaseCalledFromReturnedHandle(currentType, path, methodNames)
+}
+
+// returnsLockedValueItself reports whether the function hands back the value it
+// locked, so the caller owns the release:
+//
+//	func (o *objectCache) serialize(key string) *cachedSpec {
+//		obj := o.objects[key]
+//		obj.Lock()
+//		return obj
+//	}
+//
+// This is the same delegation the closure and method-value forms express, with
+// the lock travelling inside the returned value rather than beside it.
+func (l *lifecycleResolver) returnsLockedValueItself(mutexName string) bool {
+	if l.function == nil || strings.Contains(mutexName, ".") {
+		return false
+	}
+
+	for _, ri := range l.returnedIdents(l.function) {
+		if ri.ident.Name == mutexName {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (l *lifecycleResolver) returnsVariableWithReleaseFor(baseVar, suffix string, methodNames []string) bool {
@@ -622,10 +665,14 @@ func (l *lifecycleResolver) releaseMethodUnlocks(returnedType, fieldName, suffix
 			continue
 		}
 
-		targetVar := recv + "." + suffix
+		parts := []string{recv}
 		if fieldName != "" {
-			targetVar = recv + "." + fieldName + "." + suffix
+			parts = append(parts, fieldName)
 		}
+		if suffix != "" {
+			parts = append(parts, suffix)
+		}
+		targetVar := strings.Join(parts, ".")
 		if l.methodReleasesTarget(fn, targetVar, methodNames, nil) {
 			return true
 		}

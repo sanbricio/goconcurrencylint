@@ -180,6 +180,25 @@ Each check has a stable code (e.g. `GCL1001`) shown in the diagnostic message an
 
 All checks above also fire on package-scoped primitives declared in any file of the same package — there is no separate code for that case; the diagnostic carries the same category as the in-function variant.
 
+### Mutex wrappers
+
+Projects that outgrow a bare `sync.Mutex` tend to wrap one in a named type —
+`type Mutex struct { sync.Mutex }` — to add deadlock detection, metrics or a
+house API, and then lock through the promoted method. The mutex checks follow
+that: a value whose type embeds a sync mutex, at any depth, is tracked as the
+mutex it embeds, so `x.Lock()` counts as a lock on `x` and an unbalanced one is
+reported the same way.
+
+A type that overrides `Lock` or `Unlock` with its own implementation is left
+alone: its body may hold the lock past the call, so the pairing these checks
+assume would not describe it. What decides this is the method the call resolves
+to, not the name of the type or the field.
+
+`GCL1006` (a mutex declared inside a loop) stays narrower on purpose. It fires
+only for a value that is a lock and nothing else, because building a server, a
+connection or a test fixture per iteration is ordinary code, and those embed
+mutexes all the time.
+
 ### Selecting checks
 
 Every check runs by default. `-checks` narrows that down. It is declared on the

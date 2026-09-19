@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
@@ -30,6 +31,11 @@ func (c *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[strin
 	}
 
 	if c.applyOnceRelease(call, stats) {
+		return
+	}
+
+	// require.True(t, mu.TryLock()) only returns when the lock was acquired.
+	if c.applyAssertedTryLock(call, stats) {
 		return
 	}
 
@@ -228,6 +234,200 @@ func (c *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]
 	c.panicDetector.recordCollectionLengthsFromAssign(stmt)
 	c.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
 	c.tryLock.recordAssignment(stmt)
+	c.applyLockedValueHandover(stmt, stats)
+}
+
+// applyLockedValueHandover records the lock a callee hands over. A function that
+// locks the value it returns — `obj := o.serialize(key)` for a serialize that
+// ends in `obj.Lock(); return obj` — gives its caller a value that is already
+// held, so the caller's `defer obj.Unlock()` is matched rather than an unlock
+// without a lock, and a caller that never releases it is the one reported.
+func (c *Checker) applyLockedValueHandover(stmt *ast.AssignStmt, stats map[string]*Stats) {
+	if len(stmt.Rhs) == 1 {
+		call, ok := common.UnwrapParenExpr(stmt.Rhs[0]).(*ast.CallExpr)
+		if !ok {
+			return
+		}
+		c.applyLockedCallResults(stmt, call, stmt.Lhs, stats)
+		return
+	}
+
+	for index, rhs := range stmt.Rhs {
+		if index >= len(stmt.Lhs) {
+			continue
+		}
+		call, ok := common.UnwrapParenExpr(rhs).(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		c.applyLockedCallResults(stmt, call, stmt.Lhs[index:index+1], stats)
+	}
+}
+
+func (c *Checker) applyLockedCallResults(stmt *ast.AssignStmt, call *ast.CallExpr, lhs []ast.Expr, stats map[string]*Stats) {
+	callee := c.resolveCalledFuncDecl(call)
+	if callee == nil || callee == c.function {
+		return
+	}
+	pos := stmt.Pos()
+
+	summary := c.lockedReturns(callee)
+	for resultIndex, method := range summary.byResult {
+		if resultIndex >= len(lhs) {
+			continue
+		}
+		ident, ok := common.UnwrapParenExpr(lhs[resultIndex]).(*ast.Ident)
+		if !ok || ident.Name == "_" {
+			continue
+		}
+		stat := stats[ident.Name]
+		if stat == nil {
+			continue
+		}
+
+		if method == "RLock" {
+			stat.rlock++
+			stat.rlockPos = append(stat.rlockPos, pos)
+		} else {
+			stat.lock++
+			stat.lockPos = append(stat.lockPos, pos)
+		}
+
+		if errorIndex, ok := summary.errorResultByLocked[resultIndex]; ok {
+			c.recordHandoffErrorGuard(stmt, lhs, resultIndex, errorIndex, method)
+		}
+	}
+}
+
+// handoffErrorGuard ties a lock-bearing result to the terminating error arm
+// immediately following its assignment. The call only hands ownership to the
+// caller on the success path.
+type handoffErrorGuard struct {
+	varName       string
+	method        string
+	failureOnThen bool
+}
+
+func (c *Checker) recordHandoffErrorGuard(stmt *ast.AssignStmt, lhs []ast.Expr, lockedIndex, errorIndex int, method string) {
+	if c.funcAnalysis == nil || lockedIndex >= len(lhs) || errorIndex >= len(lhs) {
+		return
+	}
+	c.ensureControlFlowStructure()
+	lockedIdent, lockedOK := common.UnwrapParenExpr(lhs[lockedIndex]).(*ast.Ident)
+	errorIdent, errorOK := common.UnwrapParenExpr(lhs[errorIndex]).(*ast.Ident)
+	if !lockedOK || !errorOK || lockedIdent.Name == "_" || errorIdent.Name == "_" {
+		return
+	}
+
+	guardStmt := c.ifInitOwners[stmt]
+	if guardStmt == nil {
+		location, ok := c.statementLocations[stmt]
+		if !ok || location.index+1 >= len(location.list) {
+			return
+		}
+		guardStmt, ok = location.list[location.index+1].(*ast.IfStmt)
+		if !ok || guardStmt.Init != nil {
+			return
+		}
+	}
+	failureOnThen, ok := nilComparisonFailureBranch(guardStmt.Cond, errorIdent.Name)
+	if !ok {
+		return
+	}
+	if failureOnThen {
+		if !c.termination.blockAlwaysTerminates(guardStmt.Body) {
+			return
+		}
+	} else if guardStmt.Else == nil || !c.termination.elseAlwaysTerminates(guardStmt.Else) {
+		return
+	}
+
+	c.handoffErrorGuards[guardStmt] = append(c.handoffErrorGuards[guardStmt], handoffErrorGuard{
+		varName:       lockedIdent.Name,
+		method:        method,
+		failureOnThen: failureOnThen,
+	})
+}
+
+func nilComparisonFailureBranch(cond ast.Expr, errorName string) (bool, bool) {
+	binary, ok := common.UnwrapParenExpr(cond).(*ast.BinaryExpr)
+	if !ok || (binary.Op != token.EQL && binary.Op != token.NEQ) {
+		return false, false
+	}
+	left, right := common.UnwrapParenExpr(binary.X), common.UnwrapParenExpr(binary.Y)
+	ident, ok := left.(*ast.Ident)
+	if !ok || !isNilIdent(right) {
+		ident, ok = right.(*ast.Ident)
+		if !ok || !isNilIdent(left) {
+			return false, false
+		}
+	}
+	if ident.Name != errorName {
+		return false, false
+	}
+	return binary.Op == token.NEQ, true
+}
+
+func (c *Checker) applyHandoffErrorGuard(stmt *ast.IfStmt, thenStats, elseStats map[string]*Stats) {
+	for _, guard := range c.handoffErrorGuards[stmt] {
+		target := elseStats
+		if guard.failureOnThen {
+			target = thenStats
+		}
+		stat := target[guard.varName]
+		if stat == nil {
+			continue
+		}
+		if guard.method == "RLock" {
+			if stat.rlock > 0 {
+				stat.rlock--
+			}
+			if len(stat.rlockPos) > 0 {
+				stat.rlockPos = stat.rlockPos[:len(stat.rlockPos)-1]
+			}
+			continue
+		}
+		if stat.lock > 0 {
+			stat.lock--
+		}
+		if len(stat.lockPos) > 0 {
+			stat.lockPos = stat.lockPos[:len(stat.lockPos)-1]
+		}
+	}
+}
+
+// resolveCalledFuncDecl returns the declaration of the function or method call
+// invokes, when it is declared in this package.
+func (c *Checker) resolveCalledFuncDecl(call *ast.CallExpr) *ast.FuncDecl {
+	switch fun := common.UnwrapParenExpr(call.Fun).(type) {
+	case *ast.Ident:
+		return c.topLevelFunctionNamed(fun.Name)
+	case *ast.SelectorExpr:
+		if c.typesInfo == nil {
+			return nil
+		}
+		// For a promoted method, TypeOf(fun.X) names the outer embedding type,
+		// while the declaration belongs to the embedded receiver. Selection.Obj
+		// points at that declaring method and therefore resolves both direct and
+		// promoted calls correctly.
+		receiverType := ""
+		if selection := c.typesInfo.Selections[fun]; selection != nil {
+			if method, ok := selection.Obj().(*types.Func); ok {
+				if sig, ok := method.Type().(*types.Signature); ok && sig.Recv() != nil {
+					receiverType = common.BaseTypeNameFromType(sig.Recv().Type())
+				}
+			}
+		}
+		if receiverType == "" {
+			receiverType = common.BaseTypeNameFromType(c.typesInfo.TypeOf(fun.X))
+		}
+		if receiverType == "" {
+			return nil
+		}
+		return c.receiverMethods[receiverType][fun.Sel.Name]
+	}
+
+	return nil
 }
 
 func (c *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {

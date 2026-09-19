@@ -85,3 +85,12 @@ func TestFunc() {
 	assert.False(t, HasMutexes(fr), "Should not have mutexes")
 	assert.False(t, HasWaitGroups(fr), "Should not have waitgroups")
 }
+
+func TestForFunctionReturnsCachedResult(t *testing.T) {
+	fn := &ast.FuncDecl{Name: ast.NewIdent("cached")}
+	want := &FunctionResult{Mutexes: map[string]bool{"mu": true}}
+	pkg := &Result{functionResults: map[*ast.FuncDecl]*FunctionResult{fn: want}}
+
+	got := ForFunction(fn, nil, pkg)
+	assert.Same(t, want, got)
+}

@@ -1,6 +1,8 @@
 package waitgroup
 
 import (
+	"go/ast"
+	"go/token"
 	"reflect"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/commentfilter"
@@ -24,17 +26,21 @@ var SubAnalyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	// counters is built on first use and shared by every function in the pass,
-	// so the package-wide index is not rebuilt per function. driver.Run visits
-	// functions sequentially, so the lazy init needs no synchronization.
+	// Package-wide indexes are built on first use and shared by every function
+	// in the pass. driver.Run visits functions sequentially, so the lazy init
+	// needs no synchronization.
 	var counters *packageCounterIndex
+	var functionDecls map[token.Pos]*ast.FuncDecl
 	return driver.Run(pass, driver.Config[*Checker]{
 		Guard: primitives.HasWaitGroups,
 		NewChecker: func(fr *primitives.FunctionResult, ec report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Checker {
 			if counters == nil {
 				counters = newPackageCounterIndex(pass.Files)
 			}
-			checker := NewChecker(fr, ec, cf, pass)
+			if functionDecls == nil {
+				functionDecls = buildFunctionDeclMap(pass.Files)
+			}
+			checker := newCheckerWithFunctionDecls(fr, ec, cf, pass, functionDecls)
 			checker.packageCounters = counters
 			return checker
 		},

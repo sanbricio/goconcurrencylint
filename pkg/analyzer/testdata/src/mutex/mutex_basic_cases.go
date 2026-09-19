@@ -3,6 +3,8 @@ package mutex
 import (
 	"log"
 	"sync"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ========== MUTEX TESTS ==========
@@ -210,6 +212,33 @@ func GoodTryLockStoredResultChecked() {
 	if ok {
 		mu.Unlock()
 	}
+}
+
+// A successful && condition implies that TryLock ran and succeeded.
+func GoodTryLockInAndCondition(enabled bool) {
+	var mu sync.Mutex
+	if enabled && mu.TryLock() {
+		mu.Unlock()
+	}
+}
+
+// A false && condition does not imply that TryLock ran, so the else branch
+// must not receive ownership of the lock.
+func BadTryLockInAndElse(enabled bool) {
+	var mu sync.Mutex
+	if enabled && mu.TryLock() {
+		mu.Unlock()
+	} else {
+		mu.Unlock() // want "mutex 'mu' is unlocked but not locked"
+	}
+}
+
+// require.True stops execution when TryLock fails. If it returns, the caller
+// owns the lock and may release it normally.
+func GoodRequireTrueTryLock(t any) {
+	var mu sync.Mutex
+	require.True(t, mu.TryLock())
+	mu.Unlock()
 }
 
 // Lock/unlock with panic recovery

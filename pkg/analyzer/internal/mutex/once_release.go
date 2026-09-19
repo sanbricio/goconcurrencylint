@@ -2,6 +2,7 @@ package mutex
 
 import (
 	"go/ast"
+	"go/token"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
@@ -95,4 +96,32 @@ func (c *Checker) applyOnceRelease(call *ast.CallExpr, stats map[string]*Stats) 
 	}
 	c.handleMutexCall(varName, "Unlock", call.Pos(), stats)
 	return true
+}
+
+// handleDeferredOnceReleases finds once.Do(mu.Unlock) inside a deferred local
+// closure. The bound method is an argument rather than a CallExpr, so the
+// ordinary deferred-closure scan cannot see it.
+func (c *Checker) handleDeferredOnceReleases(fnlit *ast.FuncLit, pos token.Pos, stats map[string]*Stats) {
+	if fnlit == nil || fnlit.Body == nil {
+		return
+	}
+	ast.Inspect(fnlit.Body, func(n ast.Node) bool {
+		if nested, ok := n.(*ast.FuncLit); ok && nested != fnlit {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		varName, isReadUnlock, ok := c.onceReleaseTarget(call)
+		if !ok {
+			return true
+		}
+		if isReadUnlock {
+			c.handleDeferRUnlock(varName, pos, stats)
+		} else {
+			c.handleDeferUnlock(varName, pos, stats, c.rwMutexNames[varName])
+		}
+		return true
+	})
 }

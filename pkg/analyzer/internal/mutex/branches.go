@@ -176,6 +176,7 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 	}
 
 	thenBase, elseBase := c.branchInitialStatsForCondition(stmt.Cond, stats)
+	c.applyHandoffErrorGuard(stmt, thenBase, elseBase)
 	thenStats := c.analyzeBlock(stmt.Body, thenBase)
 	thenTerminates := c.termination.blockAlwaysTerminates(stmt.Body)
 
@@ -197,6 +198,20 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 			return
 		case elseTerminates:
 			copyStatsMap(stats, thenStats)
+			return
+		}
+
+		// Both halves may be balanced by an `if` that mirrors this one: the
+		// classic shape is an outer guard deciding whether to lock at all and
+		// this inner one picking which half of an RWMutex to take, with the
+		// release repeating both decisions. The pair as a whole is balanced, so
+		// the incoming state carries forward untouched.
+		switch c.sameConditionMirrorRole(stmt, stats, thenStats, elseStats) {
+		case mirrorReleasesLater:
+			mergeBranchStats(stats, thenStats, elseStats, maxCount)
+			return
+		case mirrorAcquiredEarlier:
+			mergeBranchStats(stats, thenStats, elseStats, minCount)
 			return
 		}
 
@@ -240,7 +255,7 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 // false when cond is not such a call. A leading `!` is the caller's concern:
 // negation swaps the branches, it does not change which lock the call acquires.
 func (c *Checker) tryLockConditionTarget(cond ast.Expr) (call *ast.CallExpr, varName, method string, ok bool) {
-	call, isCall := cond.(*ast.CallExpr)
+	call, isCall := common.UnwrapParenExpr(cond).(*ast.CallExpr)
 	if !isCall {
 		return nil, "", "", false
 	}
@@ -267,20 +282,38 @@ func (c *Checker) tryLockConditionTarget(cond ast.Expr) (call *ast.CallExpr, var
 // held on the success branch, so the implicit else path is not the incoming
 // state.
 func (c *Checker) conditionAcquiresLock(cond ast.Expr) bool {
+	cond = common.UnwrapParenExpr(cond)
 	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
 		return c.conditionAcquiresLock(unary.X)
+	}
+	if binary, ok := cond.(*ast.BinaryExpr); ok && (binary.Op == token.LAND || binary.Op == token.LOR) {
+		return c.conditionAcquiresLock(binary.X) || c.conditionAcquiresLock(binary.Y)
 	}
 	_, _, _, ok := c.tryLockConditionTarget(cond)
 	return ok
 }
 
 func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
+	cond = common.UnwrapParenExpr(cond)
 	thenStats := cloneStatsMap(stats)
 	elseStats := cloneStatsMap(stats)
 
 	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
 		negatedThen, negatedElse := c.branchInitialStatsForCondition(unary.X, stats)
 		return negatedElse, negatedThen
+	}
+
+	if binary, ok := cond.(*ast.BinaryExpr); ok {
+		switch binary.Op {
+		case token.LAND:
+			leftThen, leftElse := c.branchInitialStatsForCondition(binary.X, stats)
+			rightThen, rightElse := c.branchInitialStatsForCondition(binary.Y, leftThen)
+			return rightThen, intersectConditionAlternatives(leftElse, rightElse)
+		case token.LOR:
+			leftThen, leftElse := c.branchInitialStatsForCondition(binary.X, stats)
+			rightThen, rightElse := c.branchInitialStatsForCondition(binary.Y, leftElse)
+			return intersectConditionAlternatives(leftThen, rightThen), rightElse
+		}
 	}
 
 	if c.tryLock.applyToBranch(cond, thenStats) {
@@ -302,6 +335,15 @@ func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string
 	}
 
 	return thenStats, elseStats
+}
+
+// intersectConditionAlternatives keeps only lock state guaranteed across both
+// short-circuit paths. Claiming a lock held on just one alternative would hide
+// an unsafe unlock on the other.
+func intersectConditionAlternatives(a, b map[string]*Stats) map[string]*Stats {
+	merged := cloneStatsMap(a)
+	mergeBranchStats(merged, a, b, minCount)
+	return merged
 }
 
 // analyzeElseBranch handles else branches (both else and else if)

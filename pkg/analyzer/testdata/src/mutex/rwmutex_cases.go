@@ -611,3 +611,68 @@ func recalculateClusteredSeq(mset *clusteredStream, needStreamLock bool) uint64 
 	}
 	return lseq
 }
+
+type nestedGuardSublist struct {
+	sync.RWMutex
+	cache map[string]int
+}
+
+// Good: one `if` decides whether to lock at all and a second, nested one picks
+// which half of the RWMutex to take. The release mirrors both decisions, so the
+// inner branches balance through their enclosing pair.
+func (s *nestedGuardSublist) matchNested(doLock, cacheEnabled bool) int {
+	if doLock {
+		if cacheEnabled {
+			s.Lock()
+		} else {
+			s.RLock()
+		}
+	}
+
+	n := len(s.cache)
+
+	if doLock {
+		if cacheEnabled {
+			s.Unlock()
+		} else {
+			s.RUnlock()
+		}
+	}
+	return n
+}
+
+// Bad: the outer guard has no mirror, so the lock taken in the nested branch is
+// never released.
+func (s *nestedGuardSublist) matchNestedWithoutRelease(doLock, cacheEnabled bool) int {
+	if doLock {
+		if cacheEnabled {
+			s.Lock() // want "rwmutex 's' is locked but not unlocked in if"
+		} else {
+			s.RLock() // want "rwmutex 's' is rlocked but not runlocked in else"
+		}
+	}
+
+	return len(s.cache)
+}
+
+// Bad: the outer conditions mirror each other, but the corresponding inner
+// branches release the opposite lock kind. An unrelated method in the outer
+// sibling must not be accepted as the matching release.
+func (s *nestedGuardSublist) matchNestedWithSwappedRelease(doLock, cacheEnabled bool) int {
+	if doLock {
+		if cacheEnabled {
+			s.Lock() // want "rwmutex 's' is locked but not unlocked in if"
+		} else {
+			s.RLock() // want "rwmutex 's' is rlocked but not runlocked in else"
+		}
+	}
+
+	if doLock {
+		if cacheEnabled {
+			s.RUnlock() // want "rwmutex 's' is runlocked but not rlocked"
+		} else {
+			s.Unlock() // want "rwmutex 's' is unlocked but not locked"
+		}
+	}
+	return len(s.cache)
+}
