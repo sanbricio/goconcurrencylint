@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/types"
+	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
@@ -189,8 +190,7 @@ func definiteLockBeforeReturn(body *ast.BlockStmt, target *ast.ReturnStmt, varNa
 		return "", false
 	}
 
-	for i := len(path) - 1; i >= 0; i-- {
-		frame := path[i]
+	for _, frame := range slices.Backward(path) {
 		for j := frame.index - 1; j >= 0; j-- {
 			stmt := frame.list[j]
 			if method, direct := directLockEffect(stmt, varName); direct {

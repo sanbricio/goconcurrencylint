@@ -110,7 +110,7 @@ func promotedSyncMutexName(typ types.Type) (string, bool) {
 		return "", false
 	}
 
-	if _, ok := named.Underlying().(*types.Struct); !ok {
+	if _, undOk := named.Underlying().(*types.Struct); !undOk {
 		return "", false
 	}
 

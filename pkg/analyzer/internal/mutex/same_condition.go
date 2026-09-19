@@ -507,11 +507,11 @@ func (fa *funcAnalysis) indexControlFlowStructure() {
 			if current.Init != nil {
 				fa.ifInitOwners[current.Init] = current
 			}
-			for i := len(stack) - 1; i >= 0; i-- {
-				if _, boundary := stack[i].(*ast.FuncLit); boundary {
+			for _, s := range slices.Backward(stack) {
+				if _, boundary := s.(*ast.FuncLit); boundary {
 					break
 				}
-				if parent, ok := stack[i].(*ast.IfStmt); ok {
+				if parent, ok := s.(*ast.IfStmt); ok {
 					fa.enclosingIfs[current] = append(fa.enclosingIfs[current], parent)
 				}
 			}
