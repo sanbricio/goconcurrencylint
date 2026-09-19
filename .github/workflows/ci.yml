@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: [ '1.25' ]
+        go-version: [ '1.26' ]
 
     steps:
       - uses: actions/checkout@v7
@@ -31,7 +31,7 @@ jobs:
         run: go test -race -coverprofile=coverage.out -coverpkg=./... ./...
 
       - name: Upload coverage
-        if: matrix.go-version == '1.25'
+        if: matrix.go-version == '1.26'
         uses: actions/upload-artifact@v7
         with:
           name: coverage
@@ -46,12 +46,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.4
+          version: v2.13.2
           args: --config=.golangci.yml ./...
 
       - name: Verify generated docs are up to date
@@ -67,7 +67,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - name: Build binary
         run: go build -v -o goconcurrencylint ./cmd/goconcurrencylint
