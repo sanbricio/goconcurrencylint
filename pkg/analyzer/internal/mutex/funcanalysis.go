@@ -25,6 +25,7 @@ type funcAnalysis struct {
 	enclosingIfs           map[*ast.IfStmt][]*ast.IfStmt
 	ifInitOwners           map[ast.Stmt]*ast.IfStmt
 	handoffErrorGuards     map[*ast.IfStmt][]handoffErrorGuard
+	pendingAcquisitions    map[*ast.IfStmt][]pendingAcquisition
 
 	// flagGuardedFlags maps mutexes released by a deferred, flag-guarded unlock
 	// (see detectFlagGuardedReleaseFlags) to their guard flag name. Populated once
@@ -37,10 +38,11 @@ func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
 	// because the tracker needs the Checker's names and reporting boundary,
 	// which newFuncAnalysis does not have.
 	fa := &funcAnalysis{
-		function:           fn,
-		stats:              make(map[string]*Stats),
-		deferErrors:        newDeferErrorCollector(),
-		handoffErrorGuards: make(map[*ast.IfStmt][]handoffErrorGuard),
+		function:            fn,
+		stats:               make(map[string]*Stats),
+		deferErrors:         newDeferErrorCollector(),
+		handoffErrorGuards:  make(map[*ast.IfStmt][]handoffErrorGuard),
+		pendingAcquisitions: make(map[*ast.IfStmt][]pendingAcquisition),
 	}
 	return fa
 }
@@ -89,8 +91,8 @@ func (c *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames m
 	// (isolated) collector so simulation diagnostics never leak into the parent
 	// run. fa.rawBodyEffects is true here, so the wrapper resolver stays inert.
 	sim.tryLock = newTryLockTracker(sim.mutexNames, sim.rwMutexNames, sim.commentFilter, sim.errorCollector)
-	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects, sim.typesInfo)
 	sim.lifecycle = newLifecycleResolver(sim.receiverMethods, sim.functions, sim.typesInfo, sim.explicitTransferCache, sim.lifecycleScanCache, fa.function)
+	sim.wrapper = newWrapperResolver(sim.receiverMethods, fa.function, fa.rawBodyEffects, sim.typesInfo, sim.lifecycle)
 	sim.panicDetector = newLockedPanicDetector(sim.mutexNames, sim.rwMutexNames, sim.typesInfo, sim.errorCollector, fa.rawBodyEffects)
 	return sim
 }

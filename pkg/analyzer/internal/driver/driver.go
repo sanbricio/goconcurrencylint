@@ -40,6 +40,12 @@ type Config[C FunctionChecker] struct {
 	// The visitation skips functions for which Guard returns false.
 	Guard func(fr *primitives.FunctionResult) bool
 
+	// Extend, when set, runs before Guard and may return a richer
+	// FunctionResult: primitives the sub-analyzer learns about from what the
+	// function calls rather than from what it names. fr is cached and shared
+	// by primitives, so Extend must return a copy instead of modifying it.
+	Extend func(fn *ast.FuncDecl, fr *primitives.FunctionResult, pass *analysis.Pass) *primitives.FunctionResult
+
 	// NewChecker constructs a checker for the current function. ec is the
 	// shared ErrorCollector for the entire pass; cf is the per-file comment
 	// filter for the function's source file.
@@ -70,6 +76,9 @@ func Run[C FunctionChecker](pass *analysis.Pass, cfg Config[C]) (any, error) {
 		}
 
 		fr := primitives.ForFunction(fn, pass, pkg)
+		if cfg.Extend != nil {
+			fr = cfg.Extend(fn, fr, pass)
+		}
 		if !cfg.Guard(fr) {
 			return
 		}

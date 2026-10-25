@@ -5,3 +5,7 @@ package require
 func True(t any, value bool, msgAndArgs ...any) {}
 
 func Truef(t any, value bool, msg string, args ...any) {}
+
+func NoError(t any, err error, msgAndArgs ...any) {}
+
+func NoErrorf(t any, err error, msg string, args ...any) {}

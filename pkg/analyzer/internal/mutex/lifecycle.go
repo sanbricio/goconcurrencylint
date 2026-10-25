@@ -20,6 +20,19 @@ type returnedIdent struct {
 
 // methodCallSite is one call expression with a selector (x.Name(...)) paired
 // with the function declaration whose body contains it.
+// methodPairKey names the two halves of a candidate mirror pair.
+type methodPairKey struct {
+	first         string
+	second        string
+	acquiresFirst bool
+}
+
+// gateKey names one mutex field of one type.
+type gateKey struct {
+	ownerType string
+	suffix    string
+}
+
 type methodCallSite struct {
 	call      *ast.CallExpr
 	enclosing *ast.FuncDecl
@@ -49,6 +62,17 @@ type lifecycleScanCache struct {
 	// callSitesOfNameIndex maps a selector name to every x.Name(...) call in
 	// the package.
 	callSitesOfNameIndex map[string][]methodCallSite
+
+	// pairedCallers memoizes "does some function call these two methods on the
+	// same receiver, in order", the evidence behind isMirrorPairHalf.
+	pairedCallers map[methodPairKey]bool
+
+	// gateHalves memoizes how the package drives one mutex field, the question
+	// behind isReadGateAcquire.
+	gateHalves map[gateKey]gateHalves
+	// handOver memoizes acquiresOnSuccess and handsOver handsLockToCaller.
+	handOver  *handOverSolver
+	handsOver map[conditionalAcquireKey]bool
 }
 
 func newLifecycleScanCache() *lifecycleScanCache {
@@ -56,6 +80,8 @@ func newLifecycleScanCache() *lifecycleScanCache {
 		returnedIdents:        make(map[*ast.FuncDecl][]returnedIdent),
 		returnedCompositeLits: make(map[*ast.FuncDecl][]*ast.CompositeLit),
 		returnedFuncNames:     make(map[*ast.FuncDecl][]string),
+		handOver:              newHandOverSolver(),
+		handsOver:             make(map[conditionalAcquireKey]bool),
 	}
 }
 
@@ -464,6 +490,40 @@ func (l *lifecycleResolver) isReturnedFuncReleaseFor(mutexName string, acquireMe
 	}
 
 	return false
+}
+
+// calledFuncDecl returns the declaration of the function or method call
+// invokes, when it is declared in this package.
+func (l *lifecycleResolver) calledFuncDecl(call *ast.CallExpr) *ast.FuncDecl {
+	switch fun := common.UnwrapParenExpr(call.Fun).(type) {
+	case *ast.Ident:
+		return l.topLevelFunctionNamed(fun.Name)
+	case *ast.SelectorExpr:
+		if l.typesInfo == nil {
+			return nil
+		}
+		// For a promoted method, TypeOf(fun.X) names the outer embedding type,
+		// while the declaration belongs to the embedded receiver. Selection.Obj
+		// points at that declaring method and therefore resolves both direct and
+		// promoted calls correctly.
+		receiverType := ""
+		if selection := l.typesInfo.Selections[fun]; selection != nil {
+			if method, ok := selection.Obj().(*types.Func); ok {
+				if sig, ok := method.Type().(*types.Signature); ok && sig.Recv() != nil {
+					receiverType = common.BaseTypeNameFromType(sig.Recv().Type())
+				}
+			}
+		}
+		if receiverType == "" {
+			receiverType = common.BaseTypeNameFromType(l.typesInfo.TypeOf(fun.X))
+		}
+		if receiverType == "" {
+			return nil
+		}
+		return l.receiverMethods[receiverType][fun.Sel.Name]
+	}
+
+	return nil
 }
 
 // topLevelFunctionNamed returns the package-level (non-method) function with

@@ -43,6 +43,9 @@ func (c *Checker) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*S
 
 	// Handle direct defer calls
 	if call, ok := stmt.Call.Fun.(*ast.SelectorExpr); ok {
+		if c.applyDeferredWrapperRelease(stmt.Call, stmt.Pos(), stats) {
+			return
+		}
 		c.handleDeferCall(call, stmt.Pos(), stats)
 		return
 	}
@@ -59,7 +62,137 @@ func (c *Checker) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*S
 	if fnlit != nil {
 		c.handleDeferFunctionLiteral(fnlit, stmt.Pos(), stats)
 		c.handleDeferredOnceReleases(fnlit, stmt.Pos(), stats)
+		c.applyDeferredClosureWrapperRelease(fnlit, stmt.Pos(), stats)
 	}
+}
+
+// applyDeferredWrapperRelease handles `defer e.unlock()`: deferring a method of
+// this package that only releases a lock the function holds releases that lock
+// at return, exactly like `defer e.mu.Unlock()`. A lock not held at the defer
+// is left alone, so a wrapper can never turn into an unmatched-unlock report.
+func (c *Checker) applyDeferredWrapperRelease(call *ast.CallExpr, pos token.Pos, stats map[string]*Stats) bool {
+	sel, ok := common.UnwrapParenExpr(call.Fun).(*ast.SelectorExpr)
+	if !ok || isSyncLockerMethod(sel.Sel.Name) {
+		return false
+	}
+	callee := c.resolveCalledFuncDecl(call)
+	if callee == nil || callee == c.function || callee.Body == nil {
+		return false
+	}
+	target := handOverCall{callee: callee, calleeReceiver: common.ReceiverName(callee), bases: c.lifecycle.receiverBases(sel)}
+	if target.calleeReceiver == "" || len(target.bases) == 0 {
+		return false
+	}
+	return c.applyDeferredReleases(pos, stats, func(name string, rw bool) *Stats {
+		calleeLock, ok := calleeLockFor(target, name)
+		if !ok {
+			return nil
+		}
+		return c.simulateMethodEffect(callee, calleeLock, rw, &Stats{})
+	})
+}
+
+// applyDeferredClosureWrapperRelease is applyDeferredWrapperRelease for
+// `defer func() { e.unlock() }()`. Locks the literal names itself are left to
+// handleDeferFunctionLiteral and handleDeferredOnceReleases.
+func (c *Checker) applyDeferredClosureWrapperRelease(fnlit *ast.FuncLit, pos token.Pos, stats map[string]*Stats) {
+	mutexNames, rwMutexNames := map[string]bool{}, map[string]bool{}
+	pick := func(names, into map[string]bool) {
+		for name := range names {
+			if st := stats[name]; st != nil && (st.lock > st.deferUnlock || st.rlock > st.deferRUnlock) &&
+				!bodyNamesLockMethod(fnlit.Body, name) {
+				into[name] = true
+			}
+		}
+	}
+	pick(c.mutexNames, mutexNames)
+	pick(c.rwMutexNames, rwMutexNames)
+	if len(mutexNames) == 0 && len(rwMutexNames) == 0 {
+		return
+	}
+
+	sub := newSimulationFuncAnalysis(c.function, c.simulationStack, c.localFuncStack)
+	simulated := c.forkForSimulation(sub, mutexNames, rwMutexNames)
+	baseline := initialStats(mutexNames, rwMutexNames)
+	final := simulated.analyzeBlock(fnlit.Body, baseline)
+	simulated.applyFunctionExitDefers(final, baseline)
+	c.applyDeferredReleases(pos, stats, func(name string, _ bool) *Stats {
+		if !mutexNames[name] && !rwMutexNames[name] {
+			return nil
+		}
+		return final[name]
+	})
+}
+
+// applyDeferredReleases records a deferred release for every held lock whose
+// simulated effect, from a state holding nothing, is exactly one release, and
+// reports whether it recorded any.
+func (c *Checker) applyDeferredReleases(pos token.Pos, stats map[string]*Stats, effectOf func(name string, rw bool) *Stats) bool {
+	applied := false
+	visit := func(names map[string]bool, rw bool) {
+		for name := range names {
+			st := stats[name]
+			if st == nil {
+				continue
+			}
+			held := st.lock > st.deferUnlock
+			readHeld := rw && st.rlock > st.deferRUnlock
+			if !held && !readHeld {
+				continue
+			}
+			effect := effectOf(name, rw)
+			switch {
+			case held && releasesOnly(effect, false):
+				c.handleDeferUnlock(name, pos, stats, rw)
+				applied = true
+			case readHeld && releasesOnly(effect, true):
+				c.handleDeferRUnlock(name, pos, stats)
+				applied = true
+			}
+		}
+	}
+	visit(c.mutexNames, false)
+	visit(c.rwMutexNames, true)
+	return applied
+}
+
+// releasesOnly reports whether effect, simulated from a state holding nothing,
+// is exactly one release in the given mode and nothing else.
+func releasesOnly(effect *Stats, read bool) bool {
+	if effect == nil || effect.lock != 0 || effect.rlock != 0 || effect.deferUnlock != 0 || effect.deferRUnlock != 0 {
+		return false
+	}
+	if read {
+		return effect.borrowedRLock == 1 && effect.borrowedLock == 0
+	}
+	return effect.borrowedLock == 1 && effect.borrowedRLock == 0
+}
+
+// isSyncLockerMethod reports whether name is one of the sync.Mutex/RWMutex
+// methods handleDeferCall models directly.
+func isSyncLockerMethod(name string) bool {
+	switch name {
+	case "Lock", "Unlock", "RLock", "RUnlock", "TryLock", "TryRLock":
+		return true
+	default:
+		return false
+	}
+}
+
+// bodyNamesLockMethod reports whether body calls or takes a lock method of
+// varName (mu.Unlock() or once.Do(mu.Unlock)).
+func bodyNamesLockMethod(body *ast.BlockStmt, varName string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if sel, ok := n.(*ast.SelectorExpr); ok && isSyncLockerMethod(sel.Sel.Name) && common.GetVarName(sel.X) == varName {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // handleDeferCall processes direct defer calls
@@ -195,6 +328,12 @@ func (c *Checker) handleDeferUnlock(varName string, pos token.Pos, stats map[str
 			stats[varName].deferUnlock++
 			return
 		}
+		if c.isMirrorPairRelease(varName, WriteLockPattern.LockMethods) {
+			// The acquiring half lives in another method of the type and the
+			// package really uses the two as a pair; nothing was taken here to
+			// balance.
+			return
+		}
 		mutexType := "mutex"
 		if isRWMutex {
 			mutexType = "rwmutex"
@@ -217,6 +356,9 @@ func (c *Checker) handleDeferRUnlock(varName string, pos token.Pos, stats map[st
 			// The parent read-locked this rwmutex before launching the
 			// goroutine; the deferred runlock releases it on the parent's behalf.
 			stats[varName].deferRUnlock++
+			return
+		}
+		if c.isMirrorPairRelease(varName, ReadLockPattern.LockMethods) {
 			return
 		}
 		c.errorCollector.AddError(pos, category.DeferUnlockWithoutLock, "rwmutex '"+varName+"' has defer runlock but no corresponding rlock")

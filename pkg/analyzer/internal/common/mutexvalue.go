@@ -21,9 +21,13 @@ const (
 //
 // The question is answered by asking go/types which method `x.Lock()` actually
 // resolves to, never by matching type or field names. A wrapper that overrides
-// Lock with its own implementation resolves to its own method, and is
-// deliberately left untracked: its body may hold the lock past the call, so the
-// pairing the mutex checks assume would not hold.
+// Lock with its own implementation — to time the wait, to record a metric, to
+// sort a set of locks — resolves to its own method, so the embedding test says
+// nothing about it. Such a type is still a lock: it satisfies sync.Locker, and
+// that interface is the language's own statement that Lock acquires and Unlock
+// releases. LockContractKind reads that contract, so `x.Lock()` on a hand
+// written Locker is tracked exactly like a call on the embedded mutex it would
+// otherwise be.
 
 // IsMutexValue reports whether typ is a sync.Mutex or a named type that
 // exposes sync.Mutex's Lock/Unlock pair through embedding.
@@ -40,6 +44,18 @@ func IsRWMutexValue(typ types.Type) bool {
 // ClassifyMutexValue reports which sync mutex, if any, typ exposes directly or
 // through promoted methods from an embedded value.
 func ClassifyMutexValue(typ types.Type) MutexValueKind {
+	if kind := embeddedSyncMutexKind(typ); kind != NotMutexValue {
+		return kind
+	}
+
+	// No sync mutex reached through embedding: the type may still implement the
+	// lock contract with methods of its own.
+	return LockContractKind(typ)
+}
+
+// embeddedSyncMutexKind reports the sync mutex typ is, or exposes unchanged
+// through embedding.
+func embeddedSyncMutexKind(typ types.Type) MutexValueKind {
 	if IsMutex(typ) {
 		return MutexValue
 	}
@@ -153,4 +169,137 @@ func promotedSyncMutexMethod(named *types.Named, method string) (string, bool) {
 	}
 
 	return MatchPkgAndName(DerefOnceAndUnalias(sig.Recv().Type()), "sync", "Mutex", "RWMutex")
+}
+
+// LockContractKind reports the sync lock contract typ's own method set carries:
+// MutexValue when it satisfies sync.Locker (a niladic Lock/Unlock pair), and
+// RWMutexValue when it additionally exposes the read half (RLock/RUnlock), the
+// shape of sync.RWMutex.
+//
+// The method set is most of the test: a Lock that takes a key or returns a
+// handle is not the contract (the caller holds something the checks cannot
+// follow), and a Lock without an Unlock is not a lock at all. The rest is
+// hasBackingSyncMutex — the type must be built on a mutex these checks already
+// model, because only then are Lock, Unlock and their read halves the whole
+// protocol.
+func LockContractKind(typ types.Type) MutexValueKind {
+	if typ == nil {
+		return NotMutexValue
+	}
+
+	// Only a named type can carry methods, and resolving a method set is the
+	// expensive half of this test: ask the cheap question first.
+	target := DerefOnceAndUnalias(typ)
+	if _, ok := target.(*types.Named); !ok {
+		return NotMutexValue
+	}
+
+	if !HasNiladicMethod(target, "Lock") || !HasNiladicMethod(target, "Unlock") {
+		return NotMutexValue
+	}
+
+	if !hasBackingSyncMutex(target) {
+		return NotMutexValue
+	}
+
+	if HasNiladicMethod(target, "RLock") && HasNiladicMethod(target, "RUnlock") {
+		return RWMutexValue
+	}
+
+	return MutexValue
+}
+
+// HasNiladicMethod reports whether typ exposes a method named name that takes
+// no arguments and returns nothing — the shape of every sync lock operation.
+// Promoted methods count, so a type that inherits Unlock from an embedded mutex
+// answers true just as a type declaring its own does.
+func HasNiladicMethod(typ types.Type, name string) bool {
+	if typ == nil {
+		return false
+	}
+
+	var pkg *types.Package
+	if named, ok := typ.(*types.Named); ok && named.Obj() != nil {
+		pkg = named.Obj().Pkg()
+	}
+
+	obj, _, _ := types.LookupFieldOrMethod(typ, true, pkg, name)
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return false
+	}
+
+	sig, ok := fn.Type().(*types.Signature)
+	return ok && sig.Recv() != nil && sig.Params().Len() == 0 && sig.Results().Len() == 0
+}
+
+// hasBackingSyncMutex reports whether typ keeps a sync mutex that its own
+// methods can reach: a field holding one, either exported or declared in the
+// same package as the type.
+//
+// This is what separates a wrapper around sync.Mutex from a lock built on
+// something else — a semaphore, a channel, a file descriptor. Those offer
+// transitions sync.Mutex has no way to express, such as releasing the write
+// lock while keeping the read lock, or an acquire that a context can cancel;
+// their Lock/Unlock pair reveals only part of the protocol, and modelling it as
+// a plain mutex reports code that is correct. A mutex-backed type has no such
+// hidden half: sync.Mutex offers nothing beyond the operations named here.
+//
+// The accessibility test is what keeps a named semaphore type out. Its struct
+// does contain a mutex, but one declared in another package, which the type's
+// own Lock could not touch even if it wanted to.
+//
+// An interface has no fields to look at, so a value typed as sync.Locker is not
+// classified here. Those are picked up where the concrete lock is assigned to
+// them, which is what primitives does for `var l sync.Locker = &mu`.
+func hasBackingSyncMutex(typ types.Type) bool {
+	named, ok := typ.(*types.Named)
+	if !ok || named.Obj() == nil {
+		return false
+	}
+
+	// A collection type that locks its members as a set — the shape a house
+	// lock package uses to take several mutexes in a deadlock-free order — is
+	// backed by whatever its elements are.
+	switch underlying := named.Underlying().(type) {
+	case *types.Slice:
+		return holdsSyncMutex(underlying.Elem())
+	case *types.Array:
+		return holdsSyncMutex(underlying.Elem())
+	case *types.Map:
+		return holdsSyncMutex(underlying.Elem())
+	}
+
+	return holdsSyncMutex(named)
+}
+
+// holdsSyncMutex reports whether values of typ are a sync mutex or keep one in
+// a reachable field. It looks one level deep on purpose: a lock whose own lock
+// is another hand-written lock is a protocol these checks have not been shown.
+func holdsSyncMutex(typ types.Type) bool {
+	target := DerefOnceAndUnalias(typ)
+	if embeddedSyncMutexKind(target) != NotMutexValue {
+		return true
+	}
+
+	named, ok := target.(*types.Named)
+	if !ok || named.Obj() == nil {
+		return false
+	}
+
+	structType, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		return false
+	}
+
+	for field := range structType.Fields() {
+		if !field.Exported() && field.Pkg() != named.Obj().Pkg() {
+			continue
+		}
+		if embeddedSyncMutexKind(field.Type()) != NotMutexValue {
+			return true
+		}
+	}
+
+	return false
 }

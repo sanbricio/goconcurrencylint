@@ -3,7 +3,6 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
-	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
@@ -36,6 +35,9 @@ func (c *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[strin
 
 	// require.True(t, mu.TryLock()) only returns when the lock was acquired.
 	if c.applyAssertedTryLock(call, stats) {
+		return
+	}
+	if c.applyAssertedHandOver(call, stats) {
 		return
 	}
 
@@ -235,6 +237,7 @@ func (c *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]
 	c.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
 	c.tryLock.recordAssignment(stmt)
 	c.applyLockedValueHandover(stmt, stats)
+	c.applyConditionalAcquireCall(stmt)
 }
 
 // applyLockedValueHandover records the lock a callee hands over. A function that
@@ -312,25 +315,13 @@ func (c *Checker) recordHandoffErrorGuard(stmt *ast.AssignStmt, lhs []ast.Expr, 
 	if c.funcAnalysis == nil || lockedIndex >= len(lhs) || errorIndex >= len(lhs) {
 		return
 	}
-	c.ensureControlFlowStructure()
 	lockedIdent, lockedOK := common.UnwrapParenExpr(lhs[lockedIndex]).(*ast.Ident)
 	errorIdent, errorOK := common.UnwrapParenExpr(lhs[errorIndex]).(*ast.Ident)
 	if !lockedOK || !errorOK || lockedIdent.Name == "_" || errorIdent.Name == "_" {
 		return
 	}
 
-	guardStmt := c.ifInitOwners[stmt]
-	if guardStmt == nil {
-		location, ok := c.statementLocations[stmt]
-		if !ok || location.index+1 >= len(location.list) {
-			return
-		}
-		guardStmt, ok = location.list[location.index+1].(*ast.IfStmt)
-		if !ok || guardStmt.Init != nil {
-			return
-		}
-	}
-	failureOnThen, ok := nilComparisonFailureBranch(guardStmt.Cond, errorIdent.Name)
+	guardStmt, failureOnThen, ok := c.guardAfterAssignment(stmt, errorIdent.Name, errorSuccessResult)
 	if !ok {
 		return
 	}
@@ -347,6 +338,22 @@ func (c *Checker) recordHandoffErrorGuard(stmt *ast.AssignStmt, lhs []ast.Expr, 
 		method:        method,
 		failureOnThen: failureOnThen,
 	})
+}
+
+// guardAfterAssignment returns the `if` that checks the success result name
+// stmt assigns, and whether its then arm handles failure: the `if` stmt
+// initializes, or the one that follows it (see guardAfter).
+func (c *Checker) guardAfterAssignment(stmt *ast.AssignStmt, name string, kind successResult) (*ast.IfStmt, bool, bool) {
+	c.ensureControlFlowStructure()
+	if guard := c.ifInitOwners[stmt]; guard != nil {
+		failureOnThen, ok := failureBranch(guard.Cond, name, kind)
+		return guard, failureOnThen, ok
+	}
+	location, ok := c.statementLocations[stmt]
+	if !ok {
+		return nil, false, false
+	}
+	return guardAfter(location.list, location.index, name, kind)
 }
 
 func nilComparisonFailureBranch(cond ast.Expr, errorName string) (bool, bool) {
@@ -399,35 +406,7 @@ func (c *Checker) applyHandoffErrorGuard(stmt *ast.IfStmt, thenStats, elseStats 
 // resolveCalledFuncDecl returns the declaration of the function or method call
 // invokes, when it is declared in this package.
 func (c *Checker) resolveCalledFuncDecl(call *ast.CallExpr) *ast.FuncDecl {
-	switch fun := common.UnwrapParenExpr(call.Fun).(type) {
-	case *ast.Ident:
-		return c.topLevelFunctionNamed(fun.Name)
-	case *ast.SelectorExpr:
-		if c.typesInfo == nil {
-			return nil
-		}
-		// For a promoted method, TypeOf(fun.X) names the outer embedding type,
-		// while the declaration belongs to the embedded receiver. Selection.Obj
-		// points at that declaring method and therefore resolves both direct and
-		// promoted calls correctly.
-		receiverType := ""
-		if selection := c.typesInfo.Selections[fun]; selection != nil {
-			if method, ok := selection.Obj().(*types.Func); ok {
-				if sig, ok := method.Type().(*types.Signature); ok && sig.Recv() != nil {
-					receiverType = common.BaseTypeNameFromType(sig.Recv().Type())
-				}
-			}
-		}
-		if receiverType == "" {
-			receiverType = common.BaseTypeNameFromType(c.typesInfo.TypeOf(fun.X))
-		}
-		if receiverType == "" {
-			return nil
-		}
-		return c.receiverMethods[receiverType][fun.Sel.Name]
-	}
-
-	return nil
+	return c.lifecycle.calledFuncDecl(call)
 }
 
 func (c *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {

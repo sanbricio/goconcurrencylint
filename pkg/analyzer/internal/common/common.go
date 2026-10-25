@@ -35,14 +35,12 @@ func DerefOnce(typ types.Type) types.Type {
 
 // IsMutex returns true if the given type is sync.Mutex or *sync.Mutex.
 func IsMutex(typ types.Type) bool {
-	typ = DerefOnce(typ)
-	return MatchesPkgAndName(typ, "sync", "Mutex")
+	return MatchesPkgAndName(DerefOnceAndUnalias(typ), "sync", "Mutex")
 }
 
 // IsRWMutex returns true if the given type is sync.RWMutex or *sync.RWMutex.
 func IsRWMutex(typ types.Type) bool {
-	typ = DerefOnce(typ)
-	return MatchesPkgAndName(typ, "sync", "RWMutex")
+	return MatchesPkgAndName(DerefOnceAndUnalias(typ), "sync", "RWMutex")
 }
 
 // IsWaitGroup returns true if the given type is sync.WaitGroup or *sync.WaitGroup.

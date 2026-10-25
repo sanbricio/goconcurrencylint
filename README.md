@@ -16,19 +16,22 @@
   <b>A static analyzer for Go that catches common concurrency mistakes around <code>sync.Mutex</code>, <code>sync.RWMutex</code>, <code>sync.WaitGroup</code>, and <code>sync.Once</code> — before they reach production.</b>
 </p>
 
+<p align="center">
+  Bugs found and fixed upstream in <b>Temporal</b>, <b>NATS Server</b>, <b>Grafana Loki</b>, <b>Thanos</b> and <b>Vitess</b> — <a href="#bugs-found-in-the-wild">see the list</a>.
+</p>
+
 ---
 
 ## Table of Contents
 
 - [Why goconcurrencylint?](#why-goconcurrencylint)
-- [Features](#features)
+- [Bugs found in the wild](#bugs-found-in-the-wild)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Checks](#checks)
 - [Examples](#examples)
 - [How It Works](#how-it-works)
 - [Project Layout](#project-layout)
-- [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -41,6 +44,22 @@ Concurrency bugs in Go are notoriously hard to debug: races, deadlocks, and leak
 `goconcurrencylint` fills that gap with **control-flow-sensitive** static analysis. It walks the AST of every function, tracks lock/unlock and `Add`/`Done` state across `if`, `switch`, `select`, loops, and goroutines, and reports paths where synchronization primitives are used incorrectly — including across files of the same package.
 
 It is built on the standard [`go/analysis`](https://pkg.go.dev/golang.org/x/tools/go/analysis) framework, so it drops into any Go tooling pipeline without extra machinery.
+
+## Bugs found in the wild
+
+`goconcurrencylint` has found real concurrency bugs in widely used Go projects.
+Every fix below was reviewed and merged by the project's maintainers.
+
+| Project | Bug fixed | Pull request |
+|---------|-----------|--------------|
+| [Temporal](https://github.com/temporalio/temporal) | Read lock never released on an early-return path | [temporalio/temporal#10077](https://github.com/temporalio/temporal/pull/10077) |
+| [NATS Server](https://github.com/nats-io/nats-server) | Message block lock held after a write error | [nats-io/nats-server#8232](https://github.com/nats-io/nats-server/pull/8232) |
+| [NATS Server](https://github.com/nats-io/nats-server) | Stream lock held when consumer creation fails | [nats-io/nats-server#8230](https://github.com/nats-io/nats-server/pull/8230) |
+| [Grafana Loki](https://github.com/grafana/loki) | Rule evaluation deadlock after a hashing error | [grafana/loki#22413](https://github.com/grafana/loki/pull/22413) |
+| [Thanos](https://github.com/thanos-io/thanos) | Store read lock never released on a matcher error | [thanos-io/thanos#8897](https://github.com/thanos-io/thanos/pull/8897) |
+| [Vitess](https://github.com/vitessio/vitess) | Unused `sync.WaitGroup` removed from VTOrc | [vitessio/vitess#20477](https://github.com/vitessio/vitess/pull/20477) |
+
+Found a bug with `goconcurrencylint`? Open a pull request adding it to this table.
 
 ## Installation
 

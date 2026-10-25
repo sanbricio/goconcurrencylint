@@ -177,6 +177,7 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 
 	thenBase, elseBase := c.branchInitialStatsForCondition(stmt.Cond, stats)
 	c.applyHandoffErrorGuard(stmt, thenBase, elseBase)
+	handedOver := c.applyPendingAcquisitions(stmt, thenBase, elseBase)
 	thenStats := c.analyzeBlock(stmt.Body, thenBase)
 	thenTerminates := c.termination.blockAlwaysTerminates(stmt.Body)
 
@@ -226,15 +227,15 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 	}
 
 	// No explicit else: the implicit else path carries elseBase, which differs
-	// from the incoming stats only when the condition itself acquires a lock —
-	// an inline TryLock, e.g. `if !mu.TryLock() { mu.Lock() }`. When the then
-	// branch re-acquires so that both the TryLock-success path and the fallback
-	// Lock() path hold the mutex, the two states converge and there is no
-	// imbalance to report; propagate the held state so a later defer Unlock
-	// matches. Gated on a TryLock condition so no other `if` shape changes
+	// from the incoming stats only when the condition decides whether a lock is
+	// held — an inline TryLock, e.g. `if !mu.TryLock() { mu.Lock() }`, or the
+	// check after an acquire-or-fail helper, e.g. `if err == nil { ...;
+	// mu.Unlock() }`. When both paths end in the same state there is no
+	// imbalance to report; propagate that state so a later defer Unlock
+	// matches. Gated on such conditions so no other `if` shape changes
 	// behaviour, and reached only for a non-terminating then branch so a then
 	// that returns while holding the lock still leaves stats on the else path.
-	if c.conditionAcquiresLock(stmt.Cond) && c.canMergeBranchStates(thenStats, elseBase) {
+	if (c.conditionAcquiresLock(stmt.Cond) || handedOver) && c.canMergeBranchStates(thenStats, elseBase) {
 		copyStatsMap(stats, thenStats)
 		return
 	}
@@ -277,8 +278,9 @@ func (c *Checker) tryLockConditionTarget(cond ast.Expr) (call *ast.CallExpr, var
 	return nil, "", "", false
 }
 
-// conditionAcquiresLock reports whether cond is a TryLock/TryRLock call (or its
-// negation) on a tracked mutex — a condition whose evaluation leaves the lock
+// conditionAcquiresLock reports whether cond is a TryLock/TryRLock call, or a
+// bool acquire-or-fail helper call (see conditionHandedOverLocks), or its
+// negation, on a tracked mutex — a condition whose evaluation leaves the lock
 // held on the success branch, so the implicit else path is not the incoming
 // state.
 func (c *Checker) conditionAcquiresLock(cond ast.Expr) bool {
@@ -289,8 +291,11 @@ func (c *Checker) conditionAcquiresLock(cond ast.Expr) bool {
 	if binary, ok := cond.(*ast.BinaryExpr); ok && (binary.Op == token.LAND || binary.Op == token.LOR) {
 		return c.conditionAcquiresLock(binary.X) || c.conditionAcquiresLock(binary.Y)
 	}
-	_, _, _, ok := c.tryLockConditionTarget(cond)
-	return ok
+	if _, _, _, ok := c.tryLockConditionTarget(cond); ok {
+		return true
+	}
+	_, locks := c.conditionHandedOverLocks(cond)
+	return len(locks) > 0
 }
 
 func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string]*Stats) (map[string]*Stats, map[string]*Stats) {
@@ -317,6 +322,13 @@ func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string
 	}
 
 	if c.tryLock.applyToBranch(cond, thenStats) {
+		return thenStats, elseStats
+	}
+
+	if call, locks := c.conditionHandedOverLocks(cond); len(locks) > 0 {
+		for _, lock := range locks {
+			acquireHandedOverLock(thenStats[lock.varName], lock.method, call.Pos())
+		}
 		return thenStats, elseStats
 	}
 
@@ -448,21 +460,21 @@ func (c *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats) 
 
 	// `go someMethod()` runs the method asynchronously in another goroutine;
 	// its Lock/Unlock effects belong to that goroutine, except when the method
-	// name declares the release contract (grpc's `go x.fooAndUnlock()`): there
-	// the parent handed ownership over and is not leaking.
+	// starts by giving a lock back (grpc's `go x.resetTransportAndUnlock()`):
+	// there the parent handed ownership over and is not leaking.
 	c.applyGoroutineMethodReleaseHandoff(stmt.Call, stats)
 }
 
 // applyGoroutineMethodReleaseHandoff credits `go x.method()` with releasing a
-// held mutex rooted at x, provided the method name announces the handoff
-// (contains "Unlock") and its body performs the unlock. The name gate is what
-// keeps a generic `go h.releaseHelper()` reported as a leak.
+// held mutex rooted at x when the first thing that method does to the lock is
+// give it back. Such a method cannot run on its own — unlocking a mutex nobody
+// holds panics — so the only way the program works is if the caller was holding
+// it and meant to hand it over. A method that takes the lock before releasing
+// it, or one that never touches it, credits nothing and the parent's lock is
+// still reported.
 func (c *Checker) applyGoroutineMethodReleaseHandoff(call *ast.CallExpr, stats map[string]*Stats) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || c.typesInfo == nil {
-		return
-	}
-	if !methodNameMatchesAnyHint(sel.Sel.Name, []string{"Unlock"}) {
 		return
 	}
 
@@ -496,11 +508,11 @@ func (c *Checker) applyGoroutineMethodReleaseHandoff(call *ast.CallExpr, stats m
 			}
 			target := calleeReceiver + "." + relativePath
 
-			if st.lock > 0 && c.lifecycle.methodReleasesTarget(callee, target, WriteLockPattern.UnlockMethods, nil) {
+			if st.lock > 0 && c.releasesBeforeAcquiring(callee, target, WriteLockPattern) {
 				st.lock--
 				st.removeFirstLockPos()
 			}
-			if st.rlock > 0 && c.lifecycle.methodReleasesTarget(callee, target, ReadLockPattern.UnlockMethods, nil) {
+			if st.rlock > 0 && c.releasesBeforeAcquiring(callee, target, ReadLockPattern) {
 				st.rlock--
 				st.removeFirstRLockPos()
 			}
@@ -509,6 +521,22 @@ func (c *Checker) applyGoroutineMethodReleaseHandoff(call *ast.CallExpr, stats m
 
 	handoff(c.mutexNames)
 	handoff(c.rwMutexNames)
+}
+
+// releasesBeforeAcquiring reports whether callee gives the lock named by target
+// back before it ever takes one, the shape of a method written to be handed a
+// lock its caller already holds.
+func (c *Checker) releasesBeforeAcquiring(callee *ast.FuncDecl, target string, pattern LockPattern) bool {
+	if !c.lifecycle.methodReleasesTarget(callee, target, pattern.UnlockMethods, nil) {
+		return false
+	}
+
+	ref, ok := lockRefFor(target, common.ReceiverName(callee))
+	if !ok {
+		return false
+	}
+
+	return firstLockOpIsRelease(callee, ref, pattern)
 }
 
 // analyzeForStatement handles for loop statements

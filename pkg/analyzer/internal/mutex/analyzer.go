@@ -105,6 +105,12 @@ type packageScope struct {
 	explicitTransferCache map[*ast.BlockStmt]map[token.Pos]struct{}
 	scanCache             *lifecycleScanCache
 	lockedReturnCache     map[*ast.FuncDecl]lockedReturnSummary
+
+	// handOverResolver answers package-wide hand-over questions before any
+	// function is analyzed (see withHandedOverLocks); built on first use.
+	handOverResolver *lifecycleResolver
+	// lockPathsByType memoizes typeLockPaths.
+	lockPathsByType map[string]map[string]bool
 }
 
 func newPackageScope(files []*ast.File) *packageScope {
@@ -142,8 +148,8 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	c.funcAnalysis = newFuncAnalysis(fn)
 	c.tryLock = newTryLockTracker(c.mutexNames, c.rwMutexNames, c.commentFilter, c.errorCollector)
-	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects, c.typesInfo)
 	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.lifecycleScanCache, c.function)
+	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects, c.typesInfo, c.lifecycle)
 	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
 	c.lockAliases = c.detectLockAliases(fn)
 	c.flagGuardedFlags = c.detectFlagGuardedReleaseFlags(fn)
@@ -296,6 +302,95 @@ func (c *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMut
 	return cloneStats(final[varName])
 }
 
+// applyWrapperReleaseWhenHeld models a wrapper call whose release the general
+// simulation leaves out: s.unlock() on a receiver that embeds its mutex, or a
+// wrapper promoted from an embedded field. When the method only releases the
+// lock (calleeLock, simulated from a state holding nothing) and mutexName is
+// held, the call releases it. Other effects stay unmodeled, as they always
+// were: taking the lock through e.lock() in one method and dropping it in
+// another is a lifecycle split across methods, and counting only one half
+// would report the method that holds it.
+func (c *Checker) applyWrapperReleaseWhenHeld(callee *ast.FuncDecl, calleeLock, mutexName string, rw bool, stats map[string]*Stats) bool {
+	st := stats[mutexName]
+	if st == nil {
+		return false
+	}
+	held := st.lock > st.deferUnlock
+	readHeld := rw && st.rlock > st.deferRUnlock
+	if !held && !readHeld {
+		return false
+	}
+	effect := c.simulateMethodEffect(callee, calleeLock, rw, &Stats{})
+	switch {
+	case held && releasesOnly(effect, false):
+		st.lock--
+		st.removeFirstLockPos()
+		return true
+	case readHeld && releasesOnly(effect, true):
+		st.rlock--
+		st.removeFirstRLockPos()
+		return true
+	default:
+		return false
+	}
+}
+
+// applyPromotedWrapperRelease applies applyWrapperReleaseWhenHeld to a call of
+// a method promoted from an embedded field (h.unlock() for an unlock declared on
+// an embedded *session), naming the lock either way the caller may.
+func (c *Checker) applyPromotedWrapperRelease(call *ast.CallExpr, sel *ast.SelectorExpr, stats map[string]*Stats) bool {
+	callee := c.resolveCalledFuncDecl(call)
+	if callee == nil || callee.Body == nil || callee == c.function {
+		return false
+	}
+	target := handOverCall{callee: callee, calleeReceiver: common.ReceiverName(callee), bases: c.lifecycle.receiverBases(sel)}
+	if target.calleeReceiver == "" || len(target.bases) < 2 {
+		return false
+	}
+	changed := false
+	apply := func(names map[string]bool, rw bool) {
+		for name := range names {
+			if calleeLock, ok := calleeLockFor(target, name); ok && c.applyWrapperReleaseWhenHeld(callee, calleeLock, name, rw, stats) {
+				changed = true
+			}
+		}
+	}
+	apply(c.mutexNames, false)
+	apply(c.rwMutexNames, true)
+	return changed
+}
+
+// attributeToCall moves onto the call the positions a simulated callee added
+// to after: a lock the call leaves held, or an unlock it makes without a lock,
+// is reported where the caller made the call. Left inside the callee, the
+// diagnostics of every caller would land on the same line of the shared helper.
+func attributeToCall(after, before *Stats, pos token.Pos) {
+	if before == nil {
+		before = &Stats{}
+	}
+	after.lockPos = remapAddedPositions(after.lockPos, before.lockPos, pos)
+	after.rlockPos = remapAddedPositions(after.rlockPos, before.rlockPos, pos)
+	after.borrowedUnlockPos = remapAddedPositions(after.borrowedUnlockPos, before.borrowedUnlockPos, pos)
+	after.borrowedRUnlockPos = remapAddedPositions(after.borrowedRUnlockPos, before.borrowedRUnlockPos, pos)
+}
+
+// remapAddedPositions replaces with pos every entry of after that before does
+// not account for. after is the simulation's own copy, so it is edited in place.
+func remapAddedPositions(after, before []token.Pos, pos token.Pos) []token.Pos {
+	known := make(map[token.Pos]int, len(before))
+	for _, p := range before {
+		known[p]++
+	}
+	for i, p := range after {
+		if known[p] > 0 {
+			known[p]--
+			continue
+		}
+		after[i] = pos
+	}
+	return after
+}
+
 func (c *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
 	ident, ok := call.Fun.(*ast.Ident)
 	if !ok {
@@ -409,7 +504,10 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 	}
 
 	callee := c.receiverMethods[receiverType][sel.Sel.Name]
-	if callee == nil || callee.Body == nil || callee == c.function {
+	if callee == nil {
+		return c.applyPromotedWrapperRelease(call, sel, stats)
+	}
+	if callee.Body == nil || callee == c.function {
 		return false
 	}
 
@@ -421,10 +519,17 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 	changed := false
 
 	for mutexName := range c.mutexNames {
+		if mutexName == baseVar {
+			if c.applyWrapperReleaseWhenHeld(callee, calleeReceiver, mutexName, false, stats) {
+				changed = true
+			}
+			continue
+		}
 		relativePath, ok := relativeMutexPath(mutexName, baseVar)
 		if ok {
 			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName])
 			if simulated != nil {
+				attributeToCall(simulated, stats[mutexName], call.Pos())
 				stats[mutexName] = simulated
 				changed = true
 				continue
@@ -437,10 +542,17 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 	}
 
 	for rwMutexName := range c.rwMutexNames {
+		if rwMutexName == baseVar {
+			if c.applyWrapperReleaseWhenHeld(callee, calleeReceiver, rwMutexName, true, stats) {
+				changed = true
+			}
+			continue
+		}
 		relativePath, ok := relativeMutexPath(rwMutexName, baseVar)
 		if ok {
 			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName])
 			if simulated != nil {
+				attributeToCall(simulated, stats[rwMutexName], call.Pos())
 				stats[rwMutexName] = simulated
 				changed = true
 				continue
@@ -519,6 +631,7 @@ func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.Fun
 	if simulated == nil {
 		return false
 	}
+	attributeToCall(simulated, stats[mutexName], call.Pos())
 
 	stats[mutexName] = simulated
 	return true

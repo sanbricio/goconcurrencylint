@@ -9,7 +9,10 @@ import (
 
 // buildResolver parses src, indexes its receiver methods the same way the real
 // analyzer does (common.BuildReceiverMethodMap), and returns a resolver bound
-// to the method named methodName on type receiverType.
+// to the method named methodName on type receiverType. It passes no lifecycle
+// resolver, so only the heuristics that read the current method and its
+// siblings answer here; the ones that consult the package or its types are
+// covered by the analysistest fixtures, which are type-checked.
 func buildResolver(t *testing.T, src, receiverType, methodName string, rawBodyEffects bool) *wrapperResolver {
 	t.Helper()
 	file, _ := parseFile(t, src)
@@ -18,7 +21,7 @@ func buildResolver(t *testing.T, src, receiverType, methodName string, rawBodyEf
 	if fn == nil {
 		t.Fatalf("method %s.%s not found in receiver map", receiverType, methodName)
 	}
-	return newWrapperResolver(rm, fn, rawBodyEffects, nil)
+	return newWrapperResolver(rm, fn, rawBodyEffects, nil, nil)
 }
 
 func TestWrapperResolver_RecognizesWrapperPair(t *testing.T) {
@@ -107,21 +110,5 @@ func (b *B) work()    {}`
 	w := buildResolver(t, src, "B", "Hold", false)
 	if w.resolve("b.lock", "Lock") {
 		t.Error("a multi-statement method must not be treated as a barrier half")
-	}
-}
-
-func TestWrapperResolver_BarrierNeedsOppositeSibling(t *testing.T) {
-	// RLock with no single-statement RUnlock sibling (the read side is never
-	// released): the lock is genuinely unmatched and must be reported.
-	src := `package p
-import "sync"
-type B struct{ lock sync.RWMutex }
-func (b *B) Hold()     { b.lock.Lock() }
-func (b *B) Release()  { b.lock.Unlock() }
-func (b *B) ReadHold() { b.lock.RLock() }`
-
-	w := buildResolver(t, src, "B", "ReadHold", false)
-	if w.resolve("b.lock", "RLock") {
-		t.Error("RLock without a matching RUnlock sibling must stay unmatched")
 	}
 }

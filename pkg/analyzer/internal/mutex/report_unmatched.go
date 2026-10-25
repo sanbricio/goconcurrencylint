@@ -140,6 +140,7 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 			(c.lifecycle.returnsHandleFor(mutexName, WriteLockPattern.UnlockMethods) ||
 				c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods) ||
 				c.lifecycle.returnsClosureReleasingLock(mutexName, WriteLockPattern.UnlockMethods) ||
+				c.lifecycle.isConditionalAcquireHelper(mutexName, WriteLockPattern) ||
 				c.heldLockAtAbortSuppressed())
 		if !suppress {
 			for _, pos := range lockPositions {
@@ -165,6 +166,7 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 				(c.lifecycle.returnsHandleFor(mutexName, ReadLockPattern.UnlockMethods) ||
 					c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods) ||
 					c.lifecycle.returnsClosureReleasingLock(mutexName, ReadLockPattern.UnlockMethods) ||
+					c.lifecycle.isConditionalAcquireHelper(mutexName, ReadLockPattern) ||
 					c.heldLockAtAbortSuppressed())
 			if !suppress {
 				for _, pos := range rlockPositions {
