@@ -330,3 +330,327 @@ func (s *guardedStore) Iterator() *storeIterator {
 	s.RLock()
 	return &storeIterator{store: s}
 }
+
+// ===== acquire-or-fail helper: the lock is handed to the caller on success =====
+
+var errEndpointRemoved = errors.New("endpoint removed")
+
+type aliveEndpoint struct {
+	mu      sync.RWMutex
+	removed bool
+	value   int
+}
+
+// Good: like TryLock, lockAlive returns holding the lock exactly when it
+// reports success, and its callers release it after a successful call (the
+// cilium endpoint lockAlive/unlock protocol).
+func (e *aliveEndpoint) lockAlive() error {
+	e.mu.Lock()
+	if e.removed {
+		e.mu.Unlock()
+		return errEndpointRemoved
+	}
+	return nil
+}
+
+func (e *aliveEndpoint) unlock() {
+	e.mu.Unlock()
+}
+
+func (e *aliveEndpoint) unconditionalLock() {
+	e.mu.Lock()
+}
+
+// Good: the read-lock flavour of the same protocol.
+func (e *aliveEndpoint) rlockAlive() error {
+	e.mu.RLock()
+	if e.removed {
+		e.mu.RUnlock()
+		return errEndpointRemoved
+	}
+	return nil
+}
+
+func (e *aliveEndpoint) runlock() {
+	e.mu.RUnlock()
+}
+
+// Good: its only caller releases through the unlock wrapper, the way every
+// cilium caller of lockAlive does.
+func (e *aliveEndpoint) lockReady() error {
+	e.mu.Lock()
+	if e.removed {
+		e.mu.Unlock()
+		return errEndpointRemoved
+	}
+	return nil
+}
+
+func (e *aliveEndpoint) SetReady(v int) error {
+	if err := e.lockReady(); err != nil {
+		return err
+	}
+	defer e.unlock()
+	e.value = v
+	return nil
+}
+
+// Good: the bool flavour; true means the caller now holds the lock.
+func (e *aliveEndpoint) lockIfAlive() bool {
+	e.mu.Lock()
+	if e.removed {
+		e.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (e *aliveEndpoint) SetValue(v int) error {
+	if err := e.lockAlive(); err != nil {
+		return err
+	}
+	defer e.unlock()
+	e.value = v
+	return nil
+}
+
+// A failure arm may take the lock unconditionally: the helper already released
+// it there, so only the success path shows whether the lock was handed over.
+func (e *aliveEndpoint) Reset() {
+	if err := e.lockAlive(); err != nil {
+		e.unconditionalLock()
+		e.value = 0
+		e.unlock()
+		return
+	}
+	e.value = 0
+	e.unlock()
+}
+
+func (e *aliveEndpoint) Bump() {
+	if !e.lockIfAlive() {
+		e.unconditionalLock()
+		e.value = 0
+		e.unlock()
+		return
+	}
+	e.value++
+	e.unlock()
+}
+
+func (e *aliveEndpoint) ValueOrReset() int {
+	err := e.rlockAlive()
+	if err != nil {
+		e.unconditionalLock()
+		e.value = 0
+		e.unlock()
+		return 0
+	}
+	defer e.runlock()
+	return e.value
+}
+
+// Bad: the same shape, but no caller takes the lock over: the success path
+// simply forgot to unlock.
+func (e *aliveEndpoint) store(v int) error {
+	e.mu.Lock() // want "rwmutex 'e.mu' is locked but not unlocked"
+	if v < 0 {
+		e.mu.Unlock()
+		return errEndpointRemoved
+	}
+	e.value = v
+	return nil
+}
+
+func (e *aliveEndpoint) Store(v int) error {
+	return e.store(v)
+}
+
+// Bad: one caller releases after a successful call, but another locks again,
+// which would self-deadlock if checkAlive kept the lock: the callers disagree,
+// so nothing confirms the handover. checkAlive's own lock is reported, and so
+// is the release its first caller makes without a lock handed over.
+func (e *aliveEndpoint) checkAlive() error {
+	e.mu.Lock() // want "rwmutex 'e.mu' is locked but not unlocked"
+	if e.removed {
+		e.mu.Unlock()
+		return errEndpointRemoved
+	}
+	return nil
+}
+
+func (e *aliveEndpoint) ReleaseAfterCheck() {
+	if err := e.checkAlive(); err != nil {
+		return
+	}
+	e.mu.Unlock() // want "rwmutex 'e.mu' is unlocked but not locked"
+}
+
+func (e *aliveEndpoint) LockAfterCheck() {
+	if err := e.checkAlive(); err != nil {
+		return
+	}
+	e.unconditionalLock()
+	e.value++
+	e.unlock()
+}
+
+// Bad: a failure return keeps the lock, so a caller cannot tell from the result
+// whether it owns the lock.
+func (e *aliveEndpoint) lockUnlessBusy(busy bool) error {
+	e.mu.Lock() // want "rwmutex 'e.mu' is locked but not unlocked"
+	if busy {
+		return errEndpointRemoved
+	}
+	if e.removed {
+		e.mu.Unlock()
+		return errEndpointRemoved
+	}
+	return nil
+}
+
+func (e *aliveEndpoint) UseUnlessBusy() {
+	if err := e.lockUnlessBusy(false); err != nil {
+		return
+	}
+	e.unlock()
+}
+
+// ===== callers that release a handed-over lock themselves =====
+
+func (e *aliveEndpoint) SetValueDirect(v int) error {
+	if err := e.lockAlive(); err != nil {
+		return err
+	}
+	defer e.mu.Unlock()
+	e.value = v
+	return nil
+}
+
+func (e *aliveEndpoint) ValueDirect() (int, error) {
+	err := e.rlockAlive()
+	if err != nil {
+		return 0, err
+	}
+	v := e.value
+	e.mu.RUnlock()
+	return v, nil
+}
+
+// The lock is only taken on the success arm, which releases it; the failure
+// path never held it.
+func (e *aliveEndpoint) TrySetValue(v int) bool {
+	err := e.lockAlive()
+	if err == nil {
+		e.value = v
+		e.mu.Unlock()
+	}
+	return err == nil
+}
+
+// The lock is held after the `if` either way: handed over on success, taken
+// unconditionally when the endpoint went away.
+func (e *aliveEndpoint) ForceSetValue(v int) {
+	if err := e.lockAlive(); err != nil {
+		e.mu.Lock()
+	}
+	defer e.mu.Unlock()
+	e.value = v
+}
+
+func (e *aliveEndpoint) BumpDirect() {
+	if !e.lockIfAlive() {
+		return
+	}
+	e.value++
+	e.mu.Unlock()
+}
+
+func (e *aliveEndpoint) BumpIfAlive() {
+	if e.lockIfAlive() {
+		e.value++
+		e.mu.Unlock()
+	}
+}
+
+func (e *aliveEndpoint) BumpChecked() {
+	ok := e.lockIfAlive()
+	if !ok {
+		return
+	}
+	defer e.mu.Unlock()
+	e.value++
+}
+
+// Bad: the success path returns early without releasing the handed-over lock.
+func (e *aliveEndpoint) SetValueDirectLeak(v int) error {
+	if err := e.lockAlive(); err != nil { // want "rwmutex 'e.mu' is locked but not unlocked"
+		return err
+	}
+	e.value = v
+	if v > 10 {
+		return nil
+	}
+	e.mu.Unlock()
+	return nil
+}
+
+// Bad: lockAlive already released the lock when it failed.
+func (e *aliveEndpoint) SetValueCleansUpOnFailure(v int) error {
+	if err := e.lockAlive(); err != nil {
+		e.mu.Unlock() // want "rwmutex 'e.mu' is unlocked but not locked"
+		return err
+	}
+	e.value = v
+	e.mu.Unlock()
+	return nil
+}
+
+// store does not hand its lock over (this caller locks right after a successful
+// call), so the lock is not counted here: only store's own leak is reported.
+func (e *aliveEndpoint) StoreThenBump(v int) error {
+	if err := e.store(v); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.value++
+	e.mu.Unlock()
+	return nil
+}
+
+// Called with e.mu held: it drops the lock around slow work and takes it back
+// through the helper, or unconditionally when the endpoint went away.
+func (e *aliveEndpoint) refreshWhileHeld() {
+	e.mu.Unlock()
+	e.value++
+	if !e.lockIfAlive() {
+		e.unconditionalLock()
+	}
+}
+
+// ===== acquire-or-fail helper on a receiver that embeds its mutex =====
+
+type aliveStore struct {
+	sync.Mutex
+	closed bool
+	items  []int
+}
+
+// Good: the receiver itself is the lock the helper hands over.
+func (s *aliveStore) lockOpen() error {
+	s.Lock()
+	if s.closed {
+		s.Unlock()
+		return errEndpointRemoved
+	}
+	return nil
+}
+
+func (s *aliveStore) Append(v int) error {
+	if err := s.lockOpen(); err != nil {
+		return err
+	}
+	defer s.Unlock()
+	s.items = append(s.items, v)
+	return nil
+}

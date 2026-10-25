@@ -471,6 +471,14 @@ type crossMethodBarrierThread struct {
 	index  int
 }
 
+// The driver uses the two halves as one operation, which is what makes them a
+// pair rather than a lock somebody forgot: vitess's Bench.Run does exactly
+// this, `b.createThreads(ctx)` and then `b.runTest(ctx)`.
+func (b *crossMethodBarrier) GoodRunDrivesTheBarrier() {
+	b.GoodCreateThreadsHoldsBarrier()
+	b.GoodRunTestReleasesBarrier()
+}
+
 func (b *crossMethodBarrier) GoodCreateThreadsHoldsBarrier() {
 	b.lock.Lock()
 

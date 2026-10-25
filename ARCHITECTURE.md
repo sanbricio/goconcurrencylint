@@ -77,14 +77,17 @@ Tracing `lock-without-unlock` for `mu.Lock()` with no matching `Unlock()`:
 1. `go/analysis` runs the foundation analyzers first (topological order):
    `primitives`, `filesetup`, `inspect`.
 2. [`mutex/sub_analyzer.go`](pkg/analyzer/internal/mutex/sub_analyzer.go) → its
-   `run` is a single call to `driver.Run(pass, Config{Guard, NewChecker})`.
+   `run` is a single call to `driver.Run(pass, Config{Guard, Extend, NewChecker})`.
 3. [`driver.Run`](pkg/analyzer/internal/driver/driver.go) pulls the inspector,
    `primitives.Result` and `filesetup.Result`, and creates one `ErrorCollector`
    for the whole pass.
 4. It `Preorder`s over every `*ast.FuncDecl`: skips bodiless and generated
    functions, computes the function's visible primitives via
-   `primitives.ForFunction`, and applies the **Guard** (`HasMutexes`). For a
-   relevant function it calls `NewChecker` then `Checker.AnalyzeFunction`.
+   `primitives.ForFunction`, lets the optional **Extend** hook add the ones the
+   sub-analyzer infers from calls (mutex: the lock an acquire-or-fail helper
+   such as `e.lockAlive()` hands to its caller), and applies the **Guard**
+   (`HasMutexes`). For a relevant function it calls `NewChecker` then
+   `Checker.AnalyzeFunction`.
 5. [`AnalyzeFunction`](pkg/analyzer/internal/mutex/analyzer.go) wires the
    per-function collaborators, runs the lock-order check, then walks the body.
 6. The walk is the engine:
@@ -108,6 +111,30 @@ Tracing `lock-without-unlock` for `mu.Lock()` with no matching `Unlock()`:
 `waitgroup` and `once` follow the exact same steps 1–4 and 8–9. Only the engine
 in step 5–7 differs (see below); `once` is the smallest of the three — a single
 walk that resolves each `Do` argument and scans it for re-entrant calls.
+
+#### What counts as a mutex
+
+Before any of this runs, something has to decide that `x.Lock()` is a lock at
+all. That is [`common/mutexvalue.go`](pkg/analyzer/internal/common/mutexvalue.go),
+and it answers from go/types, never from a name: the value is a `sync.Mutex` /
+`sync.RWMutex`, or a type that exposes one unchanged through embedding, or a
+type whose own method set carries the `sync.Locker` contract while being built
+on a mutex these checks model. The last case is what tracks a house wrapper that
+overrides `Lock` to time or order acquisition; the backing requirement is what
+keeps out a lock built on a semaphore, whose extra transitions (dropping the
+write lock but keeping the read lock) the counters cannot describe.
+
+#### How a lone lock operation is judged
+
+A `Lock()` with no `Unlock()` in the same function is not automatically a leak:
+a type may split one lock's lifecycle across two methods on purpose. The
+decision is made by [`wrapper.go`](pkg/analyzer/internal/mutex/wrapper.go) and
+[`mirror_pair.go`](pkg/analyzer/internal/mutex/mirror_pair.go), and it never
+reads a method name — what counts is the shape of the code and what the rest of
+the package does with it: the type carries the `sync.Locker` contract, or it
+holds the opposite operation in another method and something really uses the two
+as a pair, or the mutex is an RWMutex driven as a one-way gate. `mirror_pair.go`
+explains each condition and what it is holding back.
 
 ### Direct path — `copycheck`
 

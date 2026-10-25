@@ -25,14 +25,20 @@ type wrapperResolver struct {
 	function        *ast.FuncDecl
 	rawBodyEffects  bool
 	typesInfo       *types.Info
+	// lifecycle answers "what does the rest of the package do with this
+	// method", which is what isMirrorPairHalf needs and what separates a pair
+	// the type splits on purpose from a forgotten release. It is nil in the
+	// unit tests that exercise the purely local heuristics.
+	lifecycle *lifecycleResolver
 }
 
-func newWrapperResolver(receiverMethods map[string]map[string]*ast.FuncDecl, function *ast.FuncDecl, rawBodyEffects bool, typesInfo *types.Info) *wrapperResolver {
+func newWrapperResolver(receiverMethods map[string]map[string]*ast.FuncDecl, function *ast.FuncDecl, rawBodyEffects bool, typesInfo *types.Info, lifecycle *lifecycleResolver) *wrapperResolver {
 	return &wrapperResolver{
 		receiverMethods: receiverMethods,
 		function:        function,
 		rawBodyEffects:  rawBodyEffects,
 		typesInfo:       typesInfo,
+		lifecycle:       lifecycle,
 	}
 }
 
@@ -57,19 +63,11 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return false
 	}
 
-	if w.isEmbeddedMutexDelegation(varName, methodName, oppositeMethods) {
+	if w.implementsLockContract(varName, methodName, oppositeMethods) {
 		return true
 	}
 
 	if w.isKeyedLocalWrapperPair(varName, methodName, oppositeMethods) {
-		return true
-	}
-
-	if methodName == "RLock" && w.isOneWayReadLatch(varName) {
-		return true
-	}
-
-	if (methodName == "Lock" || methodName == "Unlock") && w.isOneWayWriteBarrier(varName, methodName) {
 		return true
 	}
 
@@ -79,14 +77,20 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return true
 	}
 
-	if _, fieldSuffix, ok := splitBaseAndSuffix(varName); ok &&
-		methodNameLooksLikeWrapper(w.function.Name.Name, methodName) &&
-		w.anySiblingMethodContainsFieldSuffix(fieldSuffix, w.function.Name.Name, oppositeMethods, oppositeMethods) {
+	if w.isMirrorPairHalf(varName, methodName, oppositeMethods) {
 		return true
 	}
 
+	if w.isReadGateAcquire(varName, methodName) {
+		return true
+	}
+
+	// suffix is the mutex's path below the receiver, or "" when the receiver
+	// embeds the mutex and the method calls the promoted Lock/Unlock:
+	// `func (s *S) lock() { s.Lock() }` pairs with `func (s *S) unlock() {
+	// s.Unlock() }` just like the field form does.
 	suffix, ok := strings.CutPrefix(varName, currentReceiver)
-	if !ok || !strings.HasPrefix(suffix, ".") {
+	if !ok || (suffix != "" && !strings.HasPrefix(suffix, ".")) {
 		return false
 	}
 
@@ -108,11 +112,7 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return false
 	}
 
-	if !methodNameLooksLikeWrapper(w.function.Name.Name, methodName) {
-		return false
-	}
-
-	return w.anySiblingMethodContainsFieldCall(suffix, w.function.Name.Name, oppositeMethods, oppositeMethods)
+	return false
 }
 
 // isKeyedLocalWrapperPair recognizes keyed-lock APIs whose public Lock/Unlock
@@ -122,55 +122,61 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 //	func (r *registry) LockID(id any)   { m, _ := r.items[id]; m.Lock() }
 //	func (r *registry) UnlockID(id any) { m, _ := r.items[id]; m.Unlock() }
 //
-// The exact counterpart method name, local name, indexed source and opposite
-// operation must all match. Those gates keep an unrelated local mutex in a
-// vaguely lock-named sibling from suppressing a real leak.
+// The lock is a local, so it has no path a sibling could name; what ties the
+// two halves together is the collection they both take it out of. A sibling
+// that reaches into the same collection and performs the opposite operation is
+// the other half, whatever either method is called.
 func (w *wrapperResolver) isKeyedLocalWrapperPair(varName, methodName string, oppositeMethods []string) bool {
 	if strings.Contains(varName, ".") {
 		return false
 	}
-	counterpartName, ok := keyedWrapperCounterpartName(w.function.Name.Name, methodName)
-	if !ok {
-		return false
-	}
-	receiverType := common.ReceiverTypeName(w.function)
-	sibling := w.receiverMethods[receiverType][counterpartName]
-	if sibling == nil || sibling.Body == nil {
-		return false
-	}
 
 	source := localIndexedSource(w.function.Body, varName)
-	if source == "" || localIndexedSource(sibling.Body, varName) != source {
+	if source == "" {
 		return false
 	}
-	return functionBodyContainsFieldCall(sibling.Body, varName, oppositeMethods)
+
+	receiverType := common.ReceiverTypeName(w.function)
+	for name, sibling := range w.receiverMethods[receiverType] {
+		if name == w.function.Name.Name || sibling == nil || sibling.Body == nil {
+			continue
+		}
+		if bodyOperatesOnIndexedLock(sibling.Body, source, oppositeMethods) {
+			return true
+		}
+	}
+
+	return false
 }
 
-func keyedWrapperCounterpartName(functionName, methodName string) (string, bool) {
-	switch methodName {
-	case "Lock":
-		if strings.Contains(functionName, "Unlock") || !strings.Contains(functionName, "Lock") {
-			return "", false
+// bodyOperatesOnIndexedLock reports whether body takes a lock out of the
+// collection named by source and performs one of methods on it.
+func bodyOperatesOnIndexedLock(body *ast.BlockStmt, source string, methods []string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
 		}
-		return strings.Replace(functionName, "Lock", "Unlock", 1), true
-	case "Unlock":
-		if !strings.Contains(functionName, "Unlock") {
-			return "", false
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
 		}
-		return strings.Replace(functionName, "Unlock", "Lock", 1), true
-	case "RLock":
-		if strings.Contains(functionName, "RUnlock") || !strings.Contains(functionName, "RLock") {
-			return "", false
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !containsMethod(methods, sel.Sel.Name) {
+			return true
 		}
-		return strings.Replace(functionName, "RLock", "RUnlock", 1), true
-	case "RUnlock":
-		if !strings.Contains(functionName, "RUnlock") {
-			return "", false
+		local := common.GetVarName(sel.X)
+		if local == "" || strings.Contains(local, ".") {
+			return true
 		}
-		return strings.Replace(functionName, "RUnlock", "RLock", 1), true
-	default:
-		return "", false
-	}
+		if localIndexedSource(body, local) == source {
+			found = true
+			return false
+		}
+		return true
+	})
+
+	return found
 }
 
 func localIndexedSource(body *ast.BlockStmt, localName string) string {
@@ -208,76 +214,6 @@ func localIndexedSource(body *ast.BlockStmt, localName string) string {
 		return true
 	})
 	return found
-}
-
-// isOneWayReadLatch recognizes a read lock used as a one-way "start gate": a
-// waiter/worker method RLocks and intentionally never RUnlocks because the read
-// lock is released elsewhere (e.g. a Broadcast/Release method on the same type
-// unlocks the field). This is a name-hint heuristic and only fires when BOTH the
-// current method's name looks like a waiter AND a sibling method that actually
-// releases the same field exists. The sibling requirement is the safety net:
-// a genuinely leaked latch with no releasing sibling is still reported (see
-// lonelyOneWayLatch in testdata). Trade-off: the hints are broad, so this favors
-// fewer false positives at the cost of an occasional false negative.
-func (w *wrapperResolver) isOneWayReadLatch(varName string) bool {
-	baseVar, fieldSuffix, ok := splitBaseAndSuffix(varName)
-	if !ok {
-		return false
-	}
-	if !methodNameMatchesAnyHint(w.function.Name.Name, []string{"Wait", "Loop", "Worker", "Barrier", "Gate", "Latch"}) {
-		return false
-	}
-	if functionBodyContainsFieldCall(w.function.Body, varName, []string{"RUnlock"}) {
-		return false
-	}
-	if w.anySiblingMethodContainsFieldSuffix(fieldSuffix, w.function.Name.Name, []string{"Unlock"}, []string{"Unlock", "Release", "Broadcast", "Run"}) {
-		return true
-	}
-	if receiverType := w.typeNameForBaseVar(baseVar); receiverType != "" {
-		return w.anyMethodOnTypeContainsFieldSuffix(receiverType, "", fieldSuffix, []string{"Unlock"}, []string{"Unlock", "Release", "Broadcast", "Run"})
-	}
-	return false
-}
-
-// isOneWayWriteBarrier recognizes a write Lock/Unlock split across sibling
-// methods as a deliberate cross-method barrier: e.g. Start/Open Locks and
-// Stop/Close/Release Unlocks the same field. Like isOneWayReadLatch it is a
-// name-hint heuristic guarded by the requirement that a sibling method really
-// performs the opposite operation on the field, so an unmatched Lock with no
-// releasing sibling is still reported. Trade-off: the hints (Start/Open/Run/
-// Stop...) are broad, trading a possible false negative for fewer false
-// positives on legitimate barrier pairs.
-func (w *wrapperResolver) isOneWayWriteBarrier(varName, methodName string) bool {
-	baseVar, fieldSuffix, ok := splitBaseAndSuffix(varName)
-	if !ok {
-		return false
-	}
-
-	var currentHints, siblingHints, siblingMethods []string
-	switch methodName {
-	case "Lock":
-		currentHints = []string{"Create", "Start", "Prepare", "Open"}
-		siblingHints = []string{"Unlock", "Release", "Broadcast", "Run", "Close", "Stop"}
-		siblingMethods = []string{"Unlock"}
-	case "Unlock":
-		currentHints = []string{"Unlock", "Release", "Broadcast", "Run", "Close", "Stop"}
-		siblingHints = []string{"Create", "Start", "Prepare", "Open"}
-		siblingMethods = []string{"Lock"}
-	default:
-		return false
-	}
-
-	if !methodNameMatchesAnyHint(w.function.Name.Name, currentHints) {
-		return false
-	}
-
-	if w.anySiblingMethodContainsFieldSuffix(fieldSuffix, w.function.Name.Name, siblingMethods, siblingHints) {
-		return true
-	}
-	if receiverType := w.typeNameForBaseVar(baseVar); receiverType != "" {
-		return w.anyMethodOnTypeContainsFieldSuffix(receiverType, w.function.Name.Name, fieldSuffix, siblingMethods, siblingHints)
-	}
-	return false
 }
 
 // isReadLockerAdapterOp reports whether the inner mutex call is the read-side
@@ -330,68 +266,6 @@ func (w *wrapperResolver) siblingMethodContainsFieldCall(fieldSuffix string, sib
 	return false
 }
 
-func (w *wrapperResolver) anySiblingMethodContainsFieldCall(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
-	receiverType := common.ReceiverTypeName(w.function)
-	if receiverType == "" {
-		return false
-	}
-
-	methods := w.receiverMethods[receiverType]
-	if len(methods) == 0 {
-		return false
-	}
-
-	for methodName, fn := range methods {
-		if methodName == excludeMethod || fn == nil || fn.Body == nil {
-			continue
-		}
-		if !methodNameMatchesAnyHint(methodName, nameHints) {
-			continue
-		}
-
-		siblingReceiver := common.ReceiverName(fn)
-		if siblingReceiver == "" {
-			continue
-		}
-
-		targetVar := siblingReceiver + fieldSuffix
-		if functionBodyContainsFieldCall(fn.Body, targetVar, fieldMethods) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (w *wrapperResolver) anySiblingMethodContainsFieldSuffix(fieldSuffix, excludeMethod string, fieldMethods, nameHints []string) bool {
-	receiverType := common.ReceiverTypeName(w.function)
-	if receiverType == "" {
-		return false
-	}
-	return w.anyMethodOnTypeContainsFieldSuffix(receiverType, excludeMethod, fieldSuffix, fieldMethods, nameHints)
-}
-
-func (w *wrapperResolver) anyMethodOnTypeContainsFieldSuffix(receiverType, excludeMethod, fieldSuffix string, fieldMethods, nameHints []string) bool {
-	methods := w.receiverMethods[receiverType]
-	if len(methods) == 0 {
-		return false
-	}
-
-	for methodName, fn := range methods {
-		if methodName == excludeMethod || fn == nil || fn.Body == nil {
-			continue
-		}
-		if !methodNameMatchesAnyHint(methodName, nameHints) {
-			continue
-		}
-		if functionBodyContainsFieldSuffixCall(fn.Body, fieldSuffix, fieldMethods) {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (w *wrapperResolver) typeNameForBaseVar(baseVar string) string {
 	if baseVar == "" {
 		return ""
@@ -416,10 +290,6 @@ func (w *wrapperResolver) typeNameForBaseVar(baseVar string) string {
 		return found == ""
 	})
 	return found
-}
-
-func methodNameLooksLikeWrapper(fnName, syncMethod string) bool {
-	return methodNameMatchesAnyHint(fnName, []string{syncMethod})
 }
 
 // isBarrierPairHalf reports whether the current method consists of exactly one
@@ -483,62 +353,52 @@ func bodyIsSingleFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string, method
 	return ok && suffix == fieldSuffix
 }
 
-func functionBodyContainsFieldSuffixCall(body *ast.BlockStmt, fieldSuffix string, methodNames []string) bool {
-	if body == nil || fieldSuffix == "" {
+// implementsLockContract reports whether the enclosing method is its receiver
+// type's own implementation of a sync lock operation — the Lock of a
+// sync.Locker, the RUnlock of an RWMutex-shaped type — so the inner call may
+// leave the lock in the state that contract promises. The canonical shape is a
+// mutex wrapped to measure or order acquisition:
+//
+//	func (s *sortableMutex) Lock() {
+//		start := time.Now()
+//		s.Mutex.Lock()          // held on return: that is what Lock means
+//		s.acquireDuration += time.Since(start)
+//	}
+//
+// This reads the interface, not the spelling. The method's name must be a sync
+// lock operation exactly, and the receiver type must expose the opposite
+// operation — declared beside it, or promoted from an embedded mutex as above.
+// A lone Lock with nothing on the type to release it is not a contract and is
+// still reported, which is the safety net that keeps a method merely called
+// `Lock` from silencing itself.
+//
+// The inner call must sit on the same side as the method implementing it: an
+// acquire inside an acquire, a release inside a release. An acquire left held
+// by an Unlock implementation is not the contract and stays reported.
+func (w *wrapperResolver) implementsLockContract(varName, methodName string, oppositeMethods []string) bool {
+	fnName := w.function.Name.Name
+	if !sameLockSide(fnName, methodName) {
 		return false
 	}
 
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	receiverType := w.receiverType()
+	if receiverType == nil {
+		return false
+	}
+
+	declared := w.receiverMethods[common.ReceiverTypeName(w.function)]
+	for _, opposite := range oppositeMutexMethods(fnName) {
+		if !common.HasNiladicMethod(receiverType, opposite) {
+			continue
 		}
 
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !containsMethod(methodNames, sel.Sel.Name) {
-			return true
-		}
-
-		_, suffix, ok := splitBaseAndSuffix(common.GetVarName(sel.X))
-		if ok && suffix == fieldSuffix {
-			found = true
-			return false
-		}
-
-		return true
-	})
-
-	return found
-}
-
-// isEmbeddedMutexDelegation reports calls delegated to an embedded mutex.
-func (w *wrapperResolver) isEmbeddedMutexDelegation(varName, methodName string, oppositeMethods []string) bool {
-	if w.typesInfo == nil || w.function == nil || w.function.Name == nil {
-		return false
-	}
-
-	baseVar, fieldName, ok := splitBaseAndSuffix(varName)
-	if !ok || baseVar != common.ReceiverName(w.function) {
-		return false
-	}
-	// Only direct fields are promoted onto the receiver.
-	if fieldName == "" || strings.Contains(fieldName, ".") {
-		return false
-	}
-
-	if !methodNameLooksLikeWrapper(w.function.Name.Name, methodName) {
-		return false
-	}
-
-	fieldType := w.embeddedFieldType(fieldName)
-	if fieldType == nil {
-		return false
-	}
-
-	for _, opposite := range oppositeMethods {
-		obj, _, _ := types.LookupFieldOrMethod(fieldType, true, nil, opposite)
-		if _, isMethod := obj.(*types.Func); isMethod {
+		// The counterpart must really perform the opposite operation: a wrapper
+		// whose Unlock forgets the inner mutex leaks exactly like an inline
+		// one, and is still reported. A counterpart promoted from an embedded
+		// mutex has no body here to check, and is answered by isMirrorPairHalf
+		// instead.
+		sibling := declared[opposite]
+		if sibling != nil && w.siblingPerformsOpposite(sibling, varName, oppositeMethods) {
 			return true
 		}
 	}
@@ -546,9 +406,30 @@ func (w *wrapperResolver) isEmbeddedMutexDelegation(varName, methodName string, 
 	return false
 }
 
-// embeddedFieldType returns a directly embedded receiver field's type.
-func (w *wrapperResolver) embeddedFieldType(fieldName string) types.Type {
-	if w.function.Recv == nil || len(w.function.Recv.List) == 0 {
+// siblingPerformsOpposite reports whether sibling performs one of oppositeOps
+// on the lock the current call names. The lock is matched by path when it is
+// rooted at the receiver (`im.realLock` in Lock pairs with `im.realLock` in
+// Unlock, whatever either receiver is called); a lock reached some other way —
+// an element of a collection the method walks, say — is matched by operation
+// alone, since the path cannot be spelled the same way twice.
+func (w *wrapperResolver) siblingPerformsOpposite(sibling *ast.FuncDecl, varName string, oppositeOps []string) bool {
+	if sibling.Body == nil {
+		return false
+	}
+
+	siblingReceiver := common.ReceiverName(sibling)
+	base, suffix, ok := splitBaseAndSuffix(varName)
+	if ok && siblingReceiver != "" && base == common.ReceiverName(w.function) {
+		return functionBodyContainsFieldCall(sibling.Body, siblingReceiver+"."+suffix, oppositeOps)
+	}
+
+	return bodyContainsAnyMethodCall(sibling.Body, oppositeOps)
+}
+
+// receiverType returns the current method's receiver type with the pointer
+// peeled off, or nil when the function is not a method.
+func (w *wrapperResolver) receiverType() types.Type {
+	if w.typesInfo == nil || w.function == nil || w.function.Recv == nil || len(w.function.Recv.List) == 0 {
 		return nil
 	}
 
@@ -560,20 +441,5 @@ func (w *wrapperResolver) embeddedFieldType(fieldName string) types.Type {
 		recvType = ptr.Elem()
 	}
 
-	named, ok := types.Unalias(recvType).(*types.Named)
-	if !ok {
-		return nil
-	}
-	structType, ok := named.Underlying().(*types.Struct)
-	if !ok {
-		return nil
-	}
-
-	for field := range structType.Fields() {
-		if field.Embedded() && field.Name() == fieldName {
-			return field.Type()
-		}
-	}
-
-	return nil
+	return types.Unalias(recvType)
 }

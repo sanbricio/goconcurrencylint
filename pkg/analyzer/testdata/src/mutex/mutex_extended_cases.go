@@ -984,11 +984,14 @@ func releaseShardLock(shard *helperReleasedShard) {
 	shard.mu.Unlock()
 }
 
-// Asynchronous release: `go h.releaseHelper()` runs the Unlock in a separate
-// goroutine that may not have started by the time the function returns, so
-// the caller exits while the lock is still held. Flag as locked-but-not-unlocked.
-func (h *HelperUnlockedState) BadHelperReleasesCallerLockAsync() {
-	h.mu.Lock() // want "mutex 'h.mu' is locked but not unlocked"
+// Asynchronous release: `go h.releaseHelper()` hands the held lock to a
+// goroutine whose only job is to give it back. The helper never takes the lock
+// itself, so it would panic if the caller were not holding one — the transfer
+// is the whole point of the call, and the lock does get released. This is the
+// same shape as grpc's `go ac.resetTransportAndUnlock()`; nothing in the code
+// tells the two apart, so both are accepted rather than deciding by the name.
+func (h *HelperUnlockedState) GoodHelperHandsLockToReleasingGoroutine() {
+	h.mu.Lock()
 	go h.releaseHelper()
 }
 
@@ -1050,11 +1053,9 @@ func (h *HelperRUnlockedState) GoodHelperReleasesCallerRLockSync() {
 	h.releaseReadHelper()
 }
 
-// Asynchronous release: `go h.releaseReadHelper()` runs the RUnlock in a
-// separate goroutine that may not have started by the time the function
-// returns, so the caller exits while the read lock is still held.
-func (h *HelperRUnlockedState) BadHelperReleasesCallerRLockAsync() {
-	h.mu.RLock() // want "rwmutex 'h.mu' is rlocked but not runlocked"
+// The read half of the same transfer.
+func (h *HelperRUnlockedState) GoodHelperHandsRLockToReleasingGoroutine() {
+	h.mu.RLock()
 	go h.releaseReadHelper()
 }
 
@@ -2051,8 +2052,8 @@ type connLike struct {
 	state int
 }
 
-// The method's name declares the contract ("...AndUnlock") and its body
-// honours it, so `go ac.resetAndUnlock()` hands the held lock to the goroutine.
+// The method gives the lock back and never takes it, so `go ac.resetAndUnlock()`
+// hands the held lock to the goroutine.
 func (ac *connLike) resetAndUnlock() {
 	ac.state = 1
 	ac.mu.Unlock()
@@ -2072,8 +2073,8 @@ type connLikeLiar struct {
 	state int
 }
 
-// A method whose name promises the unlock but whose body never performs it
-// does not release anything: the parent's lock is still leaked.
+// A method that never performs the unlock releases nothing, whatever it is
+// called: the parent's lock is still leaked.
 func (ac *connLikeLiar) resetAndUnlock() {
 	ac.state = 1
 }

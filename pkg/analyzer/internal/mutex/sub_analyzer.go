@@ -1,6 +1,7 @@
 package mutex
 
 import (
+	"go/ast"
 	"reflect"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/commentfilter"
@@ -31,13 +32,19 @@ func run(pass *analysis.Pass) (any, error) {
 	// function. driver.Run visits functions sequentially, so the lazy init needs
 	// no synchronization.
 	var scope *packageScope
+	packageScopeFor := func(pass *analysis.Pass) *packageScope {
+		if scope == nil {
+			scope = newPackageScope(pass.Files)
+		}
+		return scope
+	}
 	return driver.Run(pass, driver.Config[*Checker]{
 		Guard: primitives.HasMutexes,
+		Extend: func(fn *ast.FuncDecl, fr *primitives.FunctionResult, pass *analysis.Pass) *primitives.FunctionResult {
+			return packageScopeFor(pass).withHandedOverLocks(fn, fr, pass)
+		},
 		NewChecker: func(fr *primitives.FunctionResult, ec report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Checker {
-			if scope == nil {
-				scope = newPackageScope(pass.Files)
-			}
-			return NewChecker(fr, ec, cf, pass.TypesInfo, scope)
+			return NewChecker(fr, ec, cf, pass.TypesInfo, packageScopeFor(pass))
 		},
 	})
 }

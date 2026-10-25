@@ -50,3 +50,35 @@ func mutexMethodGroup(method string) []string {
 	}
 	return nil
 }
+
+// lockSide separates the acquiring half of a lock protocol from the releasing
+// half, regardless of which pattern (write or read) the method belongs to.
+type lockSide uint8
+
+const (
+	unknownLockSide lockSide = iota
+	acquireLockSide
+	releaseLockSide
+)
+
+// lockMethodSide classifies a sync lock method as an acquire or a release.
+func lockMethodSide(method string) lockSide {
+	for _, p := range patterns {
+		if slices.Contains(p.LockMethods, method) {
+			return acquireLockSide
+		}
+		if slices.Contains(p.UnlockMethods, method) {
+			return releaseLockSide
+		}
+	}
+	return unknownLockSide
+}
+
+// sameLockSide reports whether two sync lock methods both acquire or both
+// release. The read and write halves share a side on purpose: a `Lock`
+// implemented over an inner `RLock` is the sync.RWMutex.RLocker adapter, and
+// both operations acquire.
+func sameLockSide(a, b string) bool {
+	side := lockMethodSide(a)
+	return side != unknownLockSide && side == lockMethodSide(b)
+}
