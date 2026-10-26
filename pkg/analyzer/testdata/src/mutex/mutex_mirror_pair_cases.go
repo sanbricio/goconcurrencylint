@@ -1,6 +1,9 @@
 package mutex
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 func recordEvent(string) {}
 
@@ -310,4 +313,79 @@ func (f *flakyGate) openUp() {
 
 func (f *flakyGate) awaitIt() {
 	f.gate.RLock() // want "rwmutex 'f.gate' is rlocked but not runlocked"
+}
+
+// ===== a lock made reentrant by an owner record =====
+
+// ownedSchema takes the lock once per owner: a second take by the same owner
+// finds itself recorded and leaves the lock alone, and only the recorded owner
+// gives it back. The lock is held exactly while the record is set.
+type ownedSchema struct {
+	mu    sync.Mutex
+	owner atomic.Int64
+	ver   int
+}
+
+func (o *ownedSchema) lockFor(id int64) error {
+	current := o.owner.Load()
+	if current != id {
+		o.mu.Lock()
+		o.owner.Store(id)
+	}
+	return nil
+}
+
+func (o *ownedSchema) unlockFor(id int64) {
+	if o.owner.Load() == id {
+		o.owner.Store(0)
+		o.mu.Unlock()
+	}
+}
+
+func (o *ownedSchema) Step(id int64) {
+	if err := o.lockFor(id); err != nil {
+		return
+	}
+	defer o.unlockFor(id)
+	o.ver++
+}
+
+// forgetfulOwner never clears its record, so its release is no counterpart:
+// a second release by the same owner would give back a lock nobody holds.
+type forgetfulOwner struct {
+	mu    sync.Mutex
+	owner atomic.Int64
+}
+
+func (f *forgetfulOwner) lockFor(id int64) {
+	if f.owner.Load() != id {
+		f.mu.Lock() // want "mutex 'f.mu' is locked but not unlocked in if"
+		f.owner.Store(id)
+	}
+}
+
+func (f *forgetfulOwner) unlockFor(id int64) {
+	if f.owner.Load() == id {
+		f.mu.Unlock() // want "mutex 'f.mu' is unlocked but not locked"
+	}
+}
+
+// silentOwner takes the lock without recording itself, so its guard decides
+// nothing about who holds the lock.
+type silentOwner struct {
+	mu    sync.Mutex
+	owner atomic.Int64
+}
+
+func (s *silentOwner) lockFor(id int64) {
+	if s.owner.Load() != id {
+		s.mu.Lock() // want "mutex 's.mu' is locked but not unlocked in if"
+	}
+}
+
+func (s *silentOwner) unlockFor(id int64) {
+	if s.owner.Load() == id {
+		s.owner.Store(0)
+		s.mu.Unlock() // want "mutex 's.mu' is unlocked but not locked"
+	}
 }

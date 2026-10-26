@@ -261,6 +261,7 @@ func f() {
 	}
 }`)
 	balance.estimateForIterations = func(*ast.ForStmt) int { return 3 }
+	balance.estimateForIterationsKnown = func(*ast.ForStmt) (int, bool) { return 3, true }
 	stats := map[string]*Stats{
 		"wg": {
 			addCalls: []addCall{{pos: methodCallPos(fn, "wg", "Add", 0), value: 1, known: true}},

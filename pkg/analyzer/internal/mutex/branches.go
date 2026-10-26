@@ -12,8 +12,21 @@ import (
 func (c *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
 	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt, stmt.Body)
 	c.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
+	c.forgetFactsAssignedIn(stmt)
 	rangeStats := c.analyzeBlock(stmt.Body, stats)
+	c.leaveLoop(stmt)
 	copyStatsMap(stats, rangeStats)
+}
+
+// leaveLoop restores, in a refined run, what holds once a loop is done: the
+// body ran any number of times, so neither its assignments nor a branch that
+// ended an iteration say anything about the code after it.
+func (c *Checker) leaveLoop(loop ast.Node) {
+	if c.refine == nil {
+		return
+	}
+	c.forgetFactsAssignedIn(loop)
+	c.pathEnded = false
 }
 
 // branchClause is one arm of a switch, type switch or select statement.
@@ -92,9 +105,34 @@ func (c *Checker) analyzeBranchClauses(clauses []branchClause, exhaustive bool, 
 
 	branchStats := make([]map[string]*Stats, len(clauses))
 	terminates := make([]bool, len(clauses))
+	refined := c.refine != nil
+	entryFacts := c.facts
+	var mergedFacts factSet
 	for i, clause := range clauses {
+		if refined {
+			c.facts = entryFacts.clone()
+			c.pathEnded = false
+		}
 		branchStats[i] = c.analyzeStatements(clause.body, stats)
 		terminates[i] = c.termination.blockAlwaysTerminates(&ast.BlockStmt{List: clause.body})
+		if refined && !terminates[i] && !c.pathEnded {
+			if mergedFacts == nil {
+				mergedFacts = c.facts
+			} else {
+				mergedFacts = intersectFacts(mergedFacts, c.facts)
+			}
+		}
+	}
+	if refined {
+		c.pathEnded = false
+		switch {
+		case mergedFacts == nil:
+			c.facts = entryFacts
+		case exhaustive:
+			c.facts = mergedFacts
+		default:
+			c.facts = intersectFacts(mergedFacts, entryFacts)
+		}
 	}
 
 	if exhaustive {
@@ -161,6 +199,14 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 		c.analyzeStatement(stmt.Init, stats)
 	}
 
+	if c.refine != nil {
+		if c.analyzeDecidedIf(stmt, stats) {
+			return
+		}
+		c.analyzeRefinedIf(stmt, stats)
+		return
+	}
+
 	if condValue, ok := common.ConstantBoolValue(stmt.Cond, c.typesInfo); ok {
 		if condValue {
 			thenStats := c.analyzeBlock(stmt.Body, stats)
@@ -180,10 +226,15 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 	handedOver := c.applyPendingAcquisitions(stmt, thenBase, elseBase)
 	thenStats := c.analyzeBlock(stmt.Body, thenBase)
 	thenTerminates := c.termination.blockAlwaysTerminates(stmt.Body)
+	c.mergeIfBranches(stmt, stats, thenStats, elseBase, handedOver, thenTerminates)
+}
 
+// mergeIfBranches joins the states the branches of stmt leave: thenStats from
+// the body, elseBase the state the else branch (when there is one) starts from.
+func (c *Checker) mergeIfBranches(stmt *ast.IfStmt, stats, thenStats, elseBase map[string]*Stats, handedOver, thenTerminates bool) {
 	if stmt.Else != nil {
 		elseStats := c.analyzeElseBranch(stmt.Else, elseBase)
-		elseTerminates := c.termination.elseAlwaysTerminates(stmt.Else)
+		elseTerminates := c.termination.elseAlwaysTerminates(stmt.Else) || c.branchEnded()
 
 		if c.canMergeBranchStates(thenStats, elseStats) {
 			copyStatsMap(stats, thenStats)
@@ -216,6 +267,7 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 			return
 		}
 
+		c.recordDisagreement(stmt)
 		c.reportUnmatchedLocksInBranch(stats, thenStats, "if")
 		c.reportUnmatchedLocksInBranch(stats, elseStats, "else")
 		return
@@ -248,7 +300,80 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 		return
 	}
 
+	c.recordDisagreement(stmt)
 	c.reportUnmatchedLocksInBranch(stats, thenStats, "if")
+}
+
+// analyzeDecidedIf follows, in a refined run, the one branch of stmt that runs
+// when the run knows how its condition evaluates (see evalCondition), or has
+// fixed it (see refine.go). It reports whether it did.
+func (c *Checker) analyzeDecidedIf(stmt *ast.IfStmt, stats map[string]*Stats) bool {
+	value, ok := c.refine.ifs[stmt]
+	if !ok {
+		value, ok = c.evalCondition(stmt.Cond, stats)
+	}
+	if !ok {
+		return false
+	}
+
+	thenBase, elseBase := c.branchInitialStatsForCondition(stmt.Cond, stats)
+	c.applyHandoffErrorGuard(stmt, thenBase, elseBase)
+	c.applyPendingAcquisitions(stmt, thenBase, elseBase)
+	c.assumeCondition(stmt.Cond, value)
+	switch {
+	case value:
+		c.noteBranchTaken(stmt.Body)
+		copyStatsMap(stats, c.analyzeBlock(stmt.Body, thenBase))
+	case stmt.Else != nil:
+		c.noteBranchTaken(stmt.Else)
+		copyStatsMap(stats, c.analyzeElseBranch(stmt.Else, elseBase))
+	default:
+		copyStatsMap(stats, elseBase)
+	}
+	return true
+}
+
+// analyzeRefinedIf is analyzeIfStatement's two-branch path in a refined run:
+// each branch starts from what its condition tells about local variables, a
+// branch that ends the path (see pathEnded) is left out of the merge like one
+// that always terminates, and the facts after the statement are those of the
+// branches that reach it.
+func (c *Checker) analyzeRefinedIf(stmt *ast.IfStmt, stats map[string]*Stats) {
+	entry := c.facts.clone()
+
+	thenBase, elseBase := c.branchInitialStatsForCondition(stmt.Cond, stats)
+	c.applyHandoffErrorGuard(stmt, thenBase, elseBase)
+	handedOver := c.applyPendingAcquisitions(stmt, thenBase, elseBase)
+
+	c.facts = entry.clone()
+	c.assumeCondition(stmt.Cond, true)
+	c.pathEnded = false
+	thenStats := c.analyzeBlock(stmt.Body, thenBase)
+	thenEnded := c.termination.blockAlwaysTerminates(stmt.Body) || c.pathEnded
+	thenFacts := c.facts
+
+	c.facts = entry.clone()
+	c.assumeCondition(stmt.Cond, false)
+	c.pathEnded = false
+	c.mergeIfBranches(stmt, stats, thenStats, elseBase, handedOver, thenEnded)
+	elseEnded := stmt.Else != nil && (c.termination.elseAlwaysTerminates(stmt.Else) || c.pathEnded)
+	elseFacts := c.facts
+
+	c.pathEnded = thenEnded && elseEnded
+	switch {
+	case thenEnded && !elseEnded:
+		c.facts = elseFacts
+	case elseEnded && !thenEnded:
+		c.facts = thenFacts
+	default:
+		c.facts = intersectFacts(thenFacts, elseFacts)
+	}
+}
+
+// branchEnded reports, in a refined run, whether the branch just analyzed
+// ended the path; the main analysis only knows what the syntax says.
+func (c *Checker) branchEnded() bool {
+	return c.refine != nil && c.pathEnded
 }
 
 // tryLockConditionTarget returns the tracked mutex a bare TryLock/TryRLock
@@ -451,7 +576,13 @@ func (c *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats) 
 
 		crossReleases := cg.collectReleases(fnLit.Body, stats)
 		goInitial := emptyStatsLike(stats)
+		savedFacts, savedEnded := c.facts, c.pathEnded
+		if c.refine != nil {
+			c.facts = c.facts.clone()
+			c.pathEnded = false
+		}
 		goStats := c.analyzeBlock(fnLit.Body, goInitial)
+		c.facts, c.pathEnded = savedFacts, savedEnded
 		cg.suppressBorrowedReleases(goStats, crossReleases)
 		c.reportUnmatchedLocksInBranch(goInitial, goStats, "goroutine")
 		cg.applyReleases(stats, crossReleases)
@@ -547,11 +678,43 @@ func (c *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stats
 
 	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt, stmt.Body)
 	c.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
+	if c.analyzeLockingLoopCondition(stmt, stats) {
+		return
+	}
+	c.forgetFactsAssignedIn(stmt)
+	if stmt.Cond != nil {
+		c.assumeCondition(stmt.Cond, true)
+	}
 	forStats := c.analyzeBlock(stmt.Body, stats)
+	c.leaveLoop(stmt)
 	c.loopCarry.applyLoopExitLocks(stmt, stats, forStats)
 	if stmt.Cond == nil && c.termination.blockContainsReturn(stmt.Body) && !c.termination.blockContainsBreak(stmt.Body) {
 		clearStats(stats)
 		return
 	}
 	copyStatsMap(stats, forStats)
+}
+
+// analyzeLockingLoopCondition handles, in a refined run, a loop whose condition
+// takes the lock: `for mu.TryRLock() { mu.RUnlock(); ... }` enters its body
+// holding the lock and leaves when the condition fails, holding nothing new.
+// An iteration that gives the lock back before the next test is balanced, and
+// the loop then leaves the state as the failed condition does. Any other body
+// is left to the general loop handling.
+func (c *Checker) analyzeLockingLoopCondition(stmt *ast.ForStmt, stats map[string]*Stats) bool {
+	if c.refine == nil || stmt.Cond == nil || !c.conditionAcquiresLock(stmt.Cond) {
+		return false
+	}
+	entryFacts := c.facts.clone()
+	c.forgetFactsAssignedIn(stmt)
+	thenBase, elseBase := c.branchInitialStatsForCondition(stmt.Cond, stats)
+	bodyStats := c.analyzeBlock(stmt.Body, thenBase)
+	if !c.canMergeBranchStates(bodyStats, stats) {
+		c.facts = entryFacts
+		c.pathEnded = false
+		return false
+	}
+	c.leaveLoop(stmt)
+	copyStatsMap(stats, elseBase)
+	return true
 }

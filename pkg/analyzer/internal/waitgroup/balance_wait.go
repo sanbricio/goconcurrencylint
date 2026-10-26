@@ -14,7 +14,7 @@ import (
 func (b *balanceValidator) checkWaitWithoutAdd(stats map[string]*Stats) {
 	for wgName, st := range stats {
 		if !b.localWaitGroupNames[wgName] || strings.Contains(wgName, ".") ||
-			len(st.addCalls) > 0 || len(st.goCalls) > 0 || b.waitGroupInitializedFromAnother(wgName) {
+			len(st.addCalls) > 0 || len(st.goCalls) > 0 || !b.waitGroupStartsAtZero(wgName) {
 			continue
 		}
 		for _, waitPos := range st.waitCalls {
@@ -198,61 +198,90 @@ func (b *balanceValidator) receiverObject(expr ast.Expr) types.Object {
 	return nil
 }
 
-func (b *balanceValidator) waitGroupInitializedFromAnother(wgName string) bool {
-	found := false
+// waitGroupStartsAtZero reports whether every assignment that gives the local
+// name wgName a group gives it a fresh one: `var wg sync.WaitGroup`,
+// `sync.WaitGroup{}`, `&sync.WaitGroup{}` or `new(sync.WaitGroup)`. Only such a
+// group has a counter this function can account for; one that comes out of a
+// call (alone or among other results), a map, a field or another group carries
+// whatever its producer left on it.
+func (b *balanceValidator) waitGroupStartsAtZero(wgName string) bool {
+	defined, fresh := false, true
+	record := func(expr ast.Expr) {
+		defined = true
+		if !b.isFreshWaitGroupExpr(expr) {
+			fresh = false
+		}
+	}
 	ast.Inspect(b.function.Body, func(n ast.Node) bool {
-		if found {
+		if !fresh {
 			return false
 		}
 		switch node := n.(type) {
 		case *ast.AssignStmt:
 			for i, lhs := range node.Lhs {
 				ident, ok := lhs.(*ast.Ident)
-				if !ok || ident.Name != wgName || i >= len(node.Rhs) {
+				if !ok || ident.Name != wgName {
 					continue
 				}
-				if b.isWaitGroupAliasedOrCopiedExpr(node.Rhs[i]) {
-					found = true
-					return false
+				if len(node.Lhs) != len(node.Rhs) {
+					record(nil)
+					continue
 				}
+				record(node.Rhs[i])
 			}
 		case *ast.ValueSpec:
 			for i, name := range node.Names {
-				if name.Name != wgName || i >= len(node.Values) {
+				if name.Name != wgName {
 					continue
 				}
-				if b.isWaitGroupAliasedOrCopiedExpr(node.Values[i]) {
-					found = true
-					return false
+				switch {
+				case len(node.Values) == 0:
+					// The zero value of the group itself; a nil pointer is no group.
+					defined = true
+					if obj := b.typesInfo.ObjectOf(name); obj == nil || !isWaitGroupValueType(obj.Type()) {
+						fresh = false
+					}
+				case len(node.Values) != len(node.Names):
+					record(nil)
+				default:
+					record(node.Values[i])
 				}
 			}
 		}
 		return true
 	})
-	return found
+	return defined && fresh
 }
 
-// isWaitGroupAliasedOrCopiedExpr reports whether expr initializes a local
-// WaitGroup handle from another WaitGroup, either by value or by address.
-func (b *balanceValidator) isWaitGroupAliasedOrCopiedExpr(expr ast.Expr) bool {
-	if expr == nil {
-		return false
-	}
-	switch e := expr.(type) {
+// isFreshWaitGroupExpr reports whether expr builds a new, zero group.
+func (b *balanceValidator) isFreshWaitGroupExpr(expr ast.Expr) bool {
+	switch e := common.UnwrapParenExpr(expr).(type) {
 	case *ast.CompositeLit:
-		return false
+		return isWaitGroupValueType(b.typesInfo.TypeOf(e))
 	case *ast.UnaryExpr:
-		if e.Op == token.AND {
-			return b.isWaitGroupFieldExpr(e.X)
+		lit, ok := common.UnwrapParenExpr(e.X).(*ast.CompositeLit)
+		return e.Op == token.AND && ok && isWaitGroupValueType(b.typesInfo.TypeOf(lit))
+	case *ast.CallExpr:
+		ident, ok := common.UnwrapParenExpr(e.Fun).(*ast.Ident)
+		if !ok || len(e.Args) != 1 {
+			return false
 		}
-		return b.isWaitGroupAliasedOrCopiedExpr(e.X)
+		if builtin, ok := b.typesInfo.ObjectOf(ident).(*types.Builtin); !ok || builtin.Name() != "new" {
+			return false
+		}
+		return isWaitGroupValueType(b.typesInfo.TypeOf(e.Args[0]))
 	}
-	return common.IsWaitGroup(b.typesInfo.TypeOf(expr))
+	return false
 }
 
-func (b *balanceValidator) isWaitGroupFieldExpr(expr ast.Expr) bool {
-	_, ok := expr.(*ast.SelectorExpr)
-	return ok && common.IsWaitGroup(b.typesInfo.TypeOf(expr))
+func isWaitGroupValueType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	if _, isPointer := typ.Underlying().(*types.Pointer); isPointer {
+		return false
+	}
+	return common.IsWaitGroup(typ)
 }
 
 // checkUnreachableDone checks for Done calls that are unreachable due to early returns

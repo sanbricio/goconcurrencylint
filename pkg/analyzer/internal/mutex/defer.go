@@ -88,7 +88,7 @@ func (c *Checker) applyDeferredWrapperRelease(call *ast.CallExpr, pos token.Pos,
 		if !ok {
 			return nil
 		}
-		return c.simulateMethodEffect(callee, calleeLock, rw, &Stats{})
+		return c.simulateMethodEffect(callee, calleeLock, rw, &Stats{}, nil)
 	})
 }
 
@@ -112,6 +112,9 @@ func (c *Checker) applyDeferredClosureWrapperRelease(fnlit *ast.FuncLit, pos tok
 	}
 
 	sub := newSimulationFuncAnalysis(c.function, c.simulationStack, c.localFuncStack)
+	if c.refine != nil {
+		sub.facts = c.invariantFacts()
+	}
 	simulated := c.forkForSimulation(sub, mutexNames, rwMutexNames)
 	baseline := initialStats(mutexNames, rwMutexNames)
 	final := simulated.analyzeBlock(fnlit.Body, baseline)
@@ -277,9 +280,19 @@ func (c *Checker) deferredRRelockBalancesEarlierDeferredRUnlock(varName string, 
 func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, stats map[string]*Stats) {
 	guard := newRecoverGuardInspector(c.commentFilter)
 
+	// A refined run knows which branches of the literal can run when the
+	// function returns; a release only on branches that cannot is no release.
+	exitFacts := c.invariantFacts()
+	releases := func(name, method string) bool {
+		return exitFacts == nil || c.liveCallCount(fnlit.Body, name, method, exitFacts) > 0
+	}
+
 	// Check for mutex unlocks in function literal
 	for mutexName := range c.mutexNames {
 		target := c.resolveLockAlias(mutexName)
+		if !releases(mutexName, "Unlock") {
+			continue
+		}
 		if guard.containsUnlock(fnlit.Body, mutexName) && !guard.containsLock(fnlit.Body, mutexName) {
 			if c.isFlagGuarded(target) {
 				continue
@@ -294,7 +307,7 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 	// Check for rwmutex unlocks in function literal
 	for rwMutexName := range c.rwMutexNames {
 		target := c.resolveLockAlias(rwMutexName)
-		if guard.containsUnlock(fnlit.Body, rwMutexName) && !guard.containsLock(fnlit.Body, rwMutexName) {
+		if guard.containsUnlock(fnlit.Body, rwMutexName) && !guard.containsLock(fnlit.Body, rwMutexName) && releases(rwMutexName, "Unlock") {
 			if c.isFlagGuarded(target) {
 				continue
 			}
@@ -303,7 +316,7 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 			}
 			c.handleDeferUnlock(target, pos, stats, true)
 		}
-		if guard.containsRUnlock(fnlit.Body, rwMutexName) && !guard.containsRLock(fnlit.Body, rwMutexName) {
+		if guard.containsRUnlock(fnlit.Body, rwMutexName) && !guard.containsRLock(fnlit.Body, rwMutexName) && releases(rwMutexName, "RUnlock") {
 			if stats[target].rlock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "RUnlock") {
 				continue
 			}

@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
@@ -59,6 +60,10 @@ type Checker struct {
 	// alias land on the real lock's counters (see detectLockAliases).
 	lockAliases map[string]string
 
+	// varScopes memoizes computeVarScope per function for refined runs; shared
+	// by reference across functions of the package.
+	varScopes map[*ast.FuncDecl]*varScope
+
 	*funcAnalysis
 }
 
@@ -111,6 +116,7 @@ type packageScope struct {
 	handOverResolver *lifecycleResolver
 	// lockPathsByType memoizes typeLockPaths.
 	lockPathsByType map[string]map[string]bool
+	varScopes       map[*ast.FuncDecl]*varScope
 }
 
 func newPackageScope(files []*ast.File) *packageScope {
@@ -120,6 +126,7 @@ func newPackageScope(files []*ast.File) *packageScope {
 		explicitTransferCache: make(map[*ast.BlockStmt]map[token.Pos]struct{}),
 		scanCache:             newLifecycleScanCache(),
 		lockedReturnCache:     make(map[*ast.FuncDecl]lockedReturnSummary),
+		varScopes:             make(map[*ast.FuncDecl]*varScope),
 	}
 }
 
@@ -140,13 +147,38 @@ func NewChecker(fr *primitives.FunctionResult, errorCollector report.Reporter, c
 		explicitTransferCache: scope.explicitTransferCache,
 		lifecycleScanCache:    scope.scanCache,
 		lockedReturnCache:     scope.lockedReturnCache,
+		varScopes:             scope.varScopes,
 	}
 	c.loopCarry = newLoopCarryAnalyzer(c.mutexNames, c.rwMutexNames, cf, errorCollector, term)
 	return c
 }
 
+// AnalyzeFunction analyzes fn and reports what it finds. A lock-state problem
+// the main analysis reports is first checked by refined runs (see refine.go),
+// which drop it when every path turns out balanced.
 func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
+	out := c.errorCollector
+	defer func() { c.errorCollector = out }()
+
+	found := &bufferedReporter{}
+	c.runFunction(fn, found, nil)
+	if found.hasAny(lockStateCategories) && c.refinementClearsLockState(fn) {
+		found.drop(lockStateCategories)
+	}
+	found.flushTo(out)
+}
+
+// runFunction analyzes fn once, reporting to reporter. refine is nil for the
+// main analysis and carries the assumptions of a refined run.
+func (c *Checker) runFunction(fn *ast.FuncDecl, reporter report.Reporter, refine *refinement) {
+	c.errorCollector = reporter
+	c.loopCarry = newLoopCarryAnalyzer(c.mutexNames, c.rwMutexNames, c.commentFilter, reporter, c.termination)
 	c.funcAnalysis = newFuncAnalysis(fn)
+	if refine != nil {
+		c.refine = refine
+		c.facts = make(factSet, len(refine.vars))
+		maps.Copy(c.facts, refine.vars)
+	}
 	c.tryLock = newTryLockTracker(c.mutexNames, c.rwMutexNames, c.commentFilter, c.errorCollector)
 	c.lifecycle = newLifecycleResolver(c.receiverMethods, c.functions, c.typesInfo, c.explicitTransferCache, c.lifecycleScanCache, c.function)
 	c.wrapper = newWrapperResolver(c.receiverMethods, c.function, c.rawBodyEffects, c.typesInfo, c.lifecycle)
@@ -263,7 +295,10 @@ func (c *Checker) varRootIsFunctionParameter(varName string) bool {
 // real-world packages.
 const maxSimulationDepth = 24
 
-func (c *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats) *Stats {
+// simulateMethodEffect runs fn's body on the lock varName, starting from
+// initial. seed is what a refined run knows about fn's parameters from the
+// call (see callArgumentFacts); it is nil elsewhere.
+func (c *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMutex bool, initial *Stats, seed factSet) *Stats {
 	if fn == nil || fn.Body == nil {
 		return nil
 	}
@@ -294,6 +329,9 @@ func (c *Checker) simulateMethodEffect(fn *ast.FuncDecl, varName string, isRWMut
 	}
 
 	sub := newSimulationFuncAnalysis(fn, stack, c.localFuncStack)
+	if c.refine != nil {
+		sub.facts = seed.clone()
+	}
 	simulated := c.forkForSimulation(sub, mutexNames, rwMutexNames)
 
 	start := map[string]*Stats{varName: cloneStats(initial)}
@@ -320,7 +358,7 @@ func (c *Checker) applyWrapperReleaseWhenHeld(callee *ast.FuncDecl, calleeLock, 
 	if !held && !readHeld {
 		return false
 	}
-	effect := c.simulateMethodEffect(callee, calleeLock, rw, &Stats{})
+	effect := c.simulateMethodEffect(callee, calleeLock, rw, &Stats{}, nil)
 	switch {
 	case held && releasesOnly(effect, false):
 		st.lock--
@@ -415,6 +453,9 @@ func (c *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, 
 	defer delete(stack, fnlit)
 
 	sub := newSimulationFuncAnalysis(c.function, c.simulationStack, stack)
+	if c.refine != nil {
+		sub.facts = c.facts.clone()
+	}
 	simulated := c.forkForSimulation(sub, c.mutexNames, c.rwMutexNames)
 
 	baseline := cloneStatsMap(stats)
@@ -520,14 +561,15 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 
 	for mutexName := range c.mutexNames {
 		if mutexName == baseVar {
-			if c.applyWrapperReleaseWhenHeld(callee, calleeReceiver, mutexName, false, stats) {
+			if c.applyWrapperReleaseWhenHeld(callee, calleeReceiver, mutexName, false, stats) ||
+				c.applyDelegatedWrapperEffect(call, callee, calleeReceiver, receiverType, mutexName, false, stats) {
 				changed = true
 			}
 			continue
 		}
 		relativePath, ok := relativeMutexPath(mutexName, baseVar)
 		if ok {
-			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName])
+			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, false, stats[mutexName], c.callArgumentFacts(call, callee))
 			if simulated != nil {
 				attributeToCall(simulated, stats[mutexName], call.Pos())
 				stats[mutexName] = simulated
@@ -543,14 +585,15 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 
 	for rwMutexName := range c.rwMutexNames {
 		if rwMutexName == baseVar {
-			if c.applyWrapperReleaseWhenHeld(callee, calleeReceiver, rwMutexName, true, stats) {
+			if c.applyWrapperReleaseWhenHeld(callee, calleeReceiver, rwMutexName, true, stats) ||
+				c.applyDelegatedWrapperEffect(call, callee, calleeReceiver, receiverType, rwMutexName, true, stats) {
 				changed = true
 			}
 			continue
 		}
 		relativePath, ok := relativeMutexPath(rwMutexName, baseVar)
 		if ok {
-			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName])
+			simulated := c.simulateMethodEffect(callee, calleeReceiver+"."+relativePath, true, stats[rwMutexName], c.callArgumentFacts(call, callee))
 			if simulated != nil {
 				attributeToCall(simulated, stats[rwMutexName], call.Pos())
 				stats[rwMutexName] = simulated
@@ -627,7 +670,7 @@ func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.Fun
 		return false
 	}
 
-	simulated := c.simulateMethodEffect(callee, releaseTarget, isRWMutex, stats[mutexName])
+	simulated := c.simulateMethodEffect(callee, releaseTarget, isRWMutex, stats[mutexName], c.callArgumentFacts(call, callee))
 	if simulated == nil {
 		return false
 	}

@@ -230,9 +230,8 @@ func BadRWConditionalMissingRUnlock() {
 }
 
 // Conditional: one branch with rlock/runlock, other only runlock
-func BadRWConditionalOneBranchMissingRLock() {
+func BadRWConditionalOneBranchMissingRLock(cond bool) {
 	var mu sync.RWMutex
-	cond := true
 	if cond {
 		mu.RLock()
 		defer mu.RUnlock()

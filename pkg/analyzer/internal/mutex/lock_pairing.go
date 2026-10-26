@@ -33,8 +33,15 @@ func everyAcquisitionPairsWith(body *ast.BlockStmt, acquires, records func(ast.S
 				visit(s.List)
 			case *ast.AssignStmt:
 				for _, rhs := range s.Rhs {
-					if call, ok := rhs.(*ast.CallExpr); ok {
-						visitCall(call)
+					switch value := rhs.(type) {
+					case *ast.CallExpr:
+						visitCall(value)
+					case *ast.FuncLit:
+						// A local closure (`take := func() { ... }`) acquires
+						// wherever it is called.
+						if value.Body != nil {
+							visit(value.Body.List)
+						}
 					}
 				}
 			case *ast.ExprStmt:

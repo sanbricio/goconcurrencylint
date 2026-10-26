@@ -31,6 +31,16 @@ type funcAnalysis struct {
 	// (see detectFlagGuardedReleaseFlags) to their guard flag name. Populated once
 	// per real function.
 	flagGuardedFlags map[string]string
+
+	// refine is set in a refined run (see refine.go) and in every simulation
+	// forked from one; facts is that run's knowledge of local variables at the
+	// current point (see facts.go). Both are nil in the main analysis.
+	refine *refinement
+	facts  factSet
+	// pathEnded is set, in a refined run, once the path being analyzed has
+	// left the current statement list: a return, a branch statement or a call
+	// that never returns. What follows in the list does not run on that path.
+	pathEnded bool
 }
 
 func newFuncAnalysis(fn *ast.FuncDecl) *funcAnalysis {
@@ -85,7 +95,19 @@ func (c *Checker) forkForSimulation(fa *funcAnalysis, mutexNames, rwMutexNames m
 		lifecycleScanCache:    c.lifecycleScanCache,
 		lockedReturnCache:     c.lockedReturnCache,
 		safeDeferBeforeLock:   c.safeDeferBeforeLock,
+		varScopes:             c.varScopes,
 		funcAnalysis:          fa,
+	}
+	// A simulation forked from a refined run is refined too. The caller seeds
+	// its facts; it starts knowing nothing otherwise.
+	if fa.refine == nil && c.refine != nil {
+		fa.refine = c.refine
+		if fa.facts == nil {
+			fa.facts = make(factSet)
+		}
+	}
+	if fa.refine != nil {
+		sim.errorCollector = &simulationReporter{record: fa.refine.record}
 	}
 	// Wire the per-function collaborators against the fork's own names and
 	// (isolated) collector so simulation diagnostics never leak into the parent

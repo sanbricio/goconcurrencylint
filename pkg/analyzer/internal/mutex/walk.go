@@ -30,6 +30,9 @@ func (c *Checker) analyzeStatementList(stmts []ast.Stmt, initial map[string]*Sta
 			continue
 		}
 		c.analyzeStatementWithTail(stmt, blockStats, terminatingTail[i+1])
+		if c.refine != nil && c.pathEnded {
+			break
+		}
 	}
 
 	return blockStats
@@ -60,6 +63,9 @@ func (c *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 	case *ast.ExprStmt:
 		c.panicDetector.reportPotentialPanicWhileLocked(s, stats)
 		c.analyzeExpressionStatement(s, stats)
+		if call, ok := s.X.(*ast.CallExpr); ok && c.refine != nil && c.termination.callTerminatesExecution(call) {
+			c.pathEnded = true
+		}
 	case *ast.AssignStmt:
 		c.analyzeAssignStatement(s, stats)
 	case *ast.DeclStmt:
@@ -70,6 +76,7 @@ func (c *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 		c.tryLock.markReturnedChecked(s)
 		c.panicDetector.reportPotentialPanicWhileLocked(s, stats)
 		c.analyzeReturnStatement(s, stats)
+		c.pathEnded = c.refine != nil
 	case *ast.IfStmt:
 		c.analyzeIfStatement(s, stats)
 	case *ast.GoStmt:
@@ -93,6 +100,7 @@ func (c *Checker) analyzeStatement(stmt ast.Stmt, stats map[string]*Stats) {
 		if s.Tok == token.GOTO && s.Label != nil {
 			c.captureGotoSnapshot(s.Label.Name, stats)
 		}
+		c.pathEnded = c.refine != nil && branchTerminatesBlock(s.Tok)
 	case *ast.BlockStmt:
 		nestedStats := c.analyzeBlock(s, stats)
 		copyStatsMap(stats, nestedStats)

@@ -256,8 +256,8 @@ func (b *balanceValidator) checkLiteralAddLoopGoroutineMismatch(stats map[string
 		// A Wait() closes the Add…Wait lifecycle: goroutines launched after it
 		// belong to a separate cycle and must not be counted against this Add.
 		boundary := b.nextWaitAfter(st, positiveAdds[0].pos)
-		launched := b.countLoopWorkerGoroutinesBetween(positiveAdds[0].pos, boundary, wgName)
-		if launched <= 1 || launched == positiveAdds[0].value {
+		launched, exact, fromLoop := b.countWorkersPaidByAdd(positiveAdds[0].pos, boundary, wgName)
+		if !exact || !fromLoop || launched <= 1 || launched == positiveAdds[0].value {
 			continue
 		}
 		b.reporter.AddError(positiveAdds[0].pos, category.AddLoopCountMismatch,
@@ -278,69 +278,151 @@ func (b *balanceValidator) nextWaitAfter(st *Stats, after token.Pos) token.Pos {
 	return next
 }
 
-func (b *balanceValidator) countLoopWorkerGoroutinesBetween(after, boundary token.Pos, wgName string) int {
-	total := 0
-	ast.Inspect(b.function.Body, func(n ast.Node) bool {
-		switch loop := n.(type) {
+// countWorkersPaidByAdd counts the goroutines that call Done on wgName and that
+// the goroutine running the Add at addPos launches before boundary. A launch
+// counts once per iteration of every loop around it that starts after the Add.
+// Goroutines started inside another goroutine or closure are left out: that
+// body runs on its own and raises the counter for what it starts itself
+// (`go func() { defer wg.Done(); wg.Add(n); for ... { go child() } }()`).
+// exact is false when some launch cannot be counted — a loop around it runs an
+// unknown number of times, or it happens on only some paths. fromLoop reports
+// whether any counted launch repeats with a loop, the only shape this count is
+// for: a shortfall among goroutines started one by one is GCL2001's.
+func (b *balanceValidator) countWorkersPaidByAdd(addPos, boundary token.Pos, wgName string) (count int, exact, fromLoop bool) {
+	exact = true
+	var visit func(n ast.Node, multiplier int, known, conditional bool)
+	visitAll := func(nodes []ast.Stmt, multiplier int, known, conditional bool) {
+		for _, n := range nodes {
+			visit(n, multiplier, known, conditional)
+		}
+	}
+	var inLoop bool
+	visitLoop := func(loop, body ast.Node, iterations int, iterationsKnown bool, multiplier int, known, conditional bool) {
+		if loop.End() < addPos {
+			return
+		}
+		if loop.Pos() > addPos {
+			outer := inLoop
+			inLoop = true
+			defer func() { inLoop = outer }()
+			if iterationsKnown {
+				multiplier *= iterations
+			} else {
+				known = false
+			}
+			conditional = conditional || loopBodyMayExitEarly(body)
+		}
+		visit(body, multiplier, known, conditional)
+	}
+	visit = func(n ast.Node, multiplier int, known, conditional bool) {
+		if n == nil || !exact {
+			return
+		}
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			// A literal called on the spot runs right here, once per call.
+			if lit, ok := common.UnwrapParenExpr(node.Fun).(*ast.FuncLit); ok {
+				visit(lit.Body, multiplier, known, conditional)
+				for _, arg := range node.Args {
+					visit(arg, multiplier, known, conditional)
+				}
+				return
+			}
+		case *ast.FuncLit:
+			// Any other closure runs whenever and wherever it is called, so a
+			// launch inside it cannot be counted here.
+			if b.launchesWorkerFor(node.Body, wgName) {
+				exact = false
+			}
+			return
+		case *ast.GoStmt:
+			if node.Pos() <= addPos || (boundary != token.NoPos && node.Pos() >= boundary) {
+				return
+			}
+			doneInfo, related := b.goroutineDoneInfo(node, wgName)
+			if !related || !doneInfo.hasAnyDone {
+				return
+			}
+			if !known || conditional {
+				exact = false
+				return
+			}
+			count += multiplier
+			fromLoop = fromLoop || inLoop
+			return
 		case *ast.ForStmt:
-			if !b.loopInWindow(loop.Pos(), after, boundary) {
-				return true
-			}
-			iterations := b.estimateForIterations(loop)
-			if iterations <= 1 {
-				return true
-			}
-			total += iterations * b.countWorkerGoroutines(loop.Body, wgName)
+			iterations, ok := b.estimateForIterationsKnown(node)
+			visitLoop(node, node.Body, iterations, ok, multiplier, known, conditional)
+			return
 		case *ast.RangeStmt:
-			if !b.loopInWindow(loop.Pos(), after, boundary) {
-				return true
-			}
-			iterations := b.estimateRangeIterationsForMismatch(loop)
-			if iterations <= 1 {
-				return true
-			}
-			total += iterations * b.countWorkerGoroutines(loop.Body, wgName)
+			iterations, ok := b.estimateRangeIterationsKnown(node)
+			visitLoop(node, node.Body, iterations, ok, multiplier, known, conditional)
+			return
+		case *ast.IfStmt:
+			visit(node.Body, multiplier, known, true)
+			visit(node.Else, multiplier, known, true)
+			return
+		case *ast.CaseClause:
+			visitAll(node.Body, multiplier, known, true)
+			return
+		case *ast.CommClause:
+			visitAll(node.Body, multiplier, known, true)
+			return
 		}
-		return true
-	})
-	return total
+		ast.Inspect(n, func(child ast.Node) bool {
+			if child == n {
+				return true
+			}
+			if child != nil {
+				visit(child, multiplier, known, conditional)
+			}
+			return false
+		})
+	}
+	visit(b.goroutineScopeOf(addPos), 1, true, false)
+	return count, exact, fromLoop
 }
 
-// loopInWindow reports whether a loop starting at pos lies strictly after the
-// Add (`after`) and before the lifecycle-closing Wait (`boundary`). A NoPos
-// boundary means there is no trailing Wait, so the window is open-ended.
-func (b *balanceValidator) loopInWindow(pos, after, boundary token.Pos) bool {
-	if pos <= after {
-		return false
-	}
-	return boundary == token.NoPos || pos < boundary
-}
-
-func (b *balanceValidator) estimateRangeIterationsForMismatch(rangeStmt *ast.RangeStmt) int {
-	if rangeStmt == nil || rangeStmt.X == nil {
-		return 1
-	}
-	if lit, ok := rangeStmt.X.(*ast.CompositeLit); ok {
-		return len(lit.Elts)
-	}
-	return b.estimateRangeIterations(rangeStmt)
-}
-
-func (b *balanceValidator) countWorkerGoroutines(body *ast.BlockStmt, wgName string) int {
-	if body == nil {
-		return 0
-	}
-	count := 0
+// launchesWorkerFor reports whether body starts, outside any goroutine of its
+// own, a goroutine that calls Done on wgName.
+func (b *balanceValidator) launchesWorkerFor(body *ast.BlockStmt, wgName string) bool {
+	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
-		goStmt, ok := n.(*ast.GoStmt)
-		if !ok {
-			return true
+		if goStmt, ok := n.(*ast.GoStmt); ok && !found {
+			doneInfo, related := b.goroutineDoneInfo(goStmt, wgName)
+			found = related && doneInfo.hasAnyDone
+			return false
 		}
-		doneInfo, related := b.goroutineDoneInfo(goStmt, wgName)
-		if related && doneInfo.hasAnyDone {
-			count++
+		return !found
+	})
+	return found
+}
+
+// goroutineScopeOf returns the body that runs in the same goroutine as the code
+// at pos: the innermost function literal around it, or the function itself.
+func (b *balanceValidator) goroutineScopeOf(pos token.Pos) *ast.BlockStmt {
+	scope := b.function.Body
+	ast.Inspect(b.function.Body, func(n ast.Node) bool {
+		if fnLit, ok := n.(*ast.FuncLit); ok && nodeContainsPos(fnLit.Body, pos) {
+			scope = fnLit.Body
 		}
 		return true
 	})
-	return count
+	return scope
+}
+
+// loopBodyMayExitEarly reports whether an iteration can end before reaching
+// every statement of body, so a launch inside it may be skipped.
+func loopBodyMayExitEarly(body ast.Node) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.BranchStmt, *ast.ReturnStmt:
+			found = true
+		}
+		return !found
+	})
+	return found
 }

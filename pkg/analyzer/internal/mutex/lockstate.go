@@ -238,6 +238,8 @@ func (c *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]
 	c.tryLock.recordAssignment(stmt)
 	c.applyLockedValueHandover(stmt, stats)
 	c.applyConditionalAcquireCall(stmt)
+	c.applyLockOwnershipMove(stmt, stats)
+	c.applyAssignmentFacts(stmt)
 }
 
 // applyLockedValueHandover records the lock a callee hands over. A function that
@@ -412,4 +414,5 @@ func (c *Checker) resolveCalledFuncDecl(call *ast.CallExpr) *ast.FuncDecl {
 func (c *Checker) analyzeDeclStatement(stmt *ast.DeclStmt, stats map[string]*Stats) {
 	c.panicDetector.recordCollectionLengthsFromDecl(stmt)
 	c.panicDetector.reportPotentialPanicWhileLocked(stmt, stats)
+	c.applyDeclarationFacts(stmt)
 }

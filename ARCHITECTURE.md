@@ -90,6 +90,9 @@ Tracing `lock-without-unlock` for `mu.Lock()` with no matching `Unlock()`:
    `Checker.AnalyzeFunction`.
 5. [`AnalyzeFunction`](pkg/analyzer/internal/mutex/analyzer.go) wires the
    per-function collaborators, runs the lock-order check, then walks the body.
+   Its diagnostics are held back until the function is done: a lock-state
+   problem is first re-checked by refined runs (see below) and dropped when
+   every path turns out balanced.
 6. The walk is the engine:
    [`analyzeStatement`](pkg/analyzer/internal/mutex/walk.go) dispatches by
    statement type; a `mu.Lock()` call updates the per-mutex `Stats` counters in
@@ -134,7 +137,32 @@ reads a method name — what counts is the shape of the code and what the rest o
 the package does with it: the type carries the `sync.Locker` contract, or it
 holds the opposite operation in another method and something really uses the two
 as a pair, or the mutex is an RWMutex driven as a one-way gate. `mirror_pair.go`
-explains each condition and what it is holding back.
+explains each condition and what it is holding back. A pair whose halves lock
+and unlock only on one branch is accepted when that branch is decided by an
+owner record the halves keep between them — take only if the record does not
+name the caller and then record it, give back only if it does and then clear it
+([`owner_record.go`](pkg/analyzer/internal/mutex/owner_record.go)).
+
+#### When the walk is not sure: refinement
+
+The walk keeps one lock state per program point, so where two branches leave
+different states it can only report the difference — even when a later branch
+on the same decision balances it (`held := false; if !ok { mu.Lock(); held =
+true }; ...; if held { mu.Unlock() }`). For a function that gets such a report,
+[`refine.go`](pkg/analyzer/internal/mutex/refine.go) re-runs the walk knowing
+what local booleans and nil checks hold at each point
+([`facts.go`](pkg/analyzer/internal/mutex/facts.go)), and splits the run on a
+decision the walk could not reconcile: a parameter or a local assigned once
+outside any loop, or an `if` that runs at most once. Together the runs cover
+every path. A run that follows the branch where a test reports its own
+failure (`t.Errorf`) is not held to lock balance: that path only exists once the
+test has already failed. The report stands unless every run is clean, so
+refinement can only take diagnostics away, never add them. Refined runs also model a few things the
+main walk leaves alone on purpose
+([`refine_model.go`](pkg/analyzer/internal/mutex/refine_model.go)): a lock moving
+from one variable to another, a wrapper on a value that is itself a lock, a loop
+whose condition takes the lock, constant arguments of a simulated callee, and a
+TryLock on a lock the goroutine already holds, which cannot succeed.
 
 ### Direct path — `copycheck`
 

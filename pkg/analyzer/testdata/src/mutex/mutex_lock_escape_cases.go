@@ -190,6 +190,51 @@ func (q *quotaChecker) BadLockNeverRecordedInLocker() {
 	locker = &q.quotaLock
 }
 
+// Good: TiDB's disk-quota shape. Taking and dropping the lock live in named
+// closures; the deferred one releases through the alias only when it is set,
+// and the acquiring one records the lock right after taking it.
+func (q *quotaChecker) GoodLockParkedThroughNamedClosures(steps []bool) {
+	var locker sync.Locker
+	take := func() {
+		if locker == nil {
+			q.quotaLock.Lock()
+			locker = &q.quotaLock
+		}
+	}
+	drop := func() {
+		if locker != nil {
+			locker.Unlock()
+			locker = nil
+		}
+	}
+	defer drop()
+	for _, over := range steps {
+		if !over {
+			drop()
+			continue
+		}
+		take()
+		q.engines--
+	}
+}
+
+// Bad: the named closure takes the lock without recording it, so the deferred
+// release through the alias never covers it.
+func (q *quotaChecker) BadNamedClosureNeverRecordsLock() {
+	var locker sync.Locker
+	take := func() {
+		q.quotaLock.Lock()
+	}
+	drop := func() {
+		if locker != nil {
+			locker.Unlock()
+		}
+	}
+	defer drop() // want "rwmutex 'q.quotaLock' has defer unlock but no corresponding lock"
+	take()
+	locker = &q.quotaLock
+}
+
 type serializedEntry struct {
 	sync.Mutex
 	value int
@@ -653,4 +698,68 @@ func (s *aliveStore) Append(v int) error {
 	defer s.Unlock()
 	s.items = append(s.items, v)
 	return nil
+}
+
+// ========== handle built inside the return expression ==========
+
+type txStore struct {
+	mu  sync.RWMutex
+	rev int
+}
+
+type txCommon struct {
+	s   *txStore
+	rev int
+}
+
+type txRead struct {
+	txCommon
+	limit int
+}
+
+func (tr *txRead) End() { tr.s.mu.RUnlock() }
+
+type txWrite struct {
+	txCommon
+	changes int
+}
+
+func (tw *txWrite) End() { tw.s.mu.RUnlock() }
+
+type txHandle interface{ End() }
+
+type metricsTx struct {
+	inner txHandle
+	ops   int
+}
+
+func (m *metricsTx) End() { m.inner.End() }
+
+func withMetrics(inner txHandle) txHandle { return &metricsTx{inner: inner} }
+
+// Good: the read lock travels to the transaction stored through the embedded
+// common part; wrapping the transaction for metrics does not change who
+// releases it.
+func (s *txStore) GoodReadHandsLockToWrappedTxn() txHandle {
+	s.mu.RLock()
+	return withMetrics(&txRead{txCommon{s, s.rev}, 10})
+}
+
+// Good: the same with the transaction built into a local first.
+func (s *txStore) GoodWriteHandsLockToWrappedTxn() txHandle {
+	s.mu.RLock()
+	tw := &txWrite{txCommon: txCommon{s: s, rev: s.rev}}
+	return withMetrics(tw)
+}
+
+// opaqueTx stores the store but nothing of it ever releases the lock.
+type opaqueTx struct {
+	txCommon
+}
+
+func (o *opaqueTx) End() {}
+
+func (s *txStore) BadReadHandleNeverReleases() txHandle {
+	s.mu.RLock() // want "rwmutex 's.mu' is rlocked but not runlocked"
+	return withMetrics(&opaqueTx{txCommon{s, s.rev}})
 }

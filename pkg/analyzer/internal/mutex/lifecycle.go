@@ -73,6 +73,11 @@ type lifecycleScanCache struct {
 	// handOver memoizes acquiresOnSuccess and handsOver handsLockToCaller.
 	handOver  *handOverSolver
 	handsOver map[conditionalAcquireKey]bool
+
+	// handleBindings memoizes returnedHandleBindings; handleBindingsByType
+	// indexes them for isReleaseForHandleBinding, built on first use.
+	handleBindings       map[*ast.FuncDecl][]handleBinding
+	handleBindingsByType map[string][]handleBinding
 }
 
 func newLifecycleScanCache() *lifecycleScanCache {
@@ -82,6 +87,7 @@ func newLifecycleScanCache() *lifecycleScanCache {
 		returnedFuncNames:     make(map[*ast.FuncDecl][]string),
 		handOver:              newHandOverSolver(),
 		handsOver:             make(map[conditionalAcquireKey]bool),
+		handleBindings:        make(map[*ast.FuncDecl][]handleBinding),
 	}
 }
 
@@ -178,7 +184,8 @@ func (l *lifecycleResolver) returnsHandleFor(mutexName string, methodNames []str
 		}
 	}
 
-	return l.returnsVariableWithReleaseFor(baseVar, suffix, methodNames)
+	return l.returnsVariableWithReleaseFor(baseVar, suffix, methodNames) ||
+		l.returnsHandleBindingFor(mutexName, methodNames)
 }
 
 func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string) bool {
@@ -249,7 +256,8 @@ func (l *lifecycleResolver) isReleaseFor(mutexName string, methodNames []string)
 		}
 	}
 
-	return l.isReleaseCalledFromReturnedHandle(currentType, path, methodNames)
+	return l.isReleaseCalledFromReturnedHandle(currentType, path, methodNames) ||
+		l.isReleaseForHandleBinding(currentType, path, methodNames)
 }
 
 // returnsLockedValueItself reports whether the function hands back the value it

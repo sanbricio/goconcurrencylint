@@ -81,6 +81,10 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return true
 	}
 
+	if w.isOwnerRecordHalf(varName, methodName, oppositeMethods) {
+		return true
+	}
+
 	if w.isReadGateAcquire(varName, methodName) {
 		return true
 	}

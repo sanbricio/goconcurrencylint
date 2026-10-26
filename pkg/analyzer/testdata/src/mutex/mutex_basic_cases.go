@@ -560,9 +560,8 @@ func BadConditionalMissingLock() {
 }
 
 // Conditional: one branch with lock/unlock, other only unlock
-func BadConditionalOneBranchMissingLock() {
+func BadConditionalOneBranchMissingLock(cond bool) {
 	var mu sync.Mutex
-	cond := true
 	if cond {
 		mu.Lock()
 		defer mu.Unlock()
@@ -584,15 +583,26 @@ func BadConditionalOneBranchMissingUnlock() {
 }
 
 // else-if with mutex
-func EdgeCaseElseIf() {
+func EdgeCaseElseIf(cond1, cond2 bool) {
 	var mu sync.Mutex
-	cond1 := true
-	cond2 := false
 
 	if cond1 {
 		mu.Lock()
 		mu.Unlock()
 	} else if cond2 {
 		mu.Lock() // want "mutex 'mu' is locked but not unlocked in if"
+	}
+}
+
+// A branch that a local constant rules out never runs, so what it would do to
+// the lock is no defect of the function.
+func GoodBranchRuledOutByLocalConstant() {
+	var mu sync.Mutex
+	cond := true
+	if cond {
+		mu.Lock()
+		defer mu.Unlock()
+	} else {
+		mu.Unlock()
 	}
 }

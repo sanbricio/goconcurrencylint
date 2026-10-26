@@ -95,7 +95,7 @@ func (c *Checker) aliasGuardedReleaseFlags(fn *ast.FuncDecl) map[string]string {
 
 	var result map[string]string
 	for alias, target := range c.lockAliases {
-		if !deferredAliasGuardedUnlock(fn.Body, alias) {
+		if !c.deferredAliasGuardedUnlock(fn.Body, alias) {
 			continue
 		}
 		if !everyLockPairsWithAliasAssign(fn.Body, target, alias) {
@@ -111,8 +111,9 @@ func (c *Checker) aliasGuardedReleaseFlags(fn *ast.FuncDecl) map[string]string {
 
 // deferredAliasGuardedUnlock reports whether a deferred closure releases the
 // lock through the alias, with every release under a single `alias != nil`
-// guard.
-func deferredAliasGuardedUnlock(body *ast.BlockStmt, alias string) bool {
+// guard. The closure may be deferred as a literal or by the name of a local
+// closure, as analyzeDeferStatement resolves it.
+func (c *Checker) deferredAliasGuardedUnlock(body *ast.BlockStmt, alias string) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
@@ -122,8 +123,14 @@ func deferredAliasGuardedUnlock(body *ast.BlockStmt, alias string) bool {
 		if !ok {
 			return true
 		}
-		fnlit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
-		if !ok || fnlit.Body == nil {
+		var fnlit *ast.FuncLit
+		switch fun := common.UnwrapParenExpr(deferStmt.Call.Fun).(type) {
+		case *ast.FuncLit:
+			fnlit = fun
+		case *ast.Ident:
+			fnlit = c.localFunctionLiteralBefore(fun.Name, deferStmt.Pos())
+		}
+		if fnlit == nil || fnlit.Body == nil {
 			return true
 		}
 
