@@ -38,19 +38,25 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-var Analyzer = &analysis.Analyzer{
-	Name: "goconcurrencylint",
-	Doc:  "Detects misuse of sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once, sync.Cond, sync.Pool and channels, plus copy-by-value of sync primitives.",
-	Run:  run,
-	Requires: []*analysis.Analyzer{
-		mutex.SubAnalyzer,
-		waitgroup.SubAnalyzer,
-		once.SubAnalyzer,
-		cond.SubAnalyzer,
-		pool.SubAnalyzer,
-		channel.SubAnalyzer,
-		copycheck.Analyzer,
-	},
+var Analyzer = newAnalyzer()
+
+func newAnalyzer() *analysis.Analyzer {
+	a := &analysis.Analyzer{
+		Name: "goconcurrencylint",
+		Doc:  "Detects misuse of sync.Mutex, sync.RWMutex, sync.WaitGroup, sync.Once, sync.Cond, sync.Pool and channels, plus copy-by-value of sync primitives.",
+		Run:  run,
+		Requires: []*analysis.Analyzer{
+			mutex.SubAnalyzer,
+			waitgroup.SubAnalyzer,
+			once.SubAnalyzer,
+			cond.SubAnalyzer,
+			pool.SubAnalyzer,
+			channel.SubAnalyzer,
+			copycheck.Analyzer,
+		},
+	}
+	selection.register(&a.Flags)
+	return a
 }
 
 func run(pass *analysis.Pass) (any, error) {

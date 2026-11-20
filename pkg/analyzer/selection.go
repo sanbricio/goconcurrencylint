@@ -29,12 +29,10 @@ import (
 
 // selection is process-wide because analysis.Analyzer.Flags is. Consequence for
 // tests: they must stay serial, since a t.Parallel() test would read whatever
-// another test had set.
+// another test had set. newAnalyzer registers its flag; package initialization
+// order guarantees selection exists before Analyzer is built, so no init()
+// function is needed (golangci-lint does not accept them in linters).
 var selection = newCheckSelection()
-
-func init() {
-	selection.register(&Analyzer.Flags)
-}
 
 type checkSelection struct {
 	checks checkList
