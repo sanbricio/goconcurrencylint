@@ -363,7 +363,7 @@ func (c *Checker) analyzeSelectStatementWithVisited(selectStmt *ast.SelectStmt, 
 }
 
 func (c *Checker) analyzeRelatedCall(call *ast.CallExpr, wgName string, visited map[token.Pos]bool) (doneCallInfo, bool) {
-	fn, calleeWGName, related := c.relatedWaitGroupForCall(call, wgName)
+	fn, calleeWGName, related := c.relatedWaitGroupForCall(call, wgName, visited)
 	if !related || fn == nil || fn.Body == nil || calleeWGName == "" {
 		return doneCallInfo{}, false
 	}

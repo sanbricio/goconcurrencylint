@@ -30,7 +30,7 @@ func buildEscapeAnalyzer(t *testing.T, src string, isLocalChannel localChannelCh
 
 	return newEscapeAnalyzer(
 		fn,
-		func(*ast.CallExpr, string) (*ast.FuncDecl, string, bool) {
+		func(*ast.CallExpr, string, map[token.Pos]bool) (*ast.FuncDecl, string, bool) {
 			return nil, "", false
 		},
 		func(*ast.FuncDecl, string, map[token.Pos]bool) bool {

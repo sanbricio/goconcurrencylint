@@ -311,7 +311,14 @@ func (c *Checker) currentFunctionShadowsPackageLevelWaitGroup(wgName string) boo
 	return false
 }
 
-func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*ast.FuncDecl, string, bool) {
+// relatedWaitGroupForCall resolves the callee of call and the name wgName takes
+// inside it. visited is the live interprocedural call path of the walk that
+// asked: the package-level fallback below re-enters functionCouldManageWaitGroup,
+// and handing it a fresh map there reset the cycle guard on every hop, so a
+// recursive callee (`func rec() { rec() }` reached from a goroutine that uses a
+// package-level WaitGroup) recursed until the runtime killed the process with
+// "fatal error: stack overflow" — not a panic, so no driver can recover it.
+func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string, visited map[token.Pos]bool) (*ast.FuncDecl, string, bool) {
 	fn := resolveCalledFunction(call, c.typesInfo, c.functionDecls)
 	if fn == nil || fn.Body == nil {
 		return nil, "", false
@@ -351,7 +358,7 @@ func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*a
 	if fn.Type == nil || fn.Type.Params == nil {
 		if c.packageLevelWaitGroupNames[wgName] &&
 			!c.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
-			c.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
+			c.functionCouldManageWaitGroup(fn, wgName, visited) {
 			return fn, wgName, true
 		}
 		return nil, "", false
@@ -381,7 +388,7 @@ func (c *Checker) relatedWaitGroupForCall(call *ast.CallExpr, wgName string) (*a
 
 	if c.packageLevelWaitGroupNames[wgName] &&
 		!c.currentFunctionShadowsPackageLevelWaitGroup(wgName) &&
-		c.functionCouldManageWaitGroup(fn, wgName, make(map[token.Pos]bool)) {
+		c.functionCouldManageWaitGroup(fn, wgName, visited) {
 		return fn, wgName, true
 	}
 

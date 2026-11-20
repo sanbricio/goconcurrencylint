@@ -8,7 +8,7 @@ import (
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
-type relatedWaitGroupResolver func(*ast.CallExpr, string) (*ast.FuncDecl, string, bool)
+type relatedWaitGroupResolver func(*ast.CallExpr, string, map[token.Pos]bool) (*ast.FuncDecl, string, bool)
 type waitGroupManager func(*ast.FuncDecl, string, map[token.Pos]bool) bool
 type doneCallAnalyzer func(*ast.BlockStmt, string, map[token.Pos]bool) doneCallInfo
 type localChannelChecker func(string) bool
@@ -245,8 +245,12 @@ func (e *escapeAnalyzer) relatedCallCanManageWaitGroup(call *ast.CallExpr, wgNam
 		return false
 	}
 
-	fn, calleeWGName, related := e.relatedWaitGroupForCall(call, wgName)
-	return related && fn != nil && e.functionCouldManageWaitGroup(fn, calleeWGName, make(map[token.Pos]bool))
+	// One path for both steps: the resolver may itself walk the callee, and
+	// it removes every function it enters on unwind, so the map is empty again
+	// by the time the second call reuses it.
+	visited := make(map[token.Pos]bool)
+	fn, calleeWGName, related := e.relatedWaitGroupForCall(call, wgName, visited)
+	return related && fn != nil && e.functionCouldManageWaitGroup(fn, calleeWGName, visited)
 }
 
 func (e *escapeAnalyzer) methodValueContainsDoneForWaitGroup(sel *ast.SelectorExpr, wgName string) bool {
