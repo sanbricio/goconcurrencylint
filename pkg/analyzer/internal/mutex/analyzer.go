@@ -226,7 +226,13 @@ func splitBaseAndSuffix(varName string) (string, string, bool) {
 }
 
 // functionIsParameterUnlockHelper reports helpers that only release a mutex
-// parameter.
+// parameter, directly or by handing it on to a call that releases it:
+//
+//	func release(mu *sync.Mutex) { mu.Unlock() }
+//	func releaseVia(mu *sync.Mutex) { release(mu) }
+//
+// The unlock a forwarding helper is blamed for is the one its callee makes
+// (attributeToCall moves it onto the call), so both are the same helper.
 func (c *Checker) functionIsParameterUnlockHelper(varName string, acquireMethods []string) bool {
 	if c.function == nil || c.function.Body == nil {
 		return false
@@ -263,6 +269,9 @@ func (c *Checker) functionIsParameterUnlockHelper(varName string, acquireMethods
 		if !ok {
 			return true
 		}
+		if c.callHandsOnLock(call, varName) {
+			sawRelease = true
+		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
 			return true
@@ -280,6 +289,22 @@ func (c *Checker) functionIsParameterUnlockHelper(varName string, acquireMethods
 		return true
 	})
 	return sawRelease && !sawAcquire
+}
+
+// callHandsOnLock reports whether call passes the lock varName on as an
+// argument, either by address or inside the value that holds it — the two
+// forms argumentReleaseTarget follows into the callee.
+func (c *Checker) callHandsOnLock(call *ast.CallExpr, varName string) bool {
+	base, _, hasField := splitBaseAndSuffix(varName)
+	for _, arg := range call.Args {
+		if c.argumentIsLockAddress(arg, varName) {
+			return true
+		}
+		if hasField && common.GetVarName(arg) == base {
+			return true
+		}
+	}
+	return false
 }
 
 // varRootIsFunctionParameter reports whether `varName` starts at a parameter.
@@ -730,12 +755,7 @@ var argumentReleaseMethods = []string{"Unlock", "RUnlock"}
 // the caller passes in as an argument, remapping the caller's variable to the
 // matching parameter name inside the callee.
 func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.FuncDecl, mutexName string, isRWMutex bool, stats map[string]*Stats) bool {
-	base, suffix, ok := splitBaseAndSuffix(mutexName)
-	if !ok {
-		return false
-	}
-
-	paramName, ok := calleeParamNameForArg(call, callee, base)
+	releaseTarget, ok := c.argumentReleaseTarget(call, callee, mutexName)
 	if !ok {
 		return false
 	}
@@ -744,8 +764,7 @@ func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.Fun
 	// actually unlock the passed-in lock can balance it. This keeps analysis
 	// time bounded on packages that thread a struct-with-mutex through many
 	// helpers, where most callees never touch the lock.
-	releaseTarget := paramName + "." + suffix
-	if !functionBodyContainsFieldCall(callee.Body, releaseTarget, argumentReleaseMethods) {
+	if !c.calleeReleasesLock(callee, releaseTarget, nil) {
 		return false
 	}
 
@@ -757,6 +776,114 @@ func (c *Checker) applyArgumentReleaseEffect(call *ast.CallExpr, callee *ast.Fun
 
 	stats[mutexName] = simulated
 	return true
+}
+
+// maxReleaseForwarding bounds how many helpers calleeReleasesLock follows when
+// a helper hands the lock on instead of releasing it itself.
+const maxReleaseForwarding = 4
+
+// calleeReleasesLock reports whether callee unlocks target, either itself or
+// by handing it on to another function of the package that does, the way
+// `func releaseVia(mu *sync.Mutex) { release(mu) }` does. It only reads the
+// AST and only follows calls that pass the lock on, so a struct threaded
+// through many helpers that never touch the lock costs one scan per helper.
+func (c *Checker) calleeReleasesLock(callee *ast.FuncDecl, target string, active map[*ast.FuncDecl]bool) bool {
+	if callee == nil || callee.Body == nil {
+		return false
+	}
+	if functionBodyContainsFieldCall(callee.Body, target, argumentReleaseMethods) {
+		return true
+	}
+	if active == nil {
+		active = make(map[*ast.FuncDecl]bool)
+	}
+	if active[callee] || len(active) >= maxReleaseForwarding {
+		return false
+	}
+	active[callee] = true
+	defer delete(active, callee)
+
+	found := false
+	ast.Inspect(callee.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !c.callHandsOnLock(call, target) {
+			return true
+		}
+		next := c.resolveCalledFuncDecl(call)
+		if next == nil || next.Body == nil {
+			return true
+		}
+		if nextTarget, ok := c.argumentReleaseTarget(call, next, target); ok && c.calleeReleasesLock(next, nextTarget, active) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// argumentReleaseTarget names, inside callee, the lock the caller calls
+// mutexName, when the call hands it over through an argument. The argument is
+// either the value that holds the lock (`release(shard)`, the lock is
+// `shard.mu` in there) or the lock itself by address (`release(&mu)`,
+// `release(&s.mu)`, or `release(mu)` with mu already a pointer), in which case
+// the parameter is the lock.
+func (c *Checker) argumentReleaseTarget(call *ast.CallExpr, callee *ast.FuncDecl, mutexName string) (string, bool) {
+	if base, suffix, ok := splitBaseAndSuffix(mutexName); ok {
+		if paramName, ok := calleeParamNameForArg(call, callee, base); ok {
+			return paramName + "." + suffix, true
+		}
+	}
+	return c.calleeParamNameForLockArg(call, callee, mutexName)
+}
+
+// calleeParamNameForLockArg returns the parameter that receives the lock
+// mutexName itself. Only an address reaches the callee as the same lock: a
+// sync.Mutex passed by value is a copy, and releasing the copy leaves the
+// caller's lock held, so a value argument never matches.
+func (c *Checker) calleeParamNameForLockArg(call *ast.CallExpr, callee *ast.FuncDecl, mutexName string) (string, bool) {
+	if callee.Type == nil {
+		return "", false
+	}
+
+	argIndex := -1
+	for i, arg := range call.Args {
+		if c.argumentIsLockAddress(arg, mutexName) {
+			argIndex = i
+			break
+		}
+	}
+	if argIndex < 0 {
+		return "", false
+	}
+
+	names := flattenParamNames(callee.Type.Params)
+	if argIndex >= len(names) || names[argIndex] == "" {
+		return "", false
+	}
+	return names[argIndex], true
+}
+
+func (c *Checker) argumentIsLockAddress(arg ast.Expr, mutexName string) bool {
+	arg = common.UnwrapParenExpr(arg)
+	if unary, ok := arg.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+		return common.GetVarName(unary.X) == mutexName
+	}
+	if common.GetVarName(arg) != mutexName || c.typesInfo == nil {
+		return false
+	}
+	typ := c.typesInfo.TypeOf(arg)
+	if typ == nil {
+		return false
+	}
+	_, isPointer := typ.Underlying().(*types.Pointer)
+	return isPointer
 }
 
 // topLevelFunctionNamed returns the package-level (non-method) function with the
