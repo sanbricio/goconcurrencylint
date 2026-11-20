@@ -90,6 +90,107 @@ func BadAddressReleasedOnOnePathOnly(c *addressReleasedCounter, skip bool) {
 	unlockGivenMutex(&c.mu)
 }
 
+// --- package-level lock named by both sides ---
+
+var helperRegistry struct {
+	mu   sync.RWMutex
+	byID map[string]int
+}
+
+func releaseHelperRegistry() {
+	helperRegistry.mu.Unlock()
+}
+
+func releaseHelperRegistryRead() {
+	helperRegistry.mu.RUnlock()
+}
+
+// GoodPackageLockReleasedByHelper must be CLEAN, and so must
+// releaseHelperRegistry: every caller takes the lock first.
+func GoodPackageLockReleasedByHelper(id string, v int) {
+	helperRegistry.mu.Lock()
+	helperRegistry.byID[id] = v
+	releaseHelperRegistry()
+}
+
+// GoodPackageLockReleasedByHelperOnEveryPath must be CLEAN.
+func GoodPackageLockReleasedByHelperOnEveryPath(id string) bool {
+	helperRegistry.mu.Lock()
+	if _, ok := helperRegistry.byID[id]; ok {
+		releaseHelperRegistry()
+		return false
+	}
+	helperRegistry.byID[id] = 0
+	releaseHelperRegistry()
+	return true
+}
+
+// GoodPackageReadLockReleasedByHelper must be CLEAN.
+func GoodPackageReadLockReleasedByHelper(id string) int {
+	helperRegistry.mu.RLock()
+	v := helperRegistry.byID[id]
+	releaseHelperRegistryRead()
+	return v
+}
+
+var helperSequence sync.Mutex
+
+func releaseHelperSequence() {
+	helperSequence.Unlock()
+}
+
+// BadPackageLockHelperSkippedOnError: the error path returns with the lock
+// held.
+func BadPackageLockHelperSkippedOnError(fail bool) error {
+	helperSequence.Lock() // want "mutex 'helperSequence' is locked but not unlocked"
+	if fail {
+		return errHelperSequence
+	}
+	releaseHelperSequence()
+	return nil
+}
+
+var errHelperSequence = errorString("sequence failed")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
+
+var helperUnheld sync.Mutex
+
+// releaseHelperUnheld must be flagged: one of its callers never takes the
+// lock, so the helper is not a release on the callers' behalf.
+func releaseHelperUnheld() {
+	helperUnheld.Unlock() // want "mutex 'helperUnheld' is unlocked but not locked"
+}
+
+// GoodPackageLockReleasedByUnheldHelper must be CLEAN itself.
+func GoodPackageLockReleasedByUnheldHelper() {
+	helperUnheld.Lock()
+	releaseHelperUnheld()
+}
+
+// BadCallerReleasesWithoutLock calls the helper without the lock. It never
+// names the lock itself, so the defect is reported once, in the helper above.
+func BadCallerReleasesWithoutLock() {
+	releaseHelperUnheld()
+}
+
+var helperShadowed sync.Mutex
+
+// releaseShadowedHelper unlocks a local that shadows the package variable, so
+// calling it releases nothing the caller holds.
+func releaseShadowedHelper() {
+	var helperShadowed sync.Mutex
+	helperShadowed.Unlock() // want "mutex 'helperShadowed' is unlocked but not locked"
+}
+
+// BadPackageLockHelperReleasesShadow keeps the package lock held.
+func BadPackageLockHelperReleasesShadow() {
+	helperShadowed.Lock() // want "mutex 'helperShadowed' is locked but not unlocked"
+	releaseShadowedHelper()
+}
+
 // --- helpers that hand the lock on ---
 
 // unlockGivenMutexVia must be CLEAN: it releases through unlockGivenMutex.

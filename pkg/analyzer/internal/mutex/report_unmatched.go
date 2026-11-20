@@ -90,6 +90,7 @@ func (c *Checker) unlockDiagnosticSuppressed(mutexName string, acquireMethods []
 	return c.lifecycle.isReleaseFor(mutexName, acquireMethods) ||
 		c.lifecycle.isReturnedFuncReleaseFor(mutexName, acquireMethods) ||
 		c.lifecycle.isCallerManagedReleaseFor(mutexName, acquireMethods) ||
+		c.lifecycle.isCallerManagedPackageReleaseFor(mutexName, acquireMethods) ||
 		c.functionIsParameterUnlockHelper(mutexName, acquireMethods) ||
 		c.lifecycle.isHandedOutReleaseMethod(mutexName, acquireMethods) ||
 		c.lifecycle.lockAcquiredOnlyOpaquely(mutexName, acquireMethods)

@@ -2,6 +2,7 @@ package mutex
 
 import (
 	"go/ast"
+	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/report"
 )
@@ -36,6 +37,10 @@ type funcAnalysis struct {
 	flagGuardedFlags map[string]string
 	// flagGuardedReadFlags is flagGuardedFlags for RLock/RUnlock.
 	flagGuardedReadFlags map[string]string
+
+	// packageLockRoots memoizes packageLockRoot: the package-level variable
+	// each lock name of the function is rooted at, nil for a local lock.
+	packageLockRoots map[string]types.Object
 
 	// refine is set in a refined run (see refine.go) and in every simulation
 	// forked from one; facts is that run's knowledge of local variables at the

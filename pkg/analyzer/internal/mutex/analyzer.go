@@ -716,8 +716,9 @@ func (c *Checker) applyLocalMethodLifecycleEffects(call *ast.CallExpr, stats map
 
 // applyLocalFunctionCallLifecycleEffects models a call to a top-level (non-method)
 // function that releases a lock held on one of its arguments, e.g.
-// `releaseShardLock(shard)` whose body runs `shard.mu.Unlock()`. Without this the
-// caller appears to leak the lock on the delegated path. It mirrors
+// `releaseShardLock(shard)` whose body runs `shard.mu.Unlock()`, or a
+// package-level lock it names itself (applyPackageLockReleaseEffect). Without
+// this the caller appears to leak the lock on the delegated path. It mirrors
 // applyLocalMethodLifecycleEffects but maps the locked variable through the
 // argument position to the callee's parameter name.
 func (c *Checker) applyLocalFunctionCallLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
@@ -734,7 +735,8 @@ func (c *Checker) applyLocalFunctionCallLifecycleEffects(call *ast.CallExpr, sta
 	changed := false
 	applyAll := func(names map[string]bool, isRWMutex bool) {
 		for name := range names {
-			if c.applyArgumentReleaseEffect(call, callee, name, isRWMutex, stats) {
+			if c.applyArgumentReleaseEffect(call, callee, name, isRWMutex, stats) ||
+				c.applyPackageLockReleaseEffect(call, callee, name, isRWMutex, stats) {
 				changed = true
 			}
 		}
