@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://golang.org/doc/go1.25"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go Version"></a>
+  <a href="https://golang.org/doc/go1.26"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
   <a href="https://pkg.go.dev/github.com/sanbricio/goconcurrencylint"><img src="https://pkg.go.dev/badge/github.com/sanbricio/goconcurrencylint.svg" alt="Go Reference"></a>
   <a href="https://github.com/sanbricio/goconcurrencylint/actions/workflows/ci.yml"><img src="https://github.com/sanbricio/goconcurrencylint/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -71,7 +71,7 @@ go install github.com/sanbricio/goconcurrencylint/cmd/goconcurrencylint@latest
 
 This places `goconcurrencylint` in `$GOBIN` (or `$GOPATH/bin`). Make sure that directory is on your `PATH`.
 
-> **Requirements:** Go 1.25 or later.
+> **Requirements:** Go 1.26 or later.
 
 ### Build from source
 
@@ -89,14 +89,14 @@ from the golangci-lint you already have instead of installing a second binary.
 Declare it in `.custom-gcl.yml`:
 
 ```yaml
-version: v2.12.2
+version: v2.15.0
 name: custom-gcl
 destination: ./bin
 
 plugins:
   - module: github.com/sanbricio/goconcurrencylint
     import: github.com/sanbricio/goconcurrencylint/pkg/golangci
-    version: v0.5.0
+    version: v0.7.0
 ```
 
 Run `golangci-lint custom` to build `./bin/custom-gcl` — a golangci-lint binary

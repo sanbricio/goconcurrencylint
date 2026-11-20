@@ -17,14 +17,14 @@ Requires golangci-lint v2.
 Create `.custom-gcl.yml` next to your `.golangci.yml`:
 
 ```yaml
-version: v2.12.2 # the golangci-lint version to build on
+version: v2.15.0 # the golangci-lint version to build on
 name: custom-gcl # the binary name
 destination: ./bin
 
 plugins:
   - module: github.com/sanbricio/goconcurrencylint
     import: github.com/sanbricio/goconcurrencylint/pkg/golangci
-    version: v0.5.0
+    version: v0.7.0
 ```
 
 `import` is needed because the plugin lives in a subpackage of the module; it
