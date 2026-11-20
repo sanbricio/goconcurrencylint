@@ -1,3 +1,46 @@
+## [0.7.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.7.0) - 2026-11-20
+
+### 🚀 Features
+
+- *(mutex)* Model acquire-or-fail helpers and judge lock wrappers by structure
+
+### 🐛 Bug Fixes
+
+- Remove 23 mutex/waitgroup false positives found on real repos
+- Remove mutex/waitgroup false positives across 37 real repos and std
+
+### 📚 Documentation
+
+- Highlight bugs found upstream in the README
+
+### ⚙️ Miscellaneous Tasks
+
+- Update golang.org/x/tools v0.51.0 to v0.52.0
+- Update golang.org/x/tools to v0.53.0 and golang.org/x/mod, golang.org/x/sync to latest versions
+
+### ❤️ Contributors
+
+- @sanbricio
+
+**Full Changelog**: https://github.com/sanbricio/goconcurrencylint/compare/v0.6.0...v0.7.0
+## [0.6.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.6.0) - 2026-09-19
+
+### 🚀 Features
+
+- Enhance mutex analysis with branch stats merging and tryLock handling
+
+### 🚜 Refactor
+
+- Simplify loop iterations using slices.Backward for clarity
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Go version and dependencies to v1.26.0 and latest module versions
+- Update Go version to 1.26 in CI workflows
+
+### ❤️ Contributors
+
+- @sanbricio
 ## [0.6.0](https://github.com/sanbricio/goconcurrencylint/releases/tag/v0.6.0) - 2026-09-19
 
 ### 🚀 Features
