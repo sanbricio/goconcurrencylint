@@ -1100,6 +1100,10 @@ func (l *lifecycleResolver) explicitTransferCallPositions(body *ast.BlockStmt) m
 			if fnlit, ok := s.Call.Fun.(*ast.FuncLit); ok && fnlit.Body != nil {
 				visitStmtList(fnlit.Body.List)
 			}
+		case *ast.DeferStmt:
+			// `mu.Lock(); defer release()`: the call runs at return, with the
+			// lock taken before the defer still held.
+			recordCall(s.Call)
 		case *ast.AssignStmt:
 			// `ok := t.flushAndUnlock()`: the call runs as its own step.
 			for _, rhs := range s.Rhs {

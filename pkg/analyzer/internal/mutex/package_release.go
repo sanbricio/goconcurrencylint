@@ -45,6 +45,19 @@ func (c *Checker) applyPackageLockReleaseEffect(call *ast.CallExpr, callee *ast.
 	return true
 }
 
+// functionReleaseTarget names, inside the plain function callee, the lock the
+// caller calls mutexName: the parameter it reaches through an argument, or the
+// same package-level variable under the same spelling.
+func (c *Checker) functionReleaseTarget(call *ast.CallExpr, callee *ast.FuncDecl, mutexName string) (string, bool) {
+	if target, ok := c.argumentReleaseTarget(call, callee, mutexName); ok {
+		return target, true
+	}
+	if c.packageLockReleasedBy(callee, mutexName) {
+		return mutexName, true
+	}
+	return "", false
+}
+
 // packageLockReleasedBy reports whether mutexName is rooted at a package-level
 // variable and callee releases that same variable under the same spelling.
 func (c *Checker) packageLockReleasedBy(callee *ast.FuncDecl, mutexName string) bool {

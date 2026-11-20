@@ -191,6 +191,53 @@ func BadPackageLockHelperReleasesShadow() {
 	releaseShadowedHelper()
 }
 
+// --- deferred release helpers ---
+
+// GoodDeferredPackageLockHelper must be CLEAN.
+func GoodDeferredPackageLockHelper(id string) {
+	helperRegistry.mu.Lock()
+	defer releaseHelperRegistry()
+	delete(helperRegistry.byID, id)
+}
+
+// GoodDeferredAddressHelper must be CLEAN.
+func GoodDeferredAddressHelper(c *addressReleasedCounter) int {
+	c.mu.Lock()
+	defer unlockGivenMutex(&c.mu)
+	return c.n
+}
+
+type deferredReleaseQueue struct {
+	mu    sync.Mutex
+	items []int
+}
+
+// giveBack must be CLEAN: its only caller defers it with the lock held.
+func (q *deferredReleaseQueue) giveBack() {
+	q.mu.Unlock()
+}
+
+// GoodDeferredMethodReleaseHelper must be CLEAN.
+func (q *deferredReleaseQueue) GoodDeferredMethodReleaseHelper(v int) {
+	q.mu.Lock()
+	defer q.giveBack()
+	q.items = append(q.items, v)
+}
+
+var helperMode sync.RWMutex
+
+// runlockHelperMode must be flagged: its only caller holds the write lock, not
+// a read lock.
+func runlockHelperMode() {
+	helperMode.RUnlock() // want "rwmutex 'helperMode' is runlocked but not rlocked"
+}
+
+// BadDeferredReadHelperAfterWriteLock defers a read release for a write lock.
+func BadDeferredReadHelperAfterWriteLock() {
+	helperMode.Lock() // want "rwmutex 'helperMode' is locked but not unlocked"
+	defer runlockHelperMode()
+}
+
 // --- helpers that hand the lock on ---
 
 // unlockGivenMutexVia must be CLEAN: it releases through unlockGivenMutex.

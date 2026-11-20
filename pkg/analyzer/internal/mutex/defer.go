@@ -64,7 +64,32 @@ func (c *Checker) analyzeDeferStatement(stmt *ast.DeferStmt, stats map[string]*S
 		c.handleDeferFunctionLiteral(fnlit, stmt.Pos(), stats)
 		c.handleDeferredOnceReleases(fnlit, stmt.Pos(), stats)
 		c.applyDeferredClosureWrapperRelease(fnlit, stmt.Pos(), stats)
+		return
 	}
+
+	c.applyDeferredFunctionRelease(stmt.Call, stmt.Pos(), stats)
+}
+
+// applyDeferredFunctionRelease is applyDeferredWrapperRelease for a plain
+// function of this package: `defer unlockGiven(&mu)` or `defer release()` on a
+// package-level lock releases that lock at return when the callee, simulated
+// from a state holding nothing, releases it exactly once.
+func (c *Checker) applyDeferredFunctionRelease(call *ast.CallExpr, pos token.Pos, stats map[string]*Stats) bool {
+	ident, ok := common.UnwrapParenExpr(call.Fun).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	callee := c.topLevelFunctionNamed(ident.Name)
+	if callee == nil || callee.Body == nil || callee == c.function {
+		return false
+	}
+	return c.applyDeferredReleases(pos, stats, func(name string, rw bool) *Stats {
+		calleeLock, ok := c.functionReleaseTarget(call, callee, name)
+		if !ok {
+			return nil
+		}
+		return c.simulateMethodEffect(callee, calleeLock, rw, &Stats{}, nil)
+	})
 }
 
 // applyDeferredWrapperRelease handles `defer e.unlock()`: deferring a method of
