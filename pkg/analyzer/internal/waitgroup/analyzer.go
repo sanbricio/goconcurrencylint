@@ -26,8 +26,9 @@ type Checker struct {
 	typesInfo                  *types.Info
 	pkg                        *types.Package
 	functionDecls              map[token.Pos]*ast.FuncDecl
-	// packageCounters is shared across every function of the pass.
+	// packageCounters and fieldDones are shared across every function of the pass.
 	packageCounters *packageCounterIndex
+	fieldDones      *fieldDoneIndex
 	escape          *escapeAnalyzer
 	iteration       *iterationEstimator
 	worker          *workerDoneAnalyzer

@@ -13,24 +13,29 @@ type funcAnalysis struct {
 	deferErrors            *deferErrorCollector
 	rawBodyEffects         bool
 	goroutineLockConflicts []goroutineLockConflict
-	tryLock                *tryLockTracker
-	wrapper                *wrapperResolver
-	lifecycle              *lifecycleResolver
-	panicDetector          *lockedPanicDetector
-	terminatingTailDepth   int
-	labelGotoSnapshots     map[string]map[string]*Stats
-	simulationStack        map[methodSimulationKey]bool
-	localFuncStack         map[*ast.FuncLit]bool
-	statementLocations     map[ast.Stmt]statementLocation
-	enclosingIfs           map[*ast.IfStmt][]*ast.IfStmt
-	ifInitOwners           map[ast.Stmt]*ast.IfStmt
-	handoffErrorGuards     map[*ast.IfStmt][]handoffErrorGuard
-	pendingAcquisitions    map[*ast.IfStmt][]pendingAcquisition
+	// handoffs memoizes goroutineHandoffs for the function.
+	handoffs             *[]goroutineHandoff
+	tryLock              *tryLockTracker
+	wrapper              *wrapperResolver
+	lifecycle            *lifecycleResolver
+	panicDetector        *lockedPanicDetector
+	terminatingTailDepth int
+	labelGotoSnapshots   map[string]map[string]*Stats
+	exits                *exitCollector
+	simulationStack      map[methodSimulationKey]bool
+	localFuncStack       map[*ast.FuncLit]bool
+	statementLocations   map[ast.Stmt]statementLocation
+	enclosingIfs         map[*ast.IfStmt][]*ast.IfStmt
+	ifInitOwners         map[ast.Stmt]*ast.IfStmt
+	handoffErrorGuards   map[*ast.IfStmt][]handoffErrorGuard
+	pendingAcquisitions  map[*ast.IfStmt][]pendingAcquisition
 
 	// flagGuardedFlags maps mutexes released by a deferred, flag-guarded unlock
 	// (see detectFlagGuardedReleaseFlags) to their guard flag name. Populated once
 	// per real function.
 	flagGuardedFlags map[string]string
+	// flagGuardedReadFlags is flagGuardedFlags for RLock/RUnlock.
+	flagGuardedReadFlags map[string]string
 
 	// refine is set in a refined run (see refine.go) and in every simulation
 	// forked from one; facts is that run's knowledge of local variables at the

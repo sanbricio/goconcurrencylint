@@ -168,6 +168,35 @@ func GoodCleanupUnlock() {
 	})
 }
 
+// GoodCleanupMethodValue must be CLEAN: passing the unlock method itself
+// registers it like the closure above.
+func GoodCleanupMethodValue() {
+	var mu sync.RWMutex
+	t := cleanupRegistrar{}
+	mu.RLock()
+	t.Cleanup(mu.RUnlock)
+}
+
+// GoodCleanupNamedClosure must be CLEAN: the registered function is a local
+// closure that releases the lock.
+func GoodCleanupNamedClosure() {
+	var mu sync.Mutex
+	t := cleanupRegistrar{}
+	release := func() { mu.Unlock() }
+	mu.Lock()
+	t.Cleanup(release)
+}
+
+// BadCleanupReleasesOtherLock must be flagged: the registered unlock belongs
+// to another lock.
+func BadCleanupReleasesOtherLock() {
+	var mu sync.Mutex
+	var other sync.RWMutex
+	t := cleanupRegistrar{}
+	mu.Lock()               // want "mutex 'mu' is locked but not unlocked"
+	t.Cleanup(other.Unlock) // want "rwmutex 'other' has defer unlock but no corresponding lock"
+}
+
 type returnUnlocker struct {
 	mu sync.Mutex
 }

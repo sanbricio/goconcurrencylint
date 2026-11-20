@@ -3,6 +3,7 @@ package waitgroup
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"strings"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
@@ -158,12 +159,17 @@ func (b *balanceValidator) checkAddAfterWaitInMainFlow(wgName string, st *Stats)
 			continue
 		}
 
-		// Check if this Wait has any Add or Done operations before it in main flow
+		// Check if this Wait has any Add or Done operations before it in main
+		// flow. Inside a loop, an operation written after the Wait runs before
+		// it on the next iteration.
 		hasOperationsBefore := false
+		runsBefore := func(pos token.Pos) bool {
+			return (pos < wait || b.shareLoop(pos, wait)) && !b.isInGoroutine(pos)
+		}
 
 		// Check for Add calls before this Wait (main flow only)
 		for _, add := range st.addCalls {
-			if add.pos < wait && !b.isInGoroutine(add.pos) {
+			if runsBefore(add.pos) {
 				hasOperationsBefore = true
 				break
 			}
@@ -171,23 +177,13 @@ func (b *balanceValidator) checkAddAfterWaitInMainFlow(wgName string, st *Stats)
 
 		// Check for Done calls before this Wait (main flow only)
 		if !hasOperationsBefore {
-			for _, done := range st.doneCalls {
-				if done < wait && !b.isInGoroutine(done) {
-					hasOperationsBefore = true
-					break
-				}
-			}
+			hasOperationsBefore = slices.ContainsFunc(st.doneCalls, runsBefore)
 		}
 
 		// WaitGroup.Go is also a task-starting operation and must be treated like Add
 		// for the "empty Wait followed by new work" pattern.
 		if !hasOperationsBefore {
-			for _, goPos := range st.goCalls {
-				if goPos < wait && !b.isInGoroutine(goPos) {
-					hasOperationsBefore = true
-					break
-				}
-			}
+			hasOperationsBefore = slices.ContainsFunc(st.goCalls, runsBefore)
 		}
 
 		// If this is an "empty" Wait (no operations before it), flag subsequent Add calls
@@ -208,6 +204,24 @@ func (b *balanceValidator) checkAddAfterWaitInMainFlow(wgName string, st *Stats)
 			}
 		}
 	}
+}
+
+// shareLoop reports whether a loop of the function encloses both positions.
+func (b *balanceValidator) shareLoop(a, c token.Pos) bool {
+	found := false
+	ast.Inspect(b.function.Body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch n.(type) {
+		case *ast.ForStmt, *ast.RangeStmt:
+			if nodeContainsPos(n, a) && nodeContainsPos(n, c) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 func (b *balanceValidator) goroutineOnlyWaitsOnWaitGroup(goStmt *ast.GoStmt, wgName string) bool {

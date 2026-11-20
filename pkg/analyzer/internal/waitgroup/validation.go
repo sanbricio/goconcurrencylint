@@ -16,6 +16,7 @@ func (c *Checker) validateUsage(stats map[string]*Stats) {
 		typesInfo:                    c.typesInfo,
 		escape:                       c.escape,
 		countedInOtherFunction:       c.packageWaitGroupBalanceIsCrossFunction,
+		fieldDoneElsewhere:           c.fieldWaitGroupDoneIsElsewhere,
 		isInGoroutine:                c.isInGoroutine,
 		isNodeInGoroutine:            c.isNodeInGoroutine,
 		callInvokesDone:              c.worker.callInvokesDone,

@@ -30,6 +30,7 @@ func run(pass *analysis.Pass) (any, error) {
 	// in the pass. driver.Run visits functions sequentially, so the lazy init
 	// needs no synchronization.
 	var counters *packageCounterIndex
+	var fieldDones *fieldDoneIndex
 	var functionDecls map[token.Pos]*ast.FuncDecl
 	return driver.Run(pass, driver.Config[*Checker]{
 		Guard: primitives.HasWaitGroups,
@@ -37,11 +38,15 @@ func run(pass *analysis.Pass) (any, error) {
 			if counters == nil {
 				counters = newPackageCounterIndex(pass.Files)
 			}
+			if fieldDones == nil {
+				fieldDones = newFieldDoneIndex(pass.Files, pass.TypesInfo)
+			}
 			if functionDecls == nil {
 				functionDecls = buildFunctionDeclMap(pass.Files)
 			}
 			checker := newCheckerWithFunctionDecls(fr, ec, cf, pass, functionDecls)
 			checker.packageCounters = counters
+			checker.fieldDones = fieldDones
 			return checker
 		},
 	})

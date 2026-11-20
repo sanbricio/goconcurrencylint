@@ -3,8 +3,10 @@ package mutex
 import "go/ast"
 
 // everyAcquisitionPairsWith reports whether a body acquires a lock at least
-// once and every acquisition is immediately followed by the statement recording
-// it (`held = true`, `locker = &mu`). A deferred release only fires for
+// once and every acquisition sits right next to the statement recording it
+// (`held = true`, `locker = &mu`), just after it or just before it: with
+// nothing in between, `held = true; mu.Lock()` records exactly the same
+// acquisitions as `mu.Lock(); held = true`. A deferred release only fires for
 // acquisitions the bookkeeping knows about, so one that skips it stays
 // unreleased. Function literals count as part of the same body.
 func everyAcquisitionPairsWith(body *ast.BlockStmt, acquires, records func(ast.Stmt) bool) bool {
@@ -22,7 +24,9 @@ func everyAcquisitionPairsWith(body *ast.BlockStmt, acquires, records func(ast.S
 		for i, stmt := range stmts {
 			if acquires(stmt) {
 				foundAcquisition = true
-				if i+1 >= len(stmts) || !records(stmts[i+1]) {
+				recordedAfter := i+1 < len(stmts) && records(stmts[i+1])
+				recordedBefore := i > 0 && records(stmts[i-1])
+				if !recordedAfter && !recordedBefore {
 					paired = false
 				}
 				continue

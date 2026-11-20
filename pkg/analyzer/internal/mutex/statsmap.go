@@ -91,6 +91,8 @@ func copyStats(dst, src *Stats) {
 	dst.rlockPos = slices.Clone(src.rlockPos)
 	dst.borrowedUnlockPos = slices.Clone(src.borrowedUnlockPos)
 	dst.borrowedRUnlockPos = slices.Clone(src.borrowedRUnlockPos)
+	dst.deferLockPos = slices.Clone(src.deferLockPos)
+	dst.deferRLockPos = slices.Clone(src.deferRLockPos)
 }
 
 // mergeBranchStats folds the two branch states of an if/else into dst, taking
@@ -134,7 +136,22 @@ func foldStats(a, b *Stats, pick func(int, int) int) *Stats {
 		rlockPos:           unionPositions(a.rlockPos, b.rlockPos),
 		borrowedUnlockPos:  unionPositions(a.borrowedUnlockPos, b.borrowedUnlockPos),
 		borrowedRUnlockPos: unionPositions(a.borrowedRUnlockPos, b.borrowedRUnlockPos),
+		// A re-acquisition deferred on one branch only does not run on the
+		// other: keep just the ones both registered.
+		deferLockPos:  commonPositions(a.deferLockPos, b.deferLockPos),
+		deferRLockPos: commonPositions(a.deferRLockPos, b.deferRLockPos),
 	}
+}
+
+// commonPositions returns the positions present in both a and b.
+func commonPositions(a, b []token.Pos) []token.Pos {
+	var both []token.Pos
+	for _, pos := range a {
+		if slices.Contains(b, pos) {
+			both = append(both, pos)
+		}
+	}
+	return both
 }
 
 func unionPositions(a, b []token.Pos) []token.Pos {

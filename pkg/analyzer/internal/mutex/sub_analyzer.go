@@ -41,7 +41,8 @@ func run(pass *analysis.Pass) (any, error) {
 	return driver.Run(pass, driver.Config[*Checker]{
 		Guard: primitives.HasMutexes,
 		Extend: func(fn *ast.FuncDecl, fr *primitives.FunctionResult, pass *analysis.Pass) *primitives.FunctionResult {
-			return packageScopeFor(pass).withHandedOverLocks(fn, fr, pass)
+			fr = packageScopeFor(pass).withHandedOverLocks(fn, fr, pass)
+			return withoutCollectionHeldLocks(fn, fr, pass.TypesInfo)
 		},
 		NewChecker: func(fr *primitives.FunctionResult, ec report.Reporter, cf *commentfilter.CommentFilter, pass *analysis.Pass) *Checker {
 			return NewChecker(fr, ec, cf, pass.TypesInfo, packageScopeFor(pass))

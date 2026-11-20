@@ -91,6 +91,11 @@ type Stats struct {
 	lockPos, rlockPos           []token.Pos
 	borrowedUnlockPos           []token.Pos
 	borrowedRUnlockPos          []token.Pos
+	// deferLockPos and deferRLockPos are the deferred Lock/RLock calls of a
+	// simulated callee that take back at return a lock it dropped
+	// (`mu.RUnlock(); defer mu.RLock()`); applyFunctionExitDefers applies
+	// them.
+	deferLockPos, deferRLockPos []token.Pos
 }
 
 // deferErrorCollector tracks defer-related errors to avoid duplicate reporting
@@ -160,6 +165,14 @@ func (c *Checker) AnalyzeFunction(fn *ast.FuncDecl) {
 	out := c.errorCollector
 	defer func() { c.errorCollector = out }()
 
+	// A lock walked hand over hand has no stable name (see lock_coupling.go).
+	if coupled := coupledLockNames(fn.Body, func(name string) bool {
+		return c.mutexNames[name] || c.rwMutexNames[name]
+	}); len(coupled) > 0 {
+		c.mutexNames = withoutLockNames(c.mutexNames, coupled)
+		c.rwMutexNames = withoutLockNames(c.rwMutexNames, coupled)
+	}
+
 	found := &bufferedReporter{}
 	c.runFunction(fn, found, nil)
 	if found.hasAny(lockStateCategories) && c.refinementClearsLockState(fn) {
@@ -185,6 +198,7 @@ func (c *Checker) runFunction(fn *ast.FuncDecl, reporter report.Reporter, refine
 	c.panicDetector = newLockedPanicDetector(c.mutexNames, c.rwMutexNames, c.typesInfo, c.errorCollector, c.rawBodyEffects)
 	c.lockAliases = c.detectLockAliases(fn)
 	c.flagGuardedFlags = c.detectFlagGuardedReleaseFlags(fn)
+	c.flagGuardedReadFlags = c.detectFlagGuardedReadReleaseFlags(fn)
 	c.safeDeferBeforeLock = c.detectSafeDeferBeforeLock(fn)
 	c.crossGoroutineDeferHandoff = c.detectCrossGoroutineDeferHandoff(fn)
 	c.stats = initialStats(c.mutexNames, c.rwMutexNames)
@@ -430,12 +444,15 @@ func remapAddedPositions(after, before []token.Pos, pos token.Pos) []token.Pos {
 }
 
 func (c *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, stats map[string]*Stats) bool {
-	ident, ok := call.Fun.(*ast.Ident)
-	if !ok {
-		return false
+	// A literal called where it is written, func() { ... }(), runs there
+	// exactly like one bound to a name first.
+	var fnlit *ast.FuncLit
+	switch fun := common.UnwrapParenExpr(call.Fun).(type) {
+	case *ast.FuncLit:
+		fnlit = fun
+	case *ast.Ident:
+		fnlit = c.localFunctionLiteralBefore(fun.Name, call.Pos())
 	}
-
-	fnlit := c.localFunctionLiteralBefore(ident.Name, call.Pos())
 	if fnlit == nil || fnlit.Body == nil {
 		return false
 	}
@@ -458,11 +475,65 @@ func (c *Checker) applyLocalFunctionLiteralLifecycleEffects(call *ast.CallExpr, 
 	}
 	simulated := c.forkForSimulation(sub, c.mutexNames, c.rwMutexNames)
 
+	inline := common.UnwrapParenExpr(call.Fun) == fnlit
+	var exits *exitCollector
+	if inline {
+		exits = newExitCollector(fnlit.Body, nil)
+		simulated.exits = exits
+	}
 	baseline := cloneStatsMap(stats)
 	final := simulated.analyzeBlock(fnlit.Body, baseline)
 	simulated.applyFunctionExitDefers(final, baseline)
+	if inline {
+		c.carryInlineLiteralFacts(fnlit, simulated.facts)
+		// Every way out of the literal must leave the same state for the code
+		// after the call to start from one; otherwise the call is left
+		// unmodeled, as it was before literals run in place were simulated.
+		ends := exits.states
+		for _, end := range ends {
+			simulated.applyFunctionExitDefers(end, baseline)
+		}
+		if !c.termination.blockAlwaysTerminates(fnlit.Body) {
+			ends = append(ends, final)
+		}
+		merged := c.convergedBranchState(ends, nil)
+		if merged == nil {
+			return false
+		}
+		final = merged
+	}
 	copyStatsMap(stats, final)
 	return true
+}
+
+// carryInlineLiteralFacts brings back, in a refined run, what a literal run in
+// place leaves known about the variables it assigns (see inlineLiterals). The
+// simulated state is the one that falls off the literal's end, so a literal
+// that may return early only makes its assignments unknown.
+func (c *Checker) carryInlineLiteralFacts(fnlit *ast.FuncLit, after factSet) {
+	if c.refine == nil {
+		return
+	}
+	if literalHasReturn(fnlit) || after == nil {
+		c.forgetFactsAssignedIn(fnlit.Body)
+		return
+	}
+	c.facts = after.clone()
+}
+
+// literalHasReturn reports whether fnlit returns anywhere but its end.
+func literalHasReturn(fnlit *ast.FuncLit) bool {
+	found := false
+	ast.Inspect(fnlit.Body, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 func (c *Checker) localFunctionLiteralBefore(name string, before token.Pos) *ast.FuncLit {
@@ -525,6 +596,14 @@ func (c *Checker) applyFunctionExitDefers(stats, baseline map[string]*Stats) {
 			st.removeFirstRLockPos()
 		}
 		st.deferRUnlock = baselineDeferRUnlocks
+		// Deferred re-acquisitions were registered first, so they run last.
+		for _, pos := range st.deferLockPos {
+			st.carryLock(pos)
+		}
+		for _, pos := range st.deferRLockPos {
+			st.carryRLock(pos)
+		}
+		st.deferLockPos, st.deferRLockPos = nil, nil
 	}
 }
 
@@ -761,4 +840,28 @@ func (s *Stats) removeFirstBorrowedRUnlockPos() {
 	if len(s.borrowedRUnlockPos) > 0 {
 		s.borrowedRUnlockPos = s.borrowedRUnlockPos[1:]
 	}
+}
+
+// carryLock records a write lock taken at pos and still held: it first takes
+// back a lock released earlier without being held here (borrowed), as Lock
+// does, and only otherwise adds one.
+func (s *Stats) carryLock(pos token.Pos) {
+	if s.borrowedLock > 0 {
+		s.borrowedLock--
+		s.removeFirstBorrowedUnlockPos()
+		return
+	}
+	s.lock++
+	s.lockPos = append(s.lockPos, pos)
+}
+
+// carryRLock is carryLock for a read lock.
+func (s *Stats) carryRLock(pos token.Pos) {
+	if s.borrowedRLock > 0 {
+		s.borrowedRLock--
+		s.removeFirstBorrowedRUnlockPos()
+		return
+	}
+	s.rlock++
+	s.rlockPos = append(s.rlockPos, pos)
 }

@@ -184,16 +184,18 @@ func (l *lifecycleResolver) computeAcquiresOnSuccess(fn *ast.FuncDecl, mutexName
 	if fn == nil || fn.Name == nil || fn.Body == nil {
 		return false
 	}
+	// The lock hangs off the receiver, or off a parameter: a helper handed the
+	// object it locks (`freeze(b *Bucket) error { ...; b.mu.Lock(); return nil }`).
 	receiver := common.ReceiverName(fn)
-	if receiver == "" || common.ReceiverTypeName(fn) == "" {
-		return false
-	}
-	if _, ok := receiverRelativePath(mutexName, receiver); !ok {
+	_, rooted := receiverRelativePath(mutexName, receiver)
+	rooted = rooted && receiver != "" && common.ReceiverTypeName(fn) != ""
+	if !rooted && parameterIndex(fn, lockRoot(mutexName)) < 0 {
 		return false
 	}
 	// Cheap pre-filter: the lock must be taken in the body, directly or through
 	// a call that may take it.
-	if !functionBodyContainsFieldCall(fn.Body, mutexName, pattern.LockMethods) && !l.callsPossibleAcquirer(fn.Body, mutexName, pattern) {
+	if !functionBodyContainsFieldCall(fn.Body, mutexName, pattern.LockMethods) && !l.callsPossibleAcquirer(fn.Body, mutexName, pattern) &&
+		!l.passesBoundAcquire(fn.Body, mutexName, pattern) {
 		return false
 	}
 
@@ -359,8 +361,15 @@ func (l *lifecycleResolver) lockStateAtReturn(body *ast.BlockStmt, ret *ast.Retu
 	}
 	for k, frame := range slices.Backward(path) {
 		switch current := frame.list[frame.index].(type) {
-		case *ast.ForStmt, *ast.RangeStmt:
+		case *ast.ForStmt:
+			// Inside `for !mu.TryLock() { ... }` every pass starts from a
+			// failed attempt; nothing in the body before the return took it.
+			if tryLockRetryLoop(current, mutexName, pattern) {
+				return lockNotAcquiredAtReturn, true
+			}
 			// An earlier iteration may have left the lock in any state.
+			return lockNotAcquiredAtReturn, false
+		case *ast.RangeStmt:
 			return lockNotAcquiredAtReturn, false
 		case *ast.IfStmt:
 			if k+1 < len(path) && sameStatementList(path[k+1].list, current.Body.List) &&
@@ -377,7 +386,11 @@ func (l *lifecycleResolver) lockStateAtReturn(body *ast.BlockStmt, ret *ast.Retu
 				case slices.Contains(pattern.UnlockMethods, method):
 					return lockReleasedAtReturn, true
 				default:
-					return lockNotAcquiredAtReturn, false
+					// The other half of an RWMutex: once a blocking Lock,
+					// Unlock, RLock or RUnlock has returned, the goroutine
+					// cannot hold this half, or that call would have blocked
+					// or failed.
+					return lockNotAcquiredAtReturn, true
 				}
 			}
 			switch l.wrapperLockEffect(stmt, mutexName, pattern) {
@@ -392,11 +405,20 @@ func (l *lifecycleResolver) lockStateAtReturn(body *ast.BlockStmt, ret *ast.Retu
 				if l.handOverGuard(ifStmt, frame.list, j, mutexName, pattern) {
 					return lockHeldAtReturn, true
 				}
+				// `if !mu.TryLock() { return false }`: past the guard the
+				// attempt succeeded.
+				if ifStmt.Init == nil && negatedTryCall(ifStmt.Cond, mutexName, pattern) &&
+					!statementContainsLockEffect(ifStmt.Body, mutexName) {
+					return lockHeldAtReturn, true
+				}
 				if (ifStmt.Init != nil && statementContainsLockEffect(ifStmt.Init, mutexName)) ||
 					statementContainsLockEffect(&ast.ExprStmt{X: ifStmt.Cond}, mutexName) {
 					return lockNotAcquiredAtReturn, false
 				}
 				continue
+			}
+			if tryLockRetryLoop(stmt, mutexName, pattern) {
+				return lockHeldAtReturn, true
 			}
 			if statementContainsLockEffect(stmt, mutexName) {
 				return lockNotAcquiredAtReturn, false
@@ -404,6 +426,73 @@ func (l *lifecycleResolver) lockStateAtReturn(body *ast.BlockStmt, ret *ast.Retu
 		}
 	}
 	return lockNotAcquiredAtReturn, true
+}
+
+// tryLockRetryLoop reports whether stmt is `for !mu.TryLock() { ... }` (or
+// TryRLock, as pattern says) on mutexName whose body neither leaves the loop
+// with break or goto nor touches the lock: such a loop ends normally only
+// once the call has taken the lock.
+//
+//	for !b.mu.TryLock() {
+//		select {
+//		case <-ctx.Done():
+//			return ctx.Err()
+//		case <-tick.C:
+//		}
+//	}
+func tryLockRetryLoop(stmt ast.Stmt, mutexName string, pattern LockPattern) bool {
+	loop, ok := stmt.(*ast.ForStmt)
+	if !ok || loop.Body == nil || !negatedTryCall(loop.Cond, mutexName, pattern) {
+		return false
+	}
+	return !statementContainsLockEffect(loop.Body, mutexName) && !leavesLoop(loop.Body)
+}
+
+// negatedTryCall reports whether cond is `!mu.TryLock()` (or TryRLock, as
+// pattern says) on mutexName.
+func negatedTryCall(cond ast.Expr, mutexName string, pattern LockPattern) bool {
+	call, negated := negatedCall(cond)
+	if call == nil || !negated || len(call.Args) != 0 {
+		return false
+	}
+	sel, ok := common.UnwrapParenExpr(call.Fun).(*ast.SelectorExpr)
+	return ok && common.GetVarName(sel.X) == mutexName && strings.HasPrefix(sel.Sel.Name, "Try") &&
+		slices.Contains(pattern.LockMethods, sel.Sel.Name)
+}
+
+// leavesLoop reports whether body may leave its loop other than by return: a
+// break that is not inside a nested loop, switch or select, a labeled break,
+// or a goto.
+func leavesLoop(body *ast.BlockStmt) bool {
+	found := false
+	var walk func(n ast.Node, nested bool)
+	walk = func(n ast.Node, nested bool) {
+		ast.Inspect(n, func(node ast.Node) bool {
+			if found || node == nil {
+				return false
+			}
+			if node == n {
+				return true
+			}
+			switch x := node.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+				walk(x, true)
+				return false
+			case *ast.BranchStmt:
+				switch {
+				case x.Tok == token.GOTO, x.Tok == token.BREAK && x.Label != nil:
+					found = true
+				case x.Tok == token.BREAK && !nested:
+					found = true
+				}
+			}
+			return true
+		})
+	}
+	walk(body, false)
+	return found
 }
 
 // handOverGuard reports whether guard, the statement at index in list, is the
@@ -627,7 +716,7 @@ func (l *lifecycleResolver) handsOver(target handOverCall, mutexName string, pat
 func (l *lifecycleResolver) callAcquiresOnSuccess(call *ast.CallExpr, mutexName string, pattern LockPattern) (successResult, bool) {
 	target, ok := l.handOverCallOf(call)
 	if !ok {
-		return noSuccessResult, false
+		return l.callAcquiresThroughParams(call, mutexName, pattern)
 	}
 	calleeLock, ok := calleeLockFor(target, mutexName)
 	if !ok || !l.acquiresOnSuccess(target.callee, calleeLock, pattern) {

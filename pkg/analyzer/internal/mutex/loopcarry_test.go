@@ -75,7 +75,7 @@ func f() {
 	fn := file.Decls[0].(*ast.FuncDecl)
 	forStmt := fn.Body.List[0].(*ast.ForStmt)
 
-	lc.reportDeferredUnlocksInLoop(forStmt.Body)
+	lc.reportDeferredUnlocksInLoop(forStmt, forStmt.Body)
 
 	if len(rep.calls) != 1 {
 		t.Fatalf("expected 1 diagnostic, got %d", len(rep.calls))
@@ -108,7 +108,7 @@ func f() {}`)
 	rep := &fakeReporter{}
 	lc := newTestLoopCarry(rep, cf, []string{"mu"}, nil)
 
-	_, ok := lc.loopMayBreakHoldingMutex(forStmt.Body.List, "mu", WriteLockPattern, 0, token.NoPos)
+	_, ok := lc.loopMayBreakHoldingMutex(forStmt.Body.List, "mu", WriteLockPattern, 0, 0, token.NoPos, nil)
 	if !ok {
 		t.Error("expected loopMayBreakHoldingMutex=true for a loop that locks and then breaks")
 	}
@@ -137,7 +137,7 @@ func f() {}`)
 	rep := &fakeReporter{}
 	lc := newTestLoopCarry(rep, cf, []string{"mu"}, nil)
 
-	carried := lc.loopMayCarryMutexPastIteration(forStmt.Body.List, "mu", WriteLockPattern, 0)
+	carried := lc.loopMayCarryMutexPastIteration(forStmt.Body.List, "mu", WriteLockPattern, 0, nil)
 	if carried {
 		t.Error("expected loopMayCarryMutexPastIteration=false for a balanced lock/unlock loop")
 	}
@@ -151,7 +151,7 @@ func f() {}`)
 	rep := &fakeReporter{}
 	lc := newTestLoopCarry(rep, cf, []string{"mu"}, nil)
 
-	got := lc.isCarriedLoopUnlock("mu", token.Pos(10), nil, LockPattern{LockMethods: []string{"Lock"}, UnlockMethods: []string{"Unlock"}})
+	got := lc.isCarriedLoopUnlock("mu", token.Pos(10), nil, LockPattern{LockMethods: []string{"Lock"}, UnlockMethods: []string{"Unlock"}}, nil)
 	if got {
 		t.Error("expected isCarriedLoopUnlock=false when function is nil")
 	}
@@ -199,7 +199,7 @@ func f() {
 		t.Fatal("could not locate Unlock call in test source")
 	}
 
-	got := lc.isCarriedLoopUnlock("mu", unlockPos, fn, WriteLockPattern)
+	got := lc.isCarriedLoopUnlock("mu", unlockPos, fn, WriteLockPattern, nil)
 	// The loop has Lock + continue (no unlock) → it carries the mutex past
 	// the iteration boundary, so the outer Unlock is a "carried" unlock.
 	if !got {

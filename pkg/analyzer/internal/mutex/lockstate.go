@@ -46,9 +46,18 @@ func (c *Checker) analyzeExpressionStatement(stmt *ast.ExprStmt, stats map[strin
 		return
 	}
 
+	// t.Cleanup runs its function when the test ends, as a defer does at
+	// return: t.Cleanup(mu.Unlock) is defer mu.Unlock().
 	if sel.Sel.Name == "Cleanup" && len(call.Args) == 1 {
-		if fnlit, ok := call.Args[0].(*ast.FuncLit); ok {
-			c.handleDeferFunctionLiteral(fnlit, call.Pos(), stats)
+		switch fn := common.UnwrapParenExpr(call.Args[0]).(type) {
+		case *ast.FuncLit:
+			c.handleDeferFunctionLiteral(fn, call.Pos(), stats)
+		case *ast.SelectorExpr:
+			c.handleDeferCall(fn, call.Pos(), stats)
+		case *ast.Ident:
+			if fnlit := c.localFunctionLiteralBefore(fn.Name, call.Pos()); fnlit != nil {
+				c.handleDeferFunctionLiteral(fnlit, call.Pos(), stats)
+			}
 		}
 		return
 	}
@@ -118,7 +127,16 @@ func (c *Checker) handleMutexCall(varName, methodName string, pos token.Pos, sta
 			if c.unlockIsGuardedByFlag(varName, pos) {
 				return
 			}
-			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern) {
+			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern, c.resolveLockAlias) {
+				return
+			}
+			if c.releasesParkedLock(varName, pos, WriteLockPattern.LockMethods) {
+				return
+			}
+			if c.releasesHandedOffLock(varName, pos, "Unlock") {
+				return
+			}
+			if c.releasesRecordedHold(varName, pos, "Unlock") {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -183,7 +201,16 @@ func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, s
 			if c.unlockIsGuardedByFlag(varName, pos) {
 				return
 			}
-			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern) {
+			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, WriteLockPattern, c.resolveLockAlias) {
+				return
+			}
+			if c.releasesParkedLock(varName, pos, WriteLockPattern.LockMethods) {
+				return
+			}
+			if c.releasesHandedOffLock(varName, pos, "Unlock") {
+				return
+			}
+			if c.releasesRecordedHold(varName, pos, "Unlock") {
 				return
 			}
 			stats[varName].borrowedLock++
@@ -207,6 +234,9 @@ func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, s
 		}
 		stats[varName].rlock++
 		stats[varName].rlockPos = append(stats[varName].rlockPos, pos)
+		if methodName == "RLock" && c.isReadFlagGuarded(varName) {
+			stats[varName].deferRUnlock++
+		}
 	case "RUnlock":
 		// RUnlock called when only a write lock is held.
 		// Correct the state as if Unlock was called to avoid cascading errors.
@@ -217,7 +247,19 @@ func (c *Checker) handleRWMutexCall(varName, methodName string, pos token.Pos, s
 			return
 		}
 		if stats[varName].rlock == 0 {
-			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, ReadLockPattern) {
+			if c.runlockIsGuardedByFlag(varName, pos) {
+				return
+			}
+			if c.loopCarry.isCarriedLoopUnlock(varName, pos, c.function, ReadLockPattern, c.resolveLockAlias) {
+				return
+			}
+			if c.releasesParkedLock(varName, pos, ReadLockPattern.LockMethods) {
+				return
+			}
+			if c.releasesHandedOffLock(varName, pos, "RUnlock") {
+				return
+			}
+			if c.releasesRecordedHold(varName, pos, "RUnlock") {
 				return
 			}
 			stats[varName].borrowedRLock++
@@ -239,7 +281,57 @@ func (c *Checker) analyzeAssignStatement(stmt *ast.AssignStmt, stats map[string]
 	c.applyLockedValueHandover(stmt, stats)
 	c.applyConditionalAcquireCall(stmt)
 	c.applyLockOwnershipMove(stmt, stats)
+	c.applyHoldRecord(stmt, stats)
+	for _, rhs := range stmt.Rhs {
+		c.applyReleasingCallIn(rhs, stats)
+	}
 	c.applyAssignmentFacts(stmt)
+}
+
+// applyReleasingCallIn models a method call that sits in an expression rather
+// than a statement of its own, `ok := t.enqueueAndUnlock()` or `if
+// !t.enqueueAndUnlock() { ... }`, when the callee does nothing to a lock the
+// function holds but release it: the call runs, and releases, right there.
+// Acquiring callees in that position are the acquire-or-fail helpers, which the
+// condition that checks them models.
+func (c *Checker) applyReleasingCallIn(expr ast.Expr, stats map[string]*Stats) {
+	call, _ := negatedCall(expr)
+	if call == nil || c.typesInfo == nil || c.commentFilter.ShouldSkipCall(call) {
+		return
+	}
+	sel, ok := common.UnwrapParenExpr(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return
+	}
+	baseVar := common.GetVarName(sel.X)
+	if baseVar == "" || baseVar == "?" {
+		return
+	}
+	callee := c.receiverMethods[common.BaseTypeNameFromType(c.typesInfo.TypeOf(sel.X))][sel.Sel.Name]
+	if callee == nil || callee.Body == nil || callee == c.function {
+		return
+	}
+	calleeReceiver := common.ReceiverName(callee)
+	if calleeReceiver == "" {
+		return
+	}
+	apply := func(name string, rw bool) {
+		calleeLock := calleeReceiver
+		if name != baseVar {
+			relative, ok := relativeMutexPath(name, baseVar)
+			if !ok {
+				return
+			}
+			calleeLock = joinMutexPath(calleeReceiver, relative)
+		}
+		c.applyWrapperReleaseWhenHeld(callee, calleeLock, name, rw, stats)
+	}
+	for name := range c.mutexNames {
+		apply(name, false)
+	}
+	for name := range c.rwMutexNames {
+		apply(name, true)
+	}
 }
 
 // applyLockedValueHandover records the lock a callee hands over. A function that

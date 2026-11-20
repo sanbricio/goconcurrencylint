@@ -146,7 +146,7 @@ func f() {
 	stats := map[string]*Stats{"mu": {}}
 	// `if ok { ... }` consumes the result: it is marked checked and the lock is
 	// treated as held inside the branch.
-	if !tracker.applyToBranch(&ast.Ident{Name: "ok"}, stats) {
+	if !tracker.applyToBranch(&ast.Ident{Name: "ok"}, stats, map[string]*Stats{"mu": {}}) {
 		t.Fatal("applyToBranch returned false for a tracked result")
 	}
 	if stats["mu"].lock != 1 {

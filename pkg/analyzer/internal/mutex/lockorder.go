@@ -28,6 +28,7 @@ type lockOrderDetector struct {
 	commentFilter *commentfilter.CommentFilter
 	typesInfo     *types.Info
 	reporter      report.Reporter
+	termination   *terminationAnalyzer
 }
 
 func newLockOrderDetector(mutexNames, rwMutexNames map[string]bool, cf *commentfilter.CommentFilter, typesInfo *types.Info, reporter report.Reporter) *lockOrderDetector {
@@ -37,6 +38,7 @@ func newLockOrderDetector(mutexNames, rwMutexNames map[string]bool, cf *commentf
 		commentFilter: cf,
 		typesInfo:     typesInfo,
 		reporter:      reporter,
+		termination:   newTerminationAnalyzer(typesInfo),
 	}
 }
 
@@ -93,9 +95,21 @@ func (d *lockOrderDetector) scanStatements(stmts []ast.Stmt, held map[string]boo
 				thenHeld[varName] = true
 			}
 			d.scanStatements(s.Body.List, thenHeld, edges, reported, waitReleases)
-			if s.Else != nil {
-				d.scanElse(s.Else, maps.Clone(held), edges, reported, waitReleases)
+			var arms []map[string]bool
+			if d.armFallsThrough(s.Body.List, false) {
+				arms = append(arms, thenHeld)
 			}
+			if s.Else != nil {
+				elseHeld := maps.Clone(held)
+				d.scanElse(s.Else, elseHeld, edges, reported, waitReleases)
+				if !d.termination.elseAlwaysTerminates(s.Else) {
+					arms = append(arms, elseHeld)
+				}
+			} else {
+				// No else: the path that skips the body keeps what was held.
+				arms = append(arms, maps.Clone(held))
+			}
+			mergeFallthroughArms(held, arms)
 		case *ast.ForStmt:
 			if s.Body != nil {
 				d.scanStatements(s.Body.List, maps.Clone(held), edges, reported, waitReleases)
@@ -109,25 +123,89 @@ func (d *lockOrderDetector) scanStatements(stmts []ast.Stmt, held map[string]boo
 		case *ast.LabeledStmt:
 			d.scanStatements([]ast.Stmt{s.Stmt}, held, edges, reported, waitReleases)
 		case *ast.SwitchStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok {
-					d.scanStatements(cc.Body, maps.Clone(held), edges, reported, waitReleases)
-				}
-			}
+			d.scanCaseClauses(s.Body, held, edges, reported, waitReleases)
 		case *ast.TypeSwitchStmt:
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok {
-					d.scanStatements(cc.Body, maps.Clone(held), edges, reported, waitReleases)
-				}
-			}
+			d.scanCaseClauses(s.Body, held, edges, reported, waitReleases)
 		case *ast.SelectStmt:
+			var arms []map[string]bool
 			for _, clause := range s.Body.List {
 				if cc, ok := clause.(*ast.CommClause); ok {
-					d.scanStatements(cc.Body, maps.Clone(held), edges, reported, waitReleases)
+					armHeld := maps.Clone(held)
+					d.scanStatements(cc.Body, armHeld, edges, reported, waitReleases)
+					if d.armFallsThrough(cc.Body, true) {
+						arms = append(arms, armHeld)
+					}
 				}
+			}
+			// A select always runs exactly one clause, so there is no implicit
+			// arm that skips them all.
+			mergeFallthroughArms(held, arms)
+		}
+	}
+}
+
+// scanCaseClauses scans each clause of a switch or type switch from the state
+// before it and leaves held as the state after the statement. Without a
+// default clause, the path that matches no case is one more arm that keeps
+// what was held. A clause that falls through into the next one links their
+// states, which the per-clause scan does not follow, so held is then left as
+// it was.
+func (d *lockOrderDetector) scanCaseClauses(body *ast.BlockStmt, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {
+	clauses, hasDefault, hasFallthrough := switchClauses(body)
+	var arms []map[string]bool
+	for _, clause := range clauses {
+		armHeld := maps.Clone(held)
+		d.scanStatements(clause.body, armHeld, edges, reported, waitReleases)
+		if d.armFallsThrough(clause.body, true) {
+			arms = append(arms, armHeld)
+		}
+	}
+	if hasFallthrough {
+		return
+	}
+	if !hasDefault {
+		arms = append(arms, maps.Clone(held))
+	}
+	mergeFallthroughArms(held, arms)
+}
+
+// armFallsThrough reports whether control can leave the end of a branch arm
+// and reach the statement after the enclosing if/switch/select. An arm that
+// returns, panics or jumps away does not, so the locks it holds or released do
+// not describe the code that follows. Inside a switch or select clause a bare
+// break leaves the statement itself and lands right after it, so it counts as
+// falling through (breakLeavesStatement).
+func (d *lockOrderDetector) armFallsThrough(stmts []ast.Stmt, breakLeavesStatement bool) bool {
+	for _, stmt := range stmts {
+		if branch, ok := stmt.(*ast.BranchStmt); ok && breakLeavesStatement && branch.Tok == token.BREAK && branch.Label == nil {
+			return true
+		}
+		if d.termination.statementAlwaysTerminates(stmt) {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeFallthroughArms sets held to the locks held at the end of every arm that
+// falls through. A lock held on only some of those paths is dropped: keeping
+// it would draw order edges from a path that may not have it, and a cycle built
+// on such an edge is a deadlock the code cannot reach. With no arm falling
+// through, what follows is unreachable from here and held is left as it was.
+func mergeFallthroughArms(held map[string]bool, arms []map[string]bool) {
+	if len(arms) == 0 {
+		return
+	}
+	merged := maps.Clone(arms[0])
+	for _, arm := range arms[1:] {
+		for name := range merged {
+			if !arm[name] {
+				delete(merged, name)
 			}
 		}
 	}
+	clear(held)
+	maps.Copy(held, merged)
 }
 
 func (d *lockOrderDetector) scanCall(call *ast.CallExpr, held map[string]bool, edges map[lockOrderEdge]token.Pos, reported map[lockOrderEdge]bool, waitReleases []waitGroupReleaseEvent) {

@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common/category"
@@ -20,6 +21,12 @@ type tryLockResult struct {
 	pos       token.Pos
 	checked   bool
 	isRWMutex bool
+	// negated is set when the variable holds the call's negation
+	// (`busy := !mu.TryLock()`): the lock is held when it is false.
+	negated bool
+	// decidedAt is the condition that first read the variable: the one that
+	// splits the paths into "taken" and "not taken" (see applyToBranch).
+	decidedAt token.Pos
 }
 
 // tryLockTracker owns the TryLock/TryRLock bookkeeping for a single function.
@@ -59,14 +66,15 @@ func newTryLockTracker(mutexNames, rwMutexNames map[string]bool, cf *commentfilt
 // as unchecked.
 func (t *tryLockTracker) recordAssignment(stmt *ast.AssignStmt) {
 	for i, rhs := range stmt.Rhs {
-		call, ok := rhs.(*ast.CallExpr)
-		if !ok {
+		call, negated := negatedCall(rhs)
+		if call == nil {
 			continue
 		}
 		result := t.resultFromCall(call)
 		if result == nil {
 			continue
 		}
+		result.negated = negated
 		if i >= len(stmt.Lhs) {
 			t.reportUncheckedResult(result)
 			continue
@@ -77,6 +85,29 @@ func (t *tryLockTracker) recordAssignment(stmt *ast.AssignStmt) {
 			continue
 		}
 		t.results[ident.Name] = result
+	}
+}
+
+// negatedCall unwraps parentheses and `!` operators around a call, reporting
+// whether an odd number of them negate it. It returns a nil call when expr is
+// not such a call.
+func negatedCall(expr ast.Expr) (*ast.CallExpr, bool) {
+	negated := false
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.X
+		case *ast.UnaryExpr:
+			if e.Op != token.NOT {
+				return nil, false
+			}
+			negated = !negated
+			expr = e.X
+		case *ast.CallExpr:
+			return e, negated
+		default:
+			return nil, false
+		}
 	}
 }
 
@@ -147,10 +178,16 @@ func (t *tryLockTracker) reportUncheckedResult(result *tryLockResult) {
 
 // applyToBranch handles an `if ok { ... }` whose condition is the boolean
 // returned by a tracked TryLock. When cond names such a result it is marked
-// checked and, inside the then-branch, the lock is treated as held. It returns
-// true when cond matched a tracked result so the caller can stop looking for
-// other condition shapes.
-func (t *tryLockTracker) applyToBranch(cond ast.Expr, stats map[string]*Stats) bool {
+// checked and the lock is treated as held in the branch where the call
+// succeeded: the then-branch, or the else-branch when the variable holds the
+// call's negation. It returns true when cond matched a tracked result so the
+// caller can stop looking for other condition shapes.
+//
+// The call took the lock once, so only the first condition that reads the
+// variable adds it. A later test of the same variable only tells the two
+// paths apart: on the failure branch the lock was never taken, so an
+// acquisition still recorded there for this call is dropped.
+func (t *tryLockTracker) applyToBranch(cond ast.Expr, thenStats, elseStats map[string]*Stats) bool {
 	ident, ok := cond.(*ast.Ident)
 	if !ok {
 		return false
@@ -161,8 +198,40 @@ func (t *tryLockTracker) applyToBranch(cond ast.Expr, stats map[string]*Stats) b
 	}
 
 	result.checked = true
-	applyTryLockResult(result, stats)
+	success, failure := thenStats, elseStats
+	if result.negated {
+		success, failure = elseStats, thenStats
+	}
+	if result.decidedAt == token.NoPos {
+		result.decidedAt = ident.Pos()
+	}
+	if result.decidedAt == ident.Pos() {
+		applyTryLockResult(result, success)
+	} else {
+		dropTryLockResult(result, failure)
+	}
 	return true
+}
+
+// dropTryLockResult takes back the acquisition result recorded in stats, if
+// it is still there.
+func dropTryLockResult(result *tryLockResult, stats map[string]*Stats) {
+	st := stats[result.varName]
+	if st == nil {
+		return
+	}
+	switch result.method {
+	case "TryLock":
+		if i := slices.Index(st.lockPos, result.pos); i >= 0 && st.lock > 0 {
+			st.lock--
+			st.lockPos = slices.Delete(st.lockPos, i, i+1)
+		}
+	case "TryRLock":
+		if i := slices.Index(st.rlockPos, result.pos); i >= 0 && st.rlock > 0 {
+			st.rlock--
+			st.rlockPos = slices.Delete(st.rlockPos, i, i+1)
+		}
+	}
 }
 
 func applyTryLockResult(result *tryLockResult, stats map[string]*Stats) {

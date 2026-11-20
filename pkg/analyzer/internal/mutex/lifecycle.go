@@ -78,6 +78,18 @@ type lifecycleScanCache struct {
 	// indexes them for isReleaseForHandleBinding, built on first use.
 	handleBindings       map[*ast.FuncDecl][]handleBinding
 	handleBindingsByType map[string][]handleBinding
+
+	// paramRoles memoizes what a function does with its parameters, the
+	// callee side of callAcquiresThroughParams.
+	paramRoles map[*ast.FuncDecl]map[types.Object]paramRole
+	// holdRecords memoizes the fields that record a lock hold (field_hold.go).
+	holdRecords map[types.Object][]holdRecord
+	// callSitesOfCalleeIndex maps a function of the package to every call of
+	// it, built on first use.
+	callSitesOfCalleeIndex map[*ast.FuncDecl][]methodCallSite
+	// boundSelectorIndex maps a selector name to the selectors of that name
+	// that are not called (method values), built on first use.
+	boundSelectorIndex map[string][]boundSelector
 }
 
 func newLifecycleScanCache() *lifecycleScanCache {
@@ -356,8 +368,9 @@ func (l *lifecycleResolver) returnsFuncFor(mutexName string, methodNames []strin
 // mutexName to its caller instead of unlocking before it returns, so the lock is
 // not a leak. Three shapes are covered:
 //   - a closure returned directly: return func() { mu.Unlock() }
-//   - a closure in a returned composite literal — the guard/RAII pattern:
-//     return Guard{release: func() { mu.Unlock() }}
+//   - a closure, or the bound unlock method, in a returned composite literal —
+//     the guard/RAII pattern: return Guard{release: func() { mu.Unlock() }},
+//     return &Guard{release: mu.Unlock}
 //   - the bound unlock method returned directly: return mu.Unlock
 //
 // Handing back the bound method delegates release exactly like returning a
@@ -379,6 +392,10 @@ func (l *lifecycleResolver) returnsClosureReleasingLock(mutexName string, unlock
 				functionBodyContainsFieldCall(fnLit.Body, mutexName, unlockMethods) {
 				return true
 			}
+			// The bound unlock method stored in the guard: Guard{release: mu.Unlock}.
+			if isUnlockMethodValue(value, mutexName, unlockMethods) {
+				return true
+			}
 		}
 	}
 
@@ -397,6 +414,16 @@ func (l *lifecycleResolver) returnsClosureReleasingLock(mutexName string, unlock
 	return false
 }
 
+// isUnlockMethodValue reports whether expr is the bound unlock method of
+// mutexName (`mu.Unlock`, not a call to it).
+func isUnlockMethodValue(expr ast.Expr, mutexName string, unlockMethods []string) bool {
+	sel, ok := common.UnwrapParenExpr(expr).(*ast.SelectorExpr)
+	if !ok || common.GetVarName(sel.X) != mutexName {
+		return false
+	}
+	return slices.Contains(unlockMethods, sel.Sel.Name)
+}
+
 // returnsUnlockMethodValue reports whether fn hands back the bound unlock method
 // of mutexName (return mu.Unlock), either returned directly or through a local
 // variable that is later returned (u := mu.Unlock; return u).
@@ -406,11 +433,7 @@ func (l *lifecycleResolver) returnsUnlockMethodValue(fn *ast.FuncDecl, mutexName
 	}
 
 	isUnlockValue := func(expr ast.Expr) bool {
-		sel, ok := expr.(*ast.SelectorExpr)
-		if !ok || common.GetVarName(sel.X) != mutexName {
-			return false
-		}
-		return slices.Contains(unlockMethods, sel.Sel.Name)
+		return isUnlockMethodValue(expr, mutexName, unlockMethods)
 	}
 
 	localValues := make(map[string]ast.Expr)
@@ -706,10 +729,13 @@ func (l *lifecycleResolver) computeCallerManagedReleaseFor(mutexName string, met
 		}
 
 		totalCallSites++
-		if _, ok := l.explicitTransferCallPositions(site.enclosing.Body)[site.call.Pos()]; !ok {
+		// A call inside a function literal, a callback for instance, runs when
+		// the literal does: the lock it hands over must be taken in there.
+		body := innermostLiteralBody(site.enclosing.Body, site.call.Pos())
+		if _, ok := l.explicitTransferCallPositions(body)[site.call.Pos()]; !ok {
 			return false
 		}
-		if !functionBodyContainsFieldCallBefore(site.enclosing.Body, baseVar+"."+relativePath, methodNames, site.call.Pos()) {
+		if !functionBodyContainsFieldCallBefore(body, baseVar+"."+relativePath, methodNames, site.call.Pos()) {
 			return false
 		}
 	}
@@ -996,6 +1022,28 @@ func (l *lifecycleResolver) callTargetsMethod(call *ast.CallExpr, receiverType, 
 	return baseVar, true
 }
 
+// innermostLiteralBody returns the body of the innermost function literal in
+// body that contains pos, or body itself.
+func innermostLiteralBody(body *ast.BlockStmt, pos token.Pos) *ast.BlockStmt {
+	innermost := body
+	ast.Inspect(body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.FuncLit)
+		if !ok {
+			return n == nil || nodeContainsPosition(n, pos)
+		}
+		if lit.Body != nil && nodeContainsPosition(lit.Body, pos) {
+			innermost = lit.Body
+			return true
+		}
+		return false
+	})
+	return innermost
+}
+
+func nodeContainsPosition(n ast.Node, pos token.Pos) bool {
+	return n.Pos() <= pos && pos < n.End()
+}
+
 func (l *lifecycleResolver) explicitTransferCallPositions(body *ast.BlockStmt) map[token.Pos]struct{} {
 	if body == nil {
 		return nil
@@ -1052,7 +1100,22 @@ func (l *lifecycleResolver) explicitTransferCallPositions(body *ast.BlockStmt) m
 			if fnlit, ok := s.Call.Fun.(*ast.FuncLit); ok && fnlit.Body != nil {
 				visitStmtList(fnlit.Body.List)
 			}
+		case *ast.AssignStmt:
+			// `ok := t.flushAndUnlock()`: the call runs as its own step.
+			for _, rhs := range s.Rhs {
+				if call, ok := common.UnwrapParenExpr(rhs).(*ast.CallExpr); ok {
+					recordCall(call)
+				}
+			}
 		case *ast.IfStmt:
+			if s.Init != nil {
+				visitStmt(s.Init)
+			}
+			// `if !t.flushAndUnlock() { ... }` runs the call before either
+			// branch.
+			if call, _ := negatedCall(s.Cond); call != nil {
+				recordCall(call)
+			}
 			visitStmtList(s.Body.List)
 			if s.Else != nil {
 				visitElse(s.Else)
@@ -1251,4 +1314,60 @@ func (l *lifecycleResolver) functionReturnPos(fn *ast.FuncDecl, returnedName str
 		}
 	}
 	return token.NoPos
+}
+
+// callSitesOf returns every call of fn in the package, with its enclosing
+// function, through an index built once.
+func (l *lifecycleResolver) callSitesOf(fn *ast.FuncDecl) []methodCallSite {
+	if l.scanCache.callSitesOfCalleeIndex == nil {
+		idx := make(map[*ast.FuncDecl][]methodCallSite)
+		for _, caller := range l.functions {
+			if caller == nil || caller.Body == nil {
+				continue
+			}
+			ast.Inspect(caller.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if callee := l.calledFuncDecl(call); callee != nil {
+						idx[callee] = append(idx[callee], methodCallSite{call: call, enclosing: caller})
+					}
+				}
+				return true
+			})
+		}
+		l.scanCache.callSitesOfCalleeIndex = idx
+	}
+	return l.scanCache.callSitesOfCalleeIndex[fn]
+}
+
+// boundSelector is a selector used as a value rather than called.
+type boundSelector struct {
+	sel       *ast.SelectorExpr
+	enclosing *ast.FuncDecl
+}
+
+// boundSelectorsNamed returns the selectors named name that the package uses
+// without calling them, through an index built once.
+func (l *lifecycleResolver) boundSelectorsNamed(name string) []boundSelector {
+	if l.scanCache.boundSelectorIndex == nil {
+		idx := make(map[string][]boundSelector)
+		for _, fn := range l.functions {
+			if fn == nil || fn.Body == nil {
+				continue
+			}
+			called := make(map[ast.Expr]bool)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch node := n.(type) {
+				case *ast.CallExpr:
+					called[common.UnwrapParenExpr(node.Fun)] = true
+				case *ast.SelectorExpr:
+					if !called[node] {
+						idx[node.Sel.Name] = append(idx[node.Sel.Name], boundSelector{sel: node, enclosing: fn})
+					}
+				}
+				return true
+			})
+		}
+		l.scanCache.boundSelectorIndex = idx
+	}
+	return l.scanCache.boundSelectorIndex[name]
 }

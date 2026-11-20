@@ -22,6 +22,7 @@ type balanceValidatorConfig struct {
 	typesInfo                    *types.Info
 	escape                       *escapeAnalyzer
 	countedInOtherFunction       func(string, bool) bool
+	fieldDoneElsewhere           func(string) bool
 	isInGoroutine                inGoroutineChecker
 	isNodeInGoroutine            func(ast.Node) bool
 	callInvokesDone              doneCallChecker
@@ -242,6 +243,10 @@ func (b *balanceValidator) checkWaitGroupBalance(stats map[string]*Stats) {
 			}
 		}
 		if b.countedInOtherFunction != nil && b.countedInOtherFunction(wgName, len(st.addCalls) > 0) {
+			continue
+		}
+		if len(st.addCalls) > 0 && st.doneCount == 0 && len(st.deferDoneCalls) == 0 &&
+			b.fieldDoneElsewhere != nil && b.fieldDoneElsewhere(wgName) {
 			continue
 		}
 		b.validateBalance(wgName, st)

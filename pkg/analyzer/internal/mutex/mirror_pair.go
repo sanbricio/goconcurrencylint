@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"slices"
 	"strings"
 
@@ -99,6 +100,9 @@ type lockRef struct {
 	path   string
 	suffix string
 	rooted bool
+	// exact, when set, names the lock by its full spelling: a lock rooted at a
+	// package-level variable is spelled the same in every function.
+	exact string
 }
 
 func lockRefFor(varName, receiver string) (lockRef, bool) {
@@ -127,6 +131,9 @@ func (r lockRef) matches(call *ast.CallExpr, receiver string, methods []string) 
 	}
 
 	target := common.GetVarName(sel.X)
+	if r.exact != "" {
+		return target == r.exact
+	}
 	if r.rooted {
 		if receiver == "" {
 			return false
@@ -314,6 +321,66 @@ func (l *lifecycleResolver) callersPairMethods(method, sibling string, acquiresF
 	return paired
 }
 
+// callersReleaseAfter reports whether fn, a method that returns holding
+// mutexName (a lock below its receiver), is called in the package and every
+// call is followed, in the calling function, by a release of that lock on the
+// receiver it was called on, deferred or not:
+//
+//	func (p *proc) lock() {
+//		p.mu.Lock()
+//		for p.busy != nil { p.mu.Unlock(); <-p.busy; p.mu.Lock() }
+//	}
+//
+//	p.lock()
+//	defer p.mu.Unlock()
+//
+// The callers own the release then. A single caller that does not release
+// keeps the report on fn, the only place the leak shows.
+func (l *lifecycleResolver) callersReleaseAfter(fn *ast.FuncDecl, mutexName string, unlockMethods []string) bool {
+	if fn == nil || fn.Name == nil {
+		return false
+	}
+	path, ok := receiverRelativePath(mutexName, common.ReceiverName(fn))
+	if !ok || common.ReceiverName(fn) == "" {
+		return false
+	}
+	if l.typesInfo == nil {
+		return false
+	}
+	method := l.typesInfo.Defs[fn.Name]
+	if method == nil {
+		return false
+	}
+	calls := 0
+	for _, site := range l.callSitesNamed(fn.Name.Name) {
+		sel, ok := site.call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		if callee, ok := l.typesInfo.Uses[sel.Sel].(*types.Func); !ok || callee.Origin() != method {
+			continue
+		}
+		if site.enclosing == fn {
+			continue
+		}
+		if site.enclosing == nil || site.enclosing.Body == nil {
+			return false
+		}
+		base := common.GetVarName(sel.X)
+		if base == "" || base == "?" {
+			return false
+		}
+		target := joinMutexPath(base, path)
+		if !slices.ContainsFunc(unlockMethods, func(unlock string) bool {
+			return callsMethodOnReceiver(site.enclosing.Body, target, unlock, site.call.Pos(), true)
+		}) {
+			return false
+		}
+		calls++
+	}
+	return calls > 0
+}
+
 // methodIsCalledInPackage reports whether anything other than the method itself
 // calls a method of that name anywhere in the package. It is deliberately
 // keyed on the name alone: a method shared by two types answers true for both,
@@ -331,13 +398,31 @@ func (l *lifecycleResolver) methodIsCalledInPackage(name string, exclude *ast.Fu
 // callsMethodOnReceiver reports whether body calls receiver.name(...) on the
 // far side of pos: after it when the counterpart releases (`x.lock(); defer
 // x.unlock()`), before it when the counterpart acquires (`x.lock(); x.unlock()`
-// seen from unlock). A deferred release qualifies, since it is written below
-// the acquire.
+// seen from unlock). A deferred call runs when the function returns, after
+// everything it does, so it is on the far side when looking forward wherever
+// it is written: `defer func() { x.unlock() }()` above `x.lock()` qualifies.
 func callsMethodOnReceiver(body *ast.BlockStmt, receiver, name string, pos token.Pos, after bool) bool {
+	siteDeferred := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if d, ok := n.(*ast.DeferStmt); ok && d.Pos() <= pos && pos < d.End() {
+			siteDeferred = true
+		}
+		return !siteDeferred
+	})
 	found := false
+	var deferred []ast.Node
 	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
 			return false
+		}
+		if n == nil {
+			return true
+		}
+		if len(deferred) > 0 && n.Pos() >= deferred[len(deferred)-1].End() {
+			deferred = deferred[:len(deferred)-1]
+		}
+		if d, ok := n.(*ast.DeferStmt); ok {
+			deferred = append(deferred, d)
 		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -347,7 +432,11 @@ func callsMethodOnReceiver(body *ast.BlockStmt, receiver, name string, pos token
 		if !ok || sel.Sel.Name != name {
 			return true
 		}
-		if after != (call.Pos() > pos) {
+		// Seen from a deferred release, everything the function does outside
+		// its defers comes first.
+		onFarSide := after == (call.Pos() > pos) || (after && len(deferred) > 0) ||
+			(!after && len(deferred) == 0 && siteDeferred)
+		if !onFarSide {
 			return true
 		}
 		if common.GetVarName(sel.X) == receiver {
@@ -408,7 +497,8 @@ func firstLockOpIsRelease(fn *ast.FuncDecl, ref lockRef, pattern LockPattern) bo
 // the function as a borrowed one. Both ask here instead.
 func (c *Checker) isMirrorPairRelease(varName string, acquireMethods []string) bool {
 	for _, release := range matchingUnlockMethods(acquireMethods) {
-		if c.wrapper.isMirrorPairHalf(varName, release, acquireMethods) {
+		if c.wrapper.isMirrorPairHalf(varName, release, acquireMethods) ||
+			c.wrapper.isPackageLockPairHalf(varName, release, acquireMethods) {
 			return true
 		}
 	}

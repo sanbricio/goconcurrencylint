@@ -253,7 +253,7 @@ func f(items []int) {
 				t.Fatal("no loop body found")
 			}
 
-			if got := mutexProtectsJoinedWorkers(body, "mu"); got != tc.want {
+			if got := mutexProtectsJoinedWorkers(body, mutexRef{name: "mu"}); got != tc.want {
 				t.Errorf("mutexProtectsJoinedWorkers() = %v, want %v", got, tc.want)
 			}
 		})

@@ -53,6 +53,15 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 		return false
 	}
 
+	// A plain function has no receiver to pair through; its only pairs are
+	// over the package's own global locks.
+	if w.function.Recv == nil {
+		oppositeMethods := oppositeMutexMethods(methodName)
+		return len(oppositeMethods) > 0 &&
+			!w.currentMethodContainsFieldCall(varName, oppositeMethods) &&
+			w.isPackageLockPairHalf(varName, methodName, oppositeMethods)
+	}
+
 	currentReceiver := common.ReceiverName(w.function)
 	if currentReceiver == "" {
 		return false
@@ -68,6 +77,10 @@ func (w *wrapperResolver) resolve(varName, methodName string) bool {
 	}
 
 	if w.isKeyedLocalWrapperPair(varName, methodName, oppositeMethods) {
+		return true
+	}
+
+	if w.isKeyedRegistryPair(varName, methodName, oppositeMethods) {
 		return true
 	}
 

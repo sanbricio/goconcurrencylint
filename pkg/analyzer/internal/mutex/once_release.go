@@ -3,15 +3,23 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
 
-// onceReleaseTarget recognises `once.Do(mu.Unlock)`: the release is delegated
-// to a sync.Once, as returnsClosureReleasingLock covers delegating it to a
-// returned closure. Reports the mutex and whether it is a read unlock.
+// onceReleaseTarget recognises `once.Do(mu.Unlock)`, and a call of a local
+// bound once to `sync.OnceFunc(mu.Unlock)`: the release is delegated to a
+// sync.Once, as returnsClosureReleasingLock covers delegating it to a returned
+// closure. Reports the mutex and whether it is a read unlock.
 func (c *Checker) onceReleaseTarget(call *ast.CallExpr) (string, bool, bool) {
-	if call == nil || len(call.Args) != 1 {
+	if call == nil {
+		return "", false, false
+	}
+	if ident, ok := common.UnwrapParenExpr(call.Fun).(*ast.Ident); ok && len(call.Args) == 0 {
+		return c.releaseMethodTarget(c.onceFuncRelease(ident))
+	}
+	if len(call.Args) != 1 {
 		return "", false, false
 	}
 
@@ -20,11 +28,16 @@ func (c *Checker) onceReleaseTarget(call *ast.CallExpr) (string, bool, bool) {
 		return "", false, false
 	}
 
-	release, ok := common.UnwrapParenExpr(call.Args[0]).(*ast.SelectorExpr)
-	if !ok {
+	release, _ := common.UnwrapParenExpr(call.Args[0]).(*ast.SelectorExpr)
+	return c.releaseMethodTarget(release)
+}
+
+// releaseMethodTarget reports the tracked mutex an unlock method value such as
+// mu.Unlock releases, and whether it is a read unlock.
+func (c *Checker) releaseMethodTarget(release *ast.SelectorExpr) (string, bool, bool) {
+	if release == nil {
 		return "", false, false
 	}
-
 	varName := common.GetVarName(release.X)
 	switch release.Sel.Name {
 	case "Unlock":
@@ -37,6 +50,62 @@ func (c *Checker) onceReleaseTarget(call *ast.CallExpr) (string, bool, bool) {
 		}
 	}
 	return "", false, false
+}
+
+// onceFuncRelease returns the method value m in `f := sync.OnceFunc(m)` when
+// ident names such a local f, assigned nowhere else in the function.
+func (c *Checker) onceFuncRelease(ident *ast.Ident) *ast.SelectorExpr {
+	if c.typesInfo == nil || c.function == nil || c.function.Body == nil {
+		return nil
+	}
+	obj := c.typesInfo.Uses[ident]
+	if obj == nil {
+		return nil
+	}
+	var release *ast.SelectorExpr
+	assignments := 0
+	bind := func(name *ast.Ident, value ast.Expr) {
+		if c.typesInfo.ObjectOf(name) != obj {
+			return
+		}
+		assignments++
+		call, ok := common.UnwrapParenExpr(value).(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 || !isSyncFunc(call.Fun, "OnceFunc", c.typesInfo) {
+			return
+		}
+		release, _ = common.UnwrapParenExpr(call.Args[0]).(*ast.SelectorExpr)
+	}
+	ast.Inspect(c.function.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range x.Lhs {
+				if name, ok := lhs.(*ast.Ident); ok && i < len(x.Rhs) {
+					bind(name, x.Rhs[i])
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range x.Names {
+				if i < len(x.Values) {
+					bind(name, x.Values[i])
+				}
+			}
+		}
+		return true
+	})
+	if assignments != 1 {
+		return nil
+	}
+	return release
+}
+
+// isSyncFunc reports whether fun names the function name of package sync.
+func isSyncFunc(fun ast.Expr, name string, info *types.Info) bool {
+	sel, ok := common.UnwrapParenExpr(fun).(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	fn, ok := info.Uses[sel.Sel].(*types.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "sync"
 }
 
 // isOnceReceiver reports whether x is a sync.Once. Without type information it
@@ -66,9 +135,9 @@ func (c *Checker) applyDeferredOnceRelease(stmt *ast.DeferStmt, stats map[string
 }
 
 // applyOnceRelease handles a plain `once.Do(mu.Unlock)` call. When a deferred
-// Do on the same lock is already credited, this call cannot release anything
-// twice: whichever site runs first fires the Once and the other becomes a
-// no-op, so counting it again would report an unlock that never happens.
+// Do on the same lock is already credited, the lock is not released twice:
+// this call runs first, fires the Once and releases it, and the deferred Do
+// becomes a no-op.
 func (c *Checker) applyOnceRelease(call *ast.CallExpr, stats map[string]*Stats) bool {
 	varName, isReadUnlock, ok := c.onceReleaseTarget(call)
 	if !ok {
@@ -80,14 +149,26 @@ func (c *Checker) applyOnceRelease(call *ast.CallExpr, stats map[string]*Stats) 
 		return false
 	}
 
+	// With a deferred Do already credited, this earlier call is the one that
+	// fires the Once: the lock is released now and the deferred one does
+	// nothing on return.
 	if isReadUnlock {
 		if st.deferRUnlock == 0 {
 			c.handleRWMutexCall(varName, "RUnlock", call.Pos(), stats)
+		} else if st.rlock > 0 {
+			st.rlock--
+			st.removeFirstRLockPos()
+			st.deferRUnlock--
 		}
 		return true
 	}
 
 	if st.deferUnlock > 0 {
+		if st.lock > 0 {
+			st.lock--
+			st.removeFirstLockPos()
+			st.deferUnlock--
+		}
 		return true
 	}
 	if c.rwMutexNames[varName] {

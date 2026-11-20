@@ -90,7 +90,9 @@ func (c *Checker) unlockDiagnosticSuppressed(mutexName string, acquireMethods []
 	return c.lifecycle.isReleaseFor(mutexName, acquireMethods) ||
 		c.lifecycle.isReturnedFuncReleaseFor(mutexName, acquireMethods) ||
 		c.lifecycle.isCallerManagedReleaseFor(mutexName, acquireMethods) ||
-		c.functionIsParameterUnlockHelper(mutexName, acquireMethods)
+		c.functionIsParameterUnlockHelper(mutexName, acquireMethods) ||
+		c.lifecycle.isHandedOutReleaseMethod(mutexName, acquireMethods) ||
+		c.lifecycle.lockAcquiredOnlyOpaquely(mutexName, acquireMethods)
 }
 
 // terminatingTailUnlockSuppressed reports caller-owned unlocks before a
@@ -141,6 +143,10 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 				c.lifecycle.returnsFuncFor(mutexName, WriteLockPattern.UnlockMethods) ||
 				c.lifecycle.returnsClosureReleasingLock(mutexName, WriteLockPattern.UnlockMethods) ||
 				c.lifecycle.isConditionalAcquireHelper(mutexName, WriteLockPattern) ||
+				c.lifecycle.callersReleaseAfter(c.function, mutexName, WriteLockPattern.UnlockMethods) ||
+				c.lockReleasedByEscapingCallback(mutexName, WriteLockPattern) ||
+				c.lifecycle.handsOutReleaseValue(mutexName, WriteLockPattern.UnlockMethods) ||
+				c.lifecycle.callersReleaseParamLockAfter(c.function, mutexName, WriteLockPattern) ||
 				c.heldLockAtAbortSuppressed())
 		if !suppress {
 			for _, pos := range lockPositions {
@@ -167,6 +173,10 @@ func (c *Checker) reportUnmatchedMutexLocksWithContext(mutexName string, stats *
 					c.lifecycle.returnsFuncFor(mutexName, ReadLockPattern.UnlockMethods) ||
 					c.lifecycle.returnsClosureReleasingLock(mutexName, ReadLockPattern.UnlockMethods) ||
 					c.lifecycle.isConditionalAcquireHelper(mutexName, ReadLockPattern) ||
+					c.lifecycle.callersReleaseAfter(c.function, mutexName, ReadLockPattern.UnlockMethods) ||
+					c.lockReleasedByEscapingCallback(mutexName, ReadLockPattern) ||
+					c.lifecycle.handsOutReleaseValue(mutexName, ReadLockPattern.UnlockMethods) ||
+					c.lifecycle.callersReleaseParamLockAfter(c.function, mutexName, ReadLockPattern) ||
 					c.heldLockAtAbortSuppressed())
 			if !suppress {
 				for _, pos := range rlockPositions {

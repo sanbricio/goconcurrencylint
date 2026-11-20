@@ -275,19 +275,26 @@ func (c *Checker) nextAssumption(refine *refinement, assumed assumptionSet) (typ
 	disagreements := slices.Clone(refine.record.disagreements)
 	slices.SortFunc(disagreements, func(a, b *ast.IfStmt) int { return int(a.Pos() - b.Pos()) })
 
-	invariant := refine.scopeOf(refine.root, c.typesInfo).invariant
+	scope := refine.scopeOf(refine.root, c.typesInfo)
+	invariant := scope.invariant
 	for _, stmt := range disagreements {
 		var found types.Object
 		ast.Inspect(stmt.Cond, func(n ast.Node) bool {
 			if found != nil {
 				return false
 			}
-			if ident, ok := n.(*ast.Ident); ok {
-				if obj := c.typesInfo.ObjectOf(ident); obj != nil && invariant[obj] {
-					if _, fixed := assumed.vars[obj]; !fixed {
-						found = obj
-					}
+			var obj types.Object
+			switch node := n.(type) {
+			case *ast.SelectorExpr:
+				obj = scope.fieldPathObject(node, c.typesInfo)
+			case *ast.Ident:
+				obj = c.typesInfo.ObjectOf(node)
+			}
+			if obj != nil && invariant[obj] {
+				if _, fixed := assumed.vars[obj]; !fixed {
+					found = obj
 				}
+				return false
 			}
 			return true
 		})
@@ -315,12 +322,17 @@ func hasLabels(fn *ast.FuncDecl) bool {
 }
 
 // runsAtMostOnce reports whether stmt executes at most once per call of fn: it
-// sits in no loop and no closure (fn has no labels, see hasLabels).
+// sits in no loop and no closure other than a literal run in place (fn has no
+// labels, see hasLabels).
 func runsAtMostOnce(fn *ast.FuncDecl, stmt ast.Stmt) bool {
 	once := true
+	inline := inlineLiterals(fn.Body)
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if !once || n == nil {
 			return false
+		}
+		if lit, ok := n.(*ast.FuncLit); ok && inline[lit] {
+			return true
 		}
 		switch n.(type) {
 		case *ast.ForStmt, *ast.RangeStmt, *ast.FuncLit:

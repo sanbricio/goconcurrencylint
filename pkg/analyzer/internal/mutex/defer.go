@@ -25,6 +25,7 @@ func (c *Checker) analyzeReturnStatement(stmt *ast.ReturnStmt, stats map[string]
 		c.handleDeferFunctionLiteral(fnlit, stmt.Pos(), stats)
 	}
 
+	c.recordExit(stmt, stats)
 	if !c.rawBodyEffects {
 		c.reportUnmatchedLocks(stats)
 	}
@@ -215,6 +216,21 @@ func (c *Checker) handleDeferCall(call *ast.SelectorExpr, pos token.Pos, stats m
 		return
 	}
 
+	// A simulated callee runs on its caller's state, so a lock it drops was
+	// held, not borrowed: `mu.RUnlock(); defer mu.RLock()` takes it back at
+	// return and the caller still holds it after the call. The callee's own
+	// analysis reports a defer that re-acquires without such a release.
+	if c.rawBodyEffects && (call.Sel.Name == "Lock" || call.Sel.Name == "RLock") && (c.mutexNames[varName] || c.rwMutexNames[varName]) {
+		if st := stats[varName]; st != nil {
+			if call.Sel.Name == "Lock" {
+				st.deferLockPos = append(st.deferLockPos, pos)
+			} else if c.rwMutexNames[varName] {
+				st.deferRLockPos = append(st.deferRLockPos, pos)
+			}
+		}
+		return
+	}
+
 	// defer Lock / defer RLock re-acquires the lock on
 	// function return instead of releasing it, guaranteed deadlock.
 	if c.mutexNames[varName] && call.Sel.Name == "Lock" {
@@ -287,6 +303,8 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 		return exitFacts == nil || c.liveCallCount(fnlit.Body, name, method, exitFacts) > 0
 	}
 
+	c.consumeBorrowedLocksRetakenBy(fnlit, guard, stats)
+
 	// Check for mutex unlocks in function literal
 	for mutexName := range c.mutexNames {
 		target := c.resolveLockAlias(mutexName)
@@ -317,10 +335,59 @@ func (c *Checker) handleDeferFunctionLiteral(fnlit *ast.FuncLit, pos token.Pos, 
 			c.handleDeferUnlock(target, pos, stats, true)
 		}
 		if guard.containsRUnlock(fnlit.Body, rwMutexName) && !guard.containsRLock(fnlit.Body, rwMutexName) && releases(rwMutexName, "RUnlock") {
+			if c.isReadFlagGuarded(target) {
+				continue
+			}
 			if stats[target].rlock == 0 && guard.unlocksOnlyInRecoverGuard(fnlit.Body, rwMutexName, "RUnlock") {
 				continue
 			}
 			c.handleDeferRUnlock(target, pos, stats)
+		}
+	}
+}
+
+// consumeBorrowedLocksRetakenBy credits a deferred literal that only takes a
+// lock the function released without holding: like `defer mu.Lock()`, it hands
+// the lock back to the caller on return.
+//
+//	mu.Unlock()
+//	defer func() {
+//		mu.Lock()
+//		pending = nil
+//	}()
+//
+// A simulated callee drops a lock it was called with, held rather than
+// borrowed: the literal takes it back at return (see handleDeferCall).
+func (c *Checker) consumeBorrowedLocksRetakenBy(fnlit *ast.FuncLit, guard *recoverGuardInspector, stats map[string]*Stats) {
+	retake := func(target string, read bool) {
+		consumed := false
+		if read {
+			consumed = c.consumeBorrowedDeferredRLock(target, stats)
+		} else {
+			consumed = c.consumeBorrowedDeferredLock(target, stats)
+		}
+		st := stats[target]
+		if consumed || !c.rawBodyEffects || st == nil {
+			return
+		}
+		if read {
+			st.deferRLockPos = append(st.deferRLockPos, fnlit.Pos())
+		} else {
+			st.deferLockPos = append(st.deferLockPos, fnlit.Pos())
+		}
+	}
+	for name := range c.mutexNames {
+		if guard.containsLock(fnlit.Body, name) && !guard.containsUnlock(fnlit.Body, name) {
+			retake(c.resolveLockAlias(name), false)
+		}
+	}
+	for name := range c.rwMutexNames {
+		target := c.resolveLockAlias(name)
+		if guard.containsLock(fnlit.Body, name) && !guard.containsUnlock(fnlit.Body, name) {
+			retake(target, false)
+		}
+		if guard.containsRLock(fnlit.Body, name) && !guard.containsRUnlock(fnlit.Body, name) {
+			retake(target, true)
 		}
 	}
 }

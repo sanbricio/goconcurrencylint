@@ -323,58 +323,58 @@ func (d *crossGoroutineDetector) parentBlocksBeforeUnlock(function *ast.FuncDecl
 	if function == nil || function.Body == nil {
 		return false
 	}
-	return d.blockBlocksBeforeUnlock(function.Body.List, goPos, varName, unlockMethods)
+	return d.blockBlocksBeforeUnlock(function.Body.List, goPos, varName, unlockMethods, d.condLocks(function.Body))
 }
 
-func (d *crossGoroutineDetector) blockBlocksBeforeUnlock(stmts []ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
+func (d *crossGoroutineDetector) blockBlocksBeforeUnlock(stmts []ast.Stmt, goPos token.Pos, varName string, unlockMethods []string, conds map[string]string) bool {
 	for i, stmt := range stmts {
 		if stmt == nil {
 			continue
 		}
 		if stmt.Pos() == goPos {
-			return d.followingStatementsBlockBeforeUnlock(stmts[i+1:], varName, unlockMethods)
+			return d.followingStatementsBlockBeforeUnlock(stmts[i+1:], varName, unlockMethods, conds)
 		}
 
 		switch s := stmt.(type) {
 		case *ast.BlockStmt:
-			if d.blockBlocksBeforeUnlock(s.List, goPos, varName, unlockMethods) {
+			if d.blockBlocksBeforeUnlock(s.List, goPos, varName, unlockMethods, conds) {
 				return true
 			}
 		case *ast.IfStmt:
-			if d.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods) {
+			if d.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods, conds) {
 				return true
 			}
-			if d.elseBlocksBeforeUnlock(s.Else, goPos, varName, unlockMethods) {
+			if d.elseBlocksBeforeUnlock(s.Else, goPos, varName, unlockMethods, conds) {
 				return true
 			}
 		case *ast.ForStmt:
-			if s.Body != nil && d.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods) {
+			if s.Body != nil && d.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods, conds) {
 				return true
 			}
 		case *ast.RangeStmt:
-			if s.Body != nil && d.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods) {
+			if s.Body != nil && d.blockBlocksBeforeUnlock(s.Body.List, goPos, varName, unlockMethods, conds) {
 				return true
 			}
 		case *ast.SwitchStmt:
 			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok && d.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods) {
+				if cc, ok := clause.(*ast.CaseClause); ok && d.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods, conds) {
 					return true
 				}
 			}
 		case *ast.TypeSwitchStmt:
 			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok && d.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods) {
+				if cc, ok := clause.(*ast.CaseClause); ok && d.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods, conds) {
 					return true
 				}
 			}
 		case *ast.SelectStmt:
 			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CommClause); ok && d.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods) {
+				if cc, ok := clause.(*ast.CommClause); ok && d.blockBlocksBeforeUnlock(cc.Body, goPos, varName, unlockMethods, conds) {
 					return true
 				}
 			}
 		case *ast.LabeledStmt:
-			if d.blockBlocksBeforeUnlock([]ast.Stmt{s.Stmt}, goPos, varName, unlockMethods) {
+			if d.blockBlocksBeforeUnlock([]ast.Stmt{s.Stmt}, goPos, varName, unlockMethods, conds) {
 				return true
 			}
 		}
@@ -382,23 +382,26 @@ func (d *crossGoroutineDetector) blockBlocksBeforeUnlock(stmts []ast.Stmt, goPos
 	return false
 }
 
-func (d *crossGoroutineDetector) elseBlocksBeforeUnlock(stmt ast.Stmt, goPos token.Pos, varName string, unlockMethods []string) bool {
+func (d *crossGoroutineDetector) elseBlocksBeforeUnlock(stmt ast.Stmt, goPos token.Pos, varName string, unlockMethods []string, conds map[string]string) bool {
 	switch s := stmt.(type) {
 	case *ast.BlockStmt:
-		return d.blockBlocksBeforeUnlock(s.List, goPos, varName, unlockMethods)
+		return d.blockBlocksBeforeUnlock(s.List, goPos, varName, unlockMethods, conds)
 	case *ast.IfStmt:
-		return d.blockBlocksBeforeUnlock([]ast.Stmt{s}, goPos, varName, unlockMethods)
+		return d.blockBlocksBeforeUnlock([]ast.Stmt{s}, goPos, varName, unlockMethods, conds)
 	default:
 		return false
 	}
 }
 
-func (d *crossGoroutineDetector) followingStatementsBlockBeforeUnlock(stmts []ast.Stmt, varName string, unlockMethods []string) bool {
+func (d *crossGoroutineDetector) followingStatementsBlockBeforeUnlock(stmts []ast.Stmt, varName string, unlockMethods []string, conds map[string]string) bool {
 	for _, stmt := range stmts {
 		if stmt == nil || d.commentFilter.ShouldSkipStatement(stmt) {
 			continue
 		}
 		if d.statementUnlocks(stmt, varName, unlockMethods) {
+			return false
+		}
+		if d.condWaitMayRelease(stmt, varName, conds) {
 			return false
 		}
 		if d.statementMayBlock(stmt) {
@@ -419,6 +422,82 @@ func (d *crossGoroutineDetector) statementUnlocks(stmt ast.Stmt, varName string,
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	return ok && common.GetVarName(sel.X) == varName && containsMethod(unlockMethods, sel.Sel.Name)
+}
+
+// condWaitMayRelease reports whether stmt is a sync.Cond Wait that may release
+// varName while it waits: Wait unlocks the cond's L, which its caller must
+// hold. It is so unless the function binds the cond to another lock
+// (`c := sync.NewCond(&other)`); a cond bound elsewhere may use varName.
+func (d *crossGoroutineDetector) condWaitMayRelease(stmt ast.Stmt, varName string, conds map[string]string) bool {
+	exprStmt, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := common.UnwrapParenExpr(exprStmt.X).(*ast.CallExpr)
+	if !ok || !d.isCondWait(call) {
+		return false
+	}
+	sel := call.Fun.(*ast.SelectorExpr)
+	lock, bound := conds[common.GetVarName(sel.X)]
+	return !bound || lock == varName
+}
+
+func (d *crossGoroutineDetector) isCondWait(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Wait" || d.typesInfo == nil {
+		return false
+	}
+	typ := common.DerefOnceAndUnalias(d.typesInfo.TypeOf(sel.X))
+	return common.MatchesPkgAndName(typ, "sync", "Cond")
+}
+
+// condLocks maps each cond that body binds with sync.NewCond (`c :=
+// sync.NewCond(&mu)`) to the lock it was given. A cond bound twice is left
+// out: which lock it waits on depends on the path.
+func (d *crossGoroutineDetector) condLocks(body *ast.BlockStmt) map[string]string {
+	conds := make(map[string]string)
+	seen := make(map[string]int)
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			if i >= len(assign.Lhs) {
+				break
+			}
+			call, ok := common.UnwrapParenExpr(rhs).(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				continue
+			}
+			if !d.isSyncNewCond(call) {
+				continue
+			}
+			arg := common.UnwrapParenExpr(call.Args[0])
+			if unary, ok := arg.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				arg = unary.X
+			}
+			name := common.GetVarName(assign.Lhs[i])
+			seen[name]++
+			conds[name] = common.GetVarName(arg)
+		}
+		return true
+	})
+	for name, count := range seen {
+		if count > 1 {
+			delete(conds, name)
+		}
+	}
+	return conds
+}
+
+func (d *crossGoroutineDetector) isSyncNewCond(call *ast.CallExpr) bool {
+	fun, ok := common.UnwrapParenExpr(call.Fun).(*ast.SelectorExpr)
+	if !ok || d.typesInfo == nil {
+		return false
+	}
+	fn, ok := d.typesInfo.Uses[fun.Sel].(*types.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "sync" && fn.Name() == "NewCond"
 }
 
 func (d *crossGoroutineDetector) statementMayBlock(stmt ast.Stmt) bool {

@@ -57,6 +57,9 @@ type varScope struct {
 	// declared, outside any loop or closure. A refined run may assume either
 	// value for them up front (see refine.go).
 	invariant map[types.Object]bool
+	// fields maps a field path read off a stable variable (`opt.Slow`,
+	// `s.cfg.raft`) to the variable standing for it (see fieldpath_facts.go).
+	fields map[fieldPathKey]types.Object
 }
 
 // computeVarScope walks fn once and classifies the variables it declares.
@@ -119,6 +122,7 @@ func computeVarScope(fn *ast.FuncDecl, info *types.Info) *varScope {
 		}
 	}
 
+	inline := inlineLiterals(fn.Body)
 	var walk func(n ast.Node, lit *ast.FuncLit, loopDepth int)
 	walk = func(n ast.Node, lit *ast.FuncLit, loopDepth int) {
 		ast.Inspect(n, func(node ast.Node) bool {
@@ -128,6 +132,11 @@ func computeVarScope(fn *ast.FuncDecl, info *types.Info) *varScope {
 			repeated := lit != nil || loopDepth > 0
 			switch x := node.(type) {
 			case *ast.FuncLit:
+				// A literal run in place is a block of the code around it.
+				if inline[x] {
+					walk(x.Body, lit, loopDepth)
+					return false
+				}
 				if x.Type.Params != nil {
 					for _, field := range x.Type.Params.List {
 						for _, name := range field.Names {
@@ -197,17 +206,61 @@ func computeVarScope(fn *ast.FuncDecl, info *types.Info) *varScope {
 	}
 	walk(fn.Body, nil, 0)
 
+	stable := make(map[types.Object]bool)
 	for obj, d := range decls {
+		single := (d.isParam && d.assigns == 0) || (!d.isParam && d.assigns == 1)
+		if single && !d.repeated && d.lit == nil && !d.disallowed {
+			stable[obj] = true
+		}
 		if d.disallowed || !factTypeTracked(obj.Type()) {
 			continue
 		}
 		scope.trackable[obj] = true
-		single := (d.isParam && d.assigns == 0) || (!d.isParam && d.assigns == 1)
 		if single && !d.repeated && d.lit == nil {
 			scope.invariant[obj] = true
 		}
 	}
+	if recv := receiverObject(fn, info); recv != nil && !receiverReassigned(fn.Body, recv, info) {
+		stable[recv] = true
+	}
+	scope.addFieldPaths(fn.Body, info, stable)
 	return scope
+}
+
+// inlineLiterals returns the function literals of body that a statement calls
+// right where they are written, `func() { ... }()`, with no parameters: such a
+// literal runs once, there, like a block. A literal started by go or defer, or
+// called inside an expression, is not one.
+func inlineLiterals(body *ast.BlockStmt) map[*ast.FuncLit]bool {
+	inline := make(map[*ast.FuncLit]bool)
+	if body == nil {
+		return inline
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		if lit := inlineLiteralOf(n); lit != nil {
+			inline[lit] = true
+		}
+		return true
+	})
+	return inline
+}
+
+// inlineLiteralOf returns the literal an expression statement `func() {
+// ... }()` runs in place, or nil.
+func inlineLiteralOf(n ast.Node) *ast.FuncLit {
+	stmt, ok := n.(*ast.ExprStmt)
+	if !ok {
+		return nil
+	}
+	call, ok := common.UnwrapParenExpr(stmt.X).(*ast.CallExpr)
+	if !ok || len(call.Args) > 0 {
+		return nil
+	}
+	lit, ok := common.UnwrapParenExpr(call.Fun).(*ast.FuncLit)
+	if !ok || lit.Body == nil || lit.Type.Params.NumFields() > 0 {
+		return nil
+	}
+	return lit
 }
 
 // factTypeTracked reports whether a value of typ has a truth a fact can hold.
@@ -230,12 +283,16 @@ func (c *Checker) trackedObject(expr ast.Expr) types.Object {
 	if c.refine == nil || c.typesInfo == nil {
 		return nil
 	}
+	scope := c.refine.scopeOf(c.function, c.typesInfo)
+	if sel, ok := common.UnwrapParenExpr(expr).(*ast.SelectorExpr); ok {
+		return scope.fieldPathObject(sel, c.typesInfo)
+	}
 	ident, ok := common.UnwrapParenExpr(expr).(*ast.Ident)
 	if !ok {
 		return nil
 	}
 	obj := c.typesInfo.ObjectOf(ident)
-	if obj == nil || !c.refine.scopeOf(c.function, c.typesInfo).trackable[obj] {
+	if obj == nil || !scope.trackable[obj] {
 		return nil
 	}
 	return obj
@@ -281,7 +338,7 @@ func (c *Checker) evalCondition(cond ast.Expr, stats map[string]*Stats) (bool, b
 				}
 			}
 		}
-	case *ast.Ident:
+	case *ast.Ident, *ast.SelectorExpr:
 		if obj := c.trackedObject(e); obj != nil {
 			value, ok := c.facts[obj]
 			return value, ok
@@ -334,7 +391,7 @@ func (c *Checker) assumeCondition(cond ast.Expr, truth bool) {
 				c.facts[obj] = truth == (e.Op == token.NEQ)
 			}
 		}
-	case *ast.Ident:
+	case *ast.Ident, *ast.SelectorExpr:
 		if obj := c.trackedObject(e); obj != nil {
 			c.facts[obj] = truth
 		}

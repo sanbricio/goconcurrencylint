@@ -343,7 +343,7 @@ func (b *balanceValidator) countWorkersPaidByAdd(addPos, boundary token.Pos, wgN
 			if !related || !doneInfo.hasAnyDone {
 				return
 			}
-			if !known || conditional {
+			if !known || conditional || !b.doneRunsOncePerLaunch(node, wgName) {
 				exact = false
 				return
 			}
@@ -381,6 +381,46 @@ func (b *balanceValidator) countWorkersPaidByAdd(addPos, boundary token.Pos, wgN
 	}
 	visit(b.goroutineScopeOf(addPos), 1, true, false)
 	return count, exact, fromLoop
+}
+
+// doneRunsOncePerLaunch reports whether the goroutine goStmt starts releases
+// wgName once per run, as far as its literal shows: a single Done call site,
+// outside any loop of its own. A worker that pays for several units (`for
+// range n { ...; wg.Done() }`) makes the number of launches say nothing about
+// the Add. A goroutine started on a named function is taken as one Done.
+func (b *balanceValidator) doneRunsOncePerLaunch(goStmt *ast.GoStmt, wgName string) bool {
+	lit, ok := common.UnwrapParenExpr(goStmt.Call.Fun).(*ast.FuncLit)
+	if !ok || lit.Body == nil {
+		return true
+	}
+	sites := 0
+	inLoop := false
+	var visit func(n ast.Node, loop bool)
+	visit = func(n ast.Node, loop bool) {
+		ast.Inspect(n, func(child ast.Node) bool {
+			if child == n {
+				return true
+			}
+			switch x := child.(type) {
+			case *ast.FuncLit, *ast.GoStmt:
+				return false
+			case *ast.ForStmt:
+				visit(x.Body, true)
+				return false
+			case *ast.RangeStmt:
+				visit(x.Body, true)
+				return false
+			case *ast.CallExpr:
+				if b.callInvokesDone(x, wgName) {
+					sites++
+					inLoop = inLoop || loop
+				}
+			}
+			return true
+		})
+	}
+	visit(lit.Body, false)
+	return sites <= 1 && !inLoop
 }
 
 // launchesWorkerFor reports whether body starts, outside any goroutine of its

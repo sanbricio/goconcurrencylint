@@ -32,8 +32,17 @@ var handOverModes = []struct {
 // handsLockToCaller); a helper whose lock travels in a returned handle instead
 // has no caller releasing it, so it never qualifies.
 func (c *Checker) locksHandedOverBy(call *ast.CallExpr) ([]handedOverLock, successResult, int) {
+	if lit, ok := common.UnwrapParenExpr(call.Fun).(*ast.FuncLit); ok {
+		return c.locksTakenByLiteral(lit)
+	}
 	target, ok := c.lifecycle.handOverCallOf(call)
-	if !ok || target.callee == c.function {
+	if !ok {
+		if locks, kind, count := c.locksTakenThroughParams(call); len(locks) > 0 {
+			return locks, kind, count
+		}
+		return c.locksTakenThroughLockParams(call)
+	}
+	if target.callee == c.function {
 		return nil, noSuccessResult, 0
 	}
 
@@ -52,7 +61,78 @@ func (c *Checker) locksHandedOverBy(call *ast.CallExpr) ([]handedOverLock, succe
 	}
 	collect(c.mutexNames, false)
 	collect(c.rwMutexNames, true)
+	if len(locks) == 0 {
+		return c.locksTakenThroughLockParams(call)
+	}
 	return locks, target.kind, resultCount(target.callee)
+}
+
+// locksTakenByLiteral is locksHandedOverBy for a function literal called
+// where it is written, `if ok := func() bool { ...; mu.Lock(); return true }();
+// !ok { ... }`: its whole body is in view, so the acquire-or-fail contract is
+// read off it directly, with no callers to ask.
+func (c *Checker) locksTakenByLiteral(lit *ast.FuncLit) ([]handedOverLock, successResult, int) {
+	if lit.Body == nil || lit.Type.Results == nil {
+		return nil, noSuccessResult, 0
+	}
+	fn := &ast.FuncDecl{Name: ast.NewIdent("func"), Type: lit.Type, Body: lit.Body}
+	kind := c.lifecycle.successResultOf(fn)
+	if kind == noSuccessResult {
+		return nil, noSuccessResult, 0
+	}
+
+	var locks []handedOverLock
+	collect := func(names map[string]bool, rw bool) {
+		for name := range names {
+			for _, mode := range handOverModes {
+				if mode.method == "RLock" && !rw {
+					continue
+				}
+				if functionBodyContainsFieldCall(lit.Body, name, mode.pattern.LockMethods) &&
+					c.lifecycle.lockHeldOnlyOnSuccess(fn, name, mode.pattern, kind) {
+					locks = append(locks, handedOverLock{varName: name, method: mode.method})
+				}
+			}
+		}
+	}
+	collect(c.mutexNames, false)
+	collect(c.rwMutexNames, true)
+	if len(locks) == 0 {
+		return nil, noSuccessResult, 0
+	}
+	return locks, kind, resultCount(fn)
+}
+
+// locksTakenThroughParams is locksHandedOverBy for a call that hands a lock's
+// own bound methods to a function taking the lock through them (see
+// acquiresThroughParamsAt).
+func (c *Checker) locksTakenThroughParams(call *ast.CallExpr) ([]handedOverLock, successResult, int) {
+	callee := c.lifecycle.calledFuncDecl(call)
+	if callee == nil || callee == c.function {
+		return nil, noSuccessResult, 0
+	}
+
+	var locks []handedOverLock
+	kind := noSuccessResult
+	collect := func(names map[string]bool, rw bool) {
+		for name := range names {
+			for _, mode := range handOverModes {
+				if mode.method == "RLock" && !rw {
+					continue
+				}
+				if found, ok := c.lifecycle.acquiresThroughParamsAt(c.function, call, name, mode.pattern); ok {
+					locks = append(locks, handedOverLock{varName: name, method: mode.method})
+					kind = found
+				}
+			}
+		}
+	}
+	collect(c.mutexNames, false)
+	collect(c.rwMutexNames, true)
+	if len(locks) == 0 {
+		return nil, noSuccessResult, 0
+	}
+	return locks, kind, resultCount(callee)
 }
 
 // pendingAcquisition is a lock handed over by a helper call on success only.

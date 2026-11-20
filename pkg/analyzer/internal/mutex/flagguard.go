@@ -3,6 +3,7 @@ package mutex
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 
 	"github.com/sanbricio/goconcurrencylint/pkg/analyzer/internal/common"
 )
@@ -28,22 +29,7 @@ func (c *Checker) detectFlagGuardedReleaseFlags(fn *ast.FuncDecl) map[string]str
 		return nil
 	}
 
-	var result map[string]string
-	consider := func(names map[string]bool) {
-		for name := range names {
-			flag, ok := deferredFlagGuardedUnlock(fn.Body, name, "Unlock")
-			if !ok || !everyLockPairsWithSetFlag(fn.Body, name, "Lock", flag) {
-				continue
-			}
-			if result == nil {
-				result = make(map[string]string)
-			}
-			result[name] = flag
-		}
-	}
-
-	consider(c.mutexNames)
-	consider(c.rwMutexNames)
+	result := c.flagGuardedReleasesIn(fn.Body, false)
 
 	// A lock parked in an alias variable guards its own deferred release: the
 	// alias plays the part the boolean plays above.
@@ -56,6 +42,67 @@ func (c *Checker) detectFlagGuardedReleaseFlags(fn *ast.FuncDecl) map[string]str
 	return result
 }
 
+// detectFlagGuardedReadReleaseFlags is detectFlagGuardedReleaseFlags for the
+// read half of an RWMutex: `defer func() { if held { mu.RUnlock() } }()` with
+// every `mu.RLock()` followed by `held = true`.
+func (c *Checker) detectFlagGuardedReadReleaseFlags(fn *ast.FuncDecl) map[string]string {
+	if fn == nil || fn.Body == nil {
+		return nil
+	}
+	return c.flagGuardedReleasesIn(fn.Body, true)
+}
+
+// flagGuardedReleasesIn maps each lock whose acquisitions in body are released
+// by a deferred, flag-guarded unlock registered in body itself to its flag:
+// the write half (Lock/Unlock), or the read half when read is set.
+func (c *Checker) flagGuardedReleasesIn(body *ast.BlockStmt, read bool) map[string]string {
+	lockMethod, unlockMethod := "Lock", "Unlock"
+	names := []map[string]bool{c.mutexNames, c.rwMutexNames}
+	if read {
+		lockMethod, unlockMethod = "RLock", "RUnlock"
+		names = names[1:]
+	}
+
+	var result map[string]string
+	for _, set := range names {
+		for name := range set {
+			flag, ok := deferredFlagGuardedUnlock(body, name, unlockMethod)
+			if !ok || !everyLockPairsWithSetFlag(body, name, lockMethod, flag) {
+				continue
+			}
+			if result == nil {
+				result = make(map[string]string)
+			}
+			result[name] = flag
+		}
+	}
+	return result
+}
+
+// withGoroutineFlagGuards runs analyze also knowing the flag-guarded releases
+// that a goroutine literal registers in its own frame: the function's
+// detection only looks for the deferred release in the function's own body.
+func (c *Checker) withGoroutineFlagGuards(body *ast.BlockStmt, analyze func()) {
+	write, read := c.flagGuardedFlags, c.flagGuardedReadFlags
+	c.flagGuardedFlags = withEntries(write, c.flagGuardedReleasesIn(body, false))
+	c.flagGuardedReadFlags = withEntries(read, c.flagGuardedReleasesIn(body, true))
+	defer func() { c.flagGuardedFlags, c.flagGuardedReadFlags = write, read }()
+	analyze()
+}
+
+// withEntries returns base with extra added, without changing base.
+func withEntries(base, extra map[string]string) map[string]string {
+	if len(extra) == 0 {
+		return base
+	}
+	merged := maps.Clone(base)
+	if merged == nil {
+		merged = make(map[string]string, len(extra))
+	}
+	maps.Copy(merged, extra)
+	return merged
+}
+
 // isFlagGuarded reports whether mutexName's lock is released by a deferred,
 // flag-guarded unlock (see detectFlagGuardedReleaseFlags).
 func (c *Checker) isFlagGuarded(mutexName string) bool {
@@ -63,8 +110,20 @@ func (c *Checker) isFlagGuarded(mutexName string) bool {
 	return ok
 }
 
+// isReadFlagGuarded is isFlagGuarded for the read half.
+func (c *Checker) isReadFlagGuarded(mutexName string) bool {
+	_, ok := c.flagGuardedReadFlags[mutexName]
+	return ok
+}
+
 func (c *Checker) unlockIsGuardedByFlag(mutexName string, pos token.Pos) bool {
 	flag := c.flagGuardedFlags[mutexName]
+	return flag != "" && positionInsideFlagGuard(c.function, pos, flag)
+}
+
+// runlockIsGuardedByFlag is unlockIsGuardedByFlag for the read half.
+func (c *Checker) runlockIsGuardedByFlag(mutexName string, pos token.Pos) bool {
+	flag := c.flagGuardedReadFlags[mutexName]
 	return flag != "" && positionInsideFlagGuard(c.function, pos, flag)
 }
 

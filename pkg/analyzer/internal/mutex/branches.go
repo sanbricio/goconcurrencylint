@@ -11,7 +11,7 @@ import (
 // analyzeRangeStatement handles range statements
 func (c *Checker) analyzeRangeStatement(stmt *ast.RangeStmt, stats map[string]*Stats) {
 	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt, stmt.Body)
-	c.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
+	c.loopCarry.reportDeferredUnlocksInLoop(stmt, stmt.Body)
 	c.forgetFactsAssignedIn(stmt)
 	rangeStats := c.analyzeBlock(stmt.Body, stats)
 	c.leaveLoop(stmt)
@@ -136,14 +136,18 @@ func (c *Checker) analyzeBranchClauses(clauses []branchClause, exhaustive bool, 
 	}
 
 	if exhaustive {
-		// All arms agree (terminating ones included): adopt the common state.
-		if merged := c.convergedBranchState(branchStats, nil); merged != nil {
+		// Arms that terminate never reach the code after the statement, so
+		// only the surviving arms need to agree, and the state carried forward
+		// is theirs. Agreeing on the balance at exit is not agreeing on what is
+		// held now: an arm that re-locks and returns under a deferred unlock
+		// balances like an arm that falls through unlocked, and only the second
+		// one reaches the next statement.
+		if merged := c.convergedBranchState(branchStats, terminates); merged != nil {
 			copyStatsMap(stats, merged)
 			return
 		}
-		// Arms that terminate never reach the code after the statement, so
-		// only the surviving arms need to agree.
-		if merged := c.convergedBranchState(branchStats, terminates); merged != nil {
+		// Every arm terminates: adopt the common state when they agree.
+		if merged := c.convergedBranchState(branchStats, nil); merged != nil {
 			copyStatsMap(stats, merged)
 			return
 		}
@@ -198,6 +202,7 @@ func (c *Checker) analyzeIfStatement(stmt *ast.IfStmt, stats map[string]*Stats) 
 	if stmt.Init != nil {
 		c.analyzeStatement(stmt.Init, stats)
 	}
+	c.applyReleasingCallIn(stmt.Cond, stats)
 
 	if c.refine != nil {
 		if c.analyzeDecidedIf(stmt, stats) {
@@ -237,6 +242,12 @@ func (c *Checker) mergeIfBranches(stmt *ast.IfStmt, stats, thenStats, elseBase m
 		elseTerminates := c.termination.elseAlwaysTerminates(stmt.Else) || c.branchEnded()
 
 		if c.canMergeBranchStates(thenStats, elseStats) {
+			// The states agree on the balance at exit; carry forward the one
+			// that reaches the next statement (see analyzeBranchClauses).
+			if thenTerminates && !elseTerminates {
+				copyStatsMap(stats, elseStats)
+				return
+			}
 			copyStatsMap(stats, thenStats)
 			return
 		}
@@ -446,7 +457,7 @@ func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string
 		}
 	}
 
-	if c.tryLock.applyToBranch(cond, thenStats) {
+	if c.tryLock.applyToBranch(cond, thenStats, elseStats) {
 		return thenStats, elseStats
 	}
 
@@ -459,6 +470,11 @@ func (c *Checker) branchInitialStatsForCondition(cond ast.Expr, stats map[string
 
 	call, varName, method, ok := c.tryLockConditionTarget(cond)
 	if !ok {
+		return thenStats, elseStats
+	}
+	// The receiver type's own Lock taking its inner lock through TryLock is
+	// the contract it implements, as a direct call there would be.
+	if c.wrapper.resolve(varName, method) {
 		return thenStats, elseStats
 	}
 
@@ -581,8 +597,12 @@ func (c *Checker) analyzeGoStatement(stmt *ast.GoStmt, stats map[string]*Stats) 
 			c.facts = c.facts.clone()
 			c.pathEnded = false
 		}
-		goStats := c.analyzeBlock(fnLit.Body, goInitial)
+		var goStats map[string]*Stats
+		c.withGoroutineFlagGuards(fnLit.Body, func() {
+			goStats = c.analyzeBlock(fnLit.Body, goInitial)
+		})
 		c.facts, c.pathEnded = savedFacts, savedEnded
+		c.dropHandedOffAcquisitions(fnLit, goStats)
 		cg.suppressBorrowedReleases(goStats, crossReleases)
 		c.reportUnmatchedLocksInBranch(goInitial, goStats, "goroutine")
 		cg.applyReleases(stats, crossReleases)
@@ -677,7 +697,7 @@ func (c *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stats
 	}
 
 	newLoopMutexDetector(c.errorCollector, c.typesInfo).check(stmt, stmt.Body)
-	c.loopCarry.reportDeferredUnlocksInLoop(stmt.Body)
+	c.loopCarry.reportDeferredUnlocksInLoop(stmt, stmt.Body)
 	if c.analyzeLockingLoopCondition(stmt, stats) {
 		return
 	}
@@ -685,14 +705,67 @@ func (c *Checker) analyzeForStatement(stmt *ast.ForStmt, stats map[string]*Stats
 	if stmt.Cond != nil {
 		c.assumeCondition(stmt.Cond, true)
 	}
+	unbreakable := stmt.Cond == nil && c.termination.blockContainsReturn(stmt.Body) && !c.termination.blockContainsBreak(stmt.Body)
+	var exits *exitCollector
+	if unbreakable && c.rawBodyEffects {
+		exits = newExitCollector(stmt.Body, c.exits)
+		c.exits = exits
+	}
 	forStats := c.analyzeBlock(stmt.Body, stats)
+	if exits != nil {
+		c.exits = exits.outer
+	}
 	c.leaveLoop(stmt)
-	c.loopCarry.applyLoopExitLocks(stmt, stats, forStats)
-	if stmt.Cond == nil && c.termination.blockContainsReturn(stmt.Body) && !c.termination.blockContainsBreak(stmt.Body) {
+	c.loopCarry.applyLoopExitLocks(stmt, stats, forStats, c.resolveLockAlias)
+	if unbreakable {
+		// Nothing runs after a loop left only by return. A simulated callee's
+		// effect is the state it returns with, so take the one its returns
+		// agree on; when they disagree, assume no net effect, as the
+		// simulation does elsewhere when it cannot tell.
+		if exits != nil {
+			if merged := c.convergedBranchState(exits.states, nil); merged != nil {
+				copyStatsMap(stats, merged)
+			}
+			return
+		}
 		clearStats(stats)
 		return
 	}
 	copyStatsMap(stats, forStats)
+}
+
+// exitCollector records, while a body is simulated (a loop left only by
+// return, or a literal run in place), the state each of its returns leaves
+// with. Returns inside a nested function literal belong to that literal and
+// are not recorded.
+type exitCollector struct {
+	returns map[*ast.ReturnStmt]bool
+	states  []map[string]*Stats
+	outer   *exitCollector
+}
+
+func newExitCollector(body *ast.BlockStmt, outer *exitCollector) *exitCollector {
+	returns := make(map[*ast.ReturnStmt]bool)
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			returns[n] = true
+		}
+		return true
+	})
+	return &exitCollector{returns: returns, outer: outer}
+}
+
+// recordExit saves the state ret leaves with in every enclosing collector
+// that owns it.
+func (c *Checker) recordExit(ret *ast.ReturnStmt, stats map[string]*Stats) {
+	for col := c.exits; col != nil; col = col.outer {
+		if col.returns[ret] {
+			col.states = append(col.states, cloneStatsMap(stats))
+		}
+	}
 }
 
 // analyzeLockingLoopCondition handles, in a refined run, a loop whose condition
